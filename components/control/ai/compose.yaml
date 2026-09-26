@@ -1,0 +1,99 @@
+# llama.cpp server — the optional generation endpoint (component `ai`, AI integration).
+# Optional by construction: NO shipped example includes this file, so a `minimal`, `standard` or
+# `full` bring-up needs no AI image, no weights and no AI credential. An operator opts in by adding
+# one `include:` line and the variables listed in examples/full/README.md. Read CONTRACT.md first:
+# it states what is verified upstream, what is not, and what has never been run.
+services:
+  ai:
+    image: ${LO_AI_IMAGE:?the llama.cpp server image, pinned to a digest you resolved yourself - see CONTRACT.md, the tag-to-release mapping is UNVERIFIED}
+    # Nothing infrastructure-grade upgrades itself: the daemon must never pull this image at boot.
+    # The measured capability manifest (LO_AI_CAPABILITY) describes the behaviour of ONE build of the
+    # serve, so a silent pull would put an unmeasured binary behind numbers that were measured against
+    # another one. Resolve the digest, pull it deliberately, and pin it here.
+    pull_policy: never
+    # Upstream's `server` stage ends in `ENTRYPOINT ["/app/llama-server"]` (.devops/cpu.Dockerfile at
+    # tag v0.4.0), so every item below is an ARGUMENT to that executable, not a command line.
+    # Defaults are passed explicitly rather than relied on: --host and --port have defaults
+    # (127.0.0.1 / 8080) and the server image also sets ENV LLAMA_ARG_HOST=0.0.0.0, and a manifest
+    # that inherits a listen address from an image build can change address when the image is rebuilt.
+    # What is deliberately NOT here:
+    #   --tools / --agent   upstream's own help calls these "experimental: ... do not enable in
+    #                       untrusted environments" and lists read_file, write_file and
+    #                       exec_shell_command among them; this component serves text, not an agent.
+    #                       local_observe/ai/capability.py refuses a manifest that claims tools:true.
+    #   --cors-origins      no browser reaches this container: the service publishes no host port at
+    #                       all (see CONTRACT.md "Why nothing is published").
+    #   --embedding/-np     left at upstream defaults; `parallel` in the capability manifest records
+    #                       whatever the serve actually came up with, measured, not assumed.
+    command:
+      - --model
+      - /models/${LO_AI_MODEL_FILE:?the GGUF file name inside the directory LO_AI_MODEL_DIR mounts read-only}
+      - --alias
+      - ${LO_AI_MODEL:?one-line model id; the client asks for THIS string, because without --alias the API reports the weight path instead}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - ${LO_AI_CTX_SIZE:?the context you measured on this host with these weights; capability.context_tokens must be the same number}
+      - --api-key-file
+      - /run/secrets/ai-api-key
+      - --no-webui
+      - --no-slots
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    # The one resource ceiling this manifest makes mandatory. A model server's memory is the size of
+    # the weights plus the KV cache: cap it below that and the container is OOM-killed during model
+    # load, which reads as a broken model; leave it uncapped and one operator typo takes the host. So
+    # it is required, with the operator's own number, and CONTRACT.md states the RAM it costs against
+    # the 16 GB reference floor.
+    mem_limit: ${LO_AI_MEM_LIMIT:?memory ceiling for the serve, at least the weights plus the KV cache plus headroom}
+    # Generous on purpose: llama.cpp runs one worker thread per hardware thread it is allowed to
+    # use, and threads count against pids_limit. A cap tuned for a web API (the other manifests here
+    # use 96-128) would kill a CPU inference server that simply used its cores.
+    pids_limit: 512
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    secrets:
+      - ai-api-key
+    volumes:
+      # Weights are overlay-owned: never in git, never downloaded by a service on boot. The bind is
+      # read-only with create_host_path: false for the reason full example gaps recorded for Dagu's DAG directory
+      # - a missing directory must stop the boot rather than mount an empty one Docker made for you,
+      # because the failure mode of an empty /models is a serve that answers /health for a model that
+      # is not there. Read it as uid 65532, so the file and every parent directory need read access.
+      - type: bind
+        source: ${LO_AI_MODEL_DIR:?absolute directory holding the GGUF weights, created by the operator}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs: [/tmp:size=64m]
+    healthcheck:
+      # Legitimate and verified, not a guess: the image installs curl (`.devops/cpu.Dockerfile`, the
+      # `base` stage installs libgomp1, curl and ffmpeg) and upstream's own `server` stage declares
+      # HEALTHCHECK CMD ["curl","-f","http://localhost:8080/health"]. `GET /health` performs no API
+      # key check, so the probe needs no credential, and it answers 503 while the weights load.
+      # The state that matters to the operator is NOT this one: the portal tile reads the
+      # `model` observation published by local_observe/platform/overview_worker.py, which asks the
+      # same endpoint and also checks the capability manifest. This probe is here so a plain
+      # `docker compose ps` does not lie about a serve that is still loading.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Cold-reading tens of gigabytes of weights from disk is minutes, not seconds. A short
+      # start_period reports "unhealthy" while the serve is doing exactly what it was told to do.
+      start_period: 300s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+secrets:
+  ai-api-key:
+    # One key per line, upstream's format for --api-key-file ("path to file containing API keys, one
+    # per line; lines starting with a hash are treated as comments"). The credential arrives as a
+    # mounted file, never an environment value: an env value is readable through `docker inspect` and
+    # /proc/<pid>/environ. Generate a value of at least 24 characters, because the product's own HTTP
+    # client (local_observe/http.py) refuses shorter credentials rather than sending them.
+    file: ${LO_AI_API_KEY_FILE:?absolute path to a file holding one llama.cpp API key per line}

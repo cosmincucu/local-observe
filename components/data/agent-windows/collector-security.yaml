@@ -1,0 +1,71 @@
+# Windows Security-channel overlay -- OPT-IN, not part of the agent as shipped.
+#
+# collector.yaml never references anything in this file, so the default agent collects no Security
+# events. You select it by adding it as a second config location (confmap merges maps key by key,
+# so this adds one receiver and one logs pipeline and changes nothing else):
+#
+#   otelcol-contrib.exe --config file:collector.yaml --config file:collector-security.yaml
+#
+# Running this file on its own is a refusal, not a smaller agent: it names file_storage,
+# memory_limiter, resource/identity and otlp_http without defining them, because they belong to
+# collector.yaml. Keep the two files together and in that order.
+#
+# PRIVILEGE. Opening the Security channel needs the "Manage auditing and security log" right
+# (SeSecurityPrivilege). Without it `ignore_channel_errors` -- left at its default of false here on
+# purpose -- makes the whole agent refuse to start: metrics and file logs included, not just this
+# pipeline. That is deliberate (an agent that cannot do the one thing you enabled is not the agent
+# you configured) and it is avoidable: run the pre-flight in CONTRACT.md before you enable this.
+# Set ignore_channel_errors: true only if you accept the opposite trade -- the agent stays up and
+# collects no Security events, visible only in its own log.
+#
+# WHAT IS OFF. Without this overlay the host sends host metrics and the approved file glob only: no
+# Windows Event Log data of any kind reaches the store, so no Windows detection can ever fire, and
+# the store raises no Security finding however long it runs. Every other host is unaffected.
+#
+# COLLECTED. Six Security event ids, named below, all from one channel. If an audit subcategory is
+# off on this host its event never exists to collect -- audit policy is scoped separately from this
+# file (see CONTRACT.md). Volume is dominated by 4624; on a chatty host lower max_reads, raise
+# poll_interval, or delete that EventID from the query below.
+receivers:
+  # `channel` and `query` cannot both be set in this pinned build -- it refuses with "either
+  # `channel` or `query` must be set, but not both" -- so the channel is named inside the XML
+  # query (Path="Security") instead of in a `channel:` field. The refusal text therefore reports an
+  # empty channel name; CONTRACT.md quotes it verbatim so an operator recognises it.
+  windows_event_log/security:
+    # No backfill: on a first start the receiver reads only events raised after it began, so a
+    # newly enabled agent cannot flood the store with the channel's history. Bookmarks below carry
+    # the position across restarts, which is what makes "end" safe rather than lossy.
+    start_at: end
+    # Records read into memory per batch (upstream default 100, stated rather than inherited).
+    max_reads: 100
+    # How often the channel is polled for new entries; the read continues until drained.
+    poll_interval: 5s
+    # A structured body (channel, provider name, event id, event data) and not the raw XML string:
+    # nothing downstream in this repository parses XML event bodies, so the XML would be payload
+    # nobody reads and everybody stores.
+    raw: false
+    # Bookmarks in the extension collector.yaml already declares. Without storage they live in
+    # memory only and every restart re-reads the position from `start_at`.
+    storage: file_storage
+    retry_on_failure:
+      # Same posture as the filelog receiver above: on a downstream error, pause this receiver and
+      # resend the current batch instead of dropping it. Upstream bounds the retry at
+      # max_elapsed_time 5m by default -- an outage of the front door longer than that, with the
+      # 1000-request export queue behind it also full, loses events. Stated here so nobody reads
+      # "persistent queue" and believes the buffer is unbounded.
+      enabled: true
+    query: |
+      <QueryList>
+        <Query Id="0">
+          <Select Path="Security">
+            *[System[(EventID=4624 or EventID=4625 or EventID=4688
+                     or EventID=1102 or EventID=4720 or EventID=4732)]]
+          </Select>
+        </Query>
+      </QueryList>
+service:
+  pipelines:
+    logs/security:
+      receivers: [windows_event_log/security]
+      processors: [memory_limiter, resource/identity]
+      exporters: [otlp_http]

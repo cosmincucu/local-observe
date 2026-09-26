@@ -1,0 +1,39 @@
+{
+  "resolved_at": "2026-09-06T11:09:15.758726+00:00",
+  "images": {
+    "LO_CLICKHOUSE_IMAGE": {
+      "candidate": "clickhouse/clickhouse-server:25.12.5",
+      "source_index_digest": "sha256:cacf32d6884291dc2ff5e0156a97f46fc53ff7c929a7906d114e268a929dfd3a",
+      "image": "clickhouse/clickhouse-server@sha256:10f54f04de6c61b756c4eaf9f1d17464a4ac3e1f94b5b410e0dec92a24dbeda8",
+      "platform": "linux/amd64"
+    },
+    "LO_ZOOKEEPER_IMAGE": {
+      "candidate": "signoz/zookeeper:3.9.3",
+      "source_index_digest": "sha256:2982759ec21211d52514154a5c87d2bbe6725d94cfa864cdfea2f7040b7bd365",
+      "image": "signoz/zookeeper@sha256:25a3343f3508f1112fec955ae04985b0e506fa4665905182d98486cad6118cb1",
+      "platform": "linux/amd64"
+    },
+    "LO_SIGNOZ_IMAGE": {
+      "candidate": "signoz/signoz:v0.138.0",
+      "source_index_digest": "sha256:0061009f21bf976a5374b6f73f98aa96f6f335d3ac753d6a792c6b3dc91a2328",
+      "image": "signoz/signoz@sha256:67c704a462cf69c556c91843d129138221f171701a884f227d24a9396e48f59e",
+      "platform": "linux/amd64"
+    },
+    "LO_SIGNOZ_COLLECTOR_IMAGE": {
+      "candidate": "signoz/signoz-otel-collector:v0.144.8",
+      "source_index_digest": "sha256:6d1a59bc553e041014597eff0970608948c5c7447aaa984c4d109f2bc9f4062c",
+      "image": "signoz/signoz-otel-collector@sha256:283adc9cc900551c4820e12e07e718839a7161472371363eceb68b089b06f1f6",
+      "platform": "linux/amd64"
+    },
+    "LO_OTEL_IMAGE": {
+      "candidate": "otel/opentelemetry-collector-contrib:0.159.0",
+      "source_index_digest": "sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc",
+      "image": "otel/opentelemetry-collector-contrib@sha256:4f4276c07cee9055f2ab630a86330243f85e208c388ee697bea2a44dab896c3f",
+      "platform": "linux/amd64"
+    }
+  },
+  "errors": {},
+  "runtime_conformance": "not-run",
+  "image_downloads": "not-run",
+  "status": "resolved"
+}

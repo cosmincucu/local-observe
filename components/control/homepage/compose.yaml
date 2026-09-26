@@ -1,0 +1,50 @@
+services:
+  homepage:
+    image: ${LO_HOMEPAGE_IMAGE:?pin the portal image by digest}
+    pull_policy: never
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    working_dir: /app
+    entrypoint: [node]
+    command: [/bootstrap.cjs]
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /app/.next/cache:size=32m,uid=65532,gid=65532
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      HOMEPAGE_ALLOWED_HOSTS: ${LO_HOMEPAGE_ALLOWED_HOSTS:?the host:port the operator's browser uses}
+      HOMEPAGE_FILE_OVERVIEW_TOKEN: /run/secrets/homepage-overview-token
+      LOG_TARGETS: stdout
+      NEXT_TELEMETRY_DISABLED: "1"
+    secrets:
+      - homepage-overview-token
+    volumes:
+      - type: bind
+        source: ${LO_HOMEPAGE_CONFIG_DIR:?absolute path to the rendered portal config directory}
+        target: /app/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${LO_HOMEPAGE_BOOTSTRAP:?absolute path to the deployed scripts/homepage_start.cjs}
+        target: /bootstrap.cjs
+        read_only: true
+        bind: {create_host_path: false}
+    ports: ["127.0.0.1:${LO_HOMEPAGE_PORT:-18097}:3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(require('node:fs').existsSync('/tmp/portal-ready') ? 0 : 1)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+secrets:
+  homepage-overview-token:
+    file: ${LO_HOMEPAGE_TOKEN_FILE:?absolute path to the portal's summary-role token file}

@@ -1,0 +1,29 @@
+# Job-observation example. The unit names below are generic placeholders in the shape a real host
+# uses (`<job>.timer` / `<job>.service`), not a declaration of any host's unit list: a deployment
+# substitutes the units it actually runs.
+schema_version: 1
+resources:
+  - id: ff7e6e99-1fab-586e-92de-048a4df8211b
+    kind: host
+    name: host-job-observation
+    aliases: []
+    attributes: {environment: staging-observer, remediation_enabled: false}
+    relations: []
+  - id: e8280b58-fed7-551d-9a95-d8e82720148a
+    kind: backup-job
+    name: host-scheduled-backup
+    aliases: []
+    attributes: {timer: scheduled-backup.timer, service: scheduled-backup.service, remediation_enabled: false}
+    relations: [{type: runs-on, target: ff7e6e99-1fab-586e-92de-048a4df8211b}]
+  - id: a58f4789-528b-5087-9463-cd58b4c25abe
+    kind: service
+    name: host-detection-refresh
+    aliases: []
+    attributes: {timer: detection-refresh.timer, service: detection-refresh.service, remediation_enabled: false}
+    relations: [{type: runs-on, target: ff7e6e99-1fab-586e-92de-048a4df8211b}]
+  - id: cccccccc-cccc-5ccc-8ccc-ccccccccccc3
+    kind: service
+    name: staging-job-fixture
+    aliases: []
+    attributes: {environment: synthetic, remediation_enabled: false}
+    relations: [{type: runs-on, target: ff7e6e99-1fab-586e-92de-048a4df8211b}]

@@ -1,0 +1,186 @@
+# LAN synthetics: the probe engine (Gatus) plus this product's adapter that turns one engine's
+# results into platform events. Moved here out of examples/platform/staging.compose.yaml by synthetics component,
+# which is what makes the row in docs/COMPONENTS.md a component instead of a staging accident.
+#
+# Both services stay internal: neither publishes a host port, so `gatus` and `detector` are absent
+# from scripts/check_foundation.py's HOST_PUBLISHED_SERVICES to keep both services internal.
+# Gatus ships a status page; adding it means a loopback publication and a name on that tuple, which
+# is a review argument, not an edit to this file. See CONTRACT.md "If disabled" for what deleting
+# these two services costs, and components/control/synthetics/CONTRACT.md for the credential shape.
+services:
+  gatus:
+    # Pinned by digest in components/control/synthetics/versions.json, which also records the digest
+    # this service ran before 2026-09-09 and why it could not be attributed to a release. The value
+    # is the linux/amd64 image digest, so `platform` below is not decoration: without it a host on
+    # another architecture resolves a manifest this repository never read.
+    image: ${LO_GATUS_IMAGE:?pin the resolved Gatus image by digest}
+    platform: linux/amd64
+    # Never pull at boot: the value under review is the artefact that runs (same rule as every other
+    # manifest here). Upstream's Dockerfile is `FROM scratch` with one binary and a CA bundle, so
+    # there is nothing in the image to execute a healthcheck against — see the note in CONTRACT.md
+    # and the `not-run` row in conformance.md. Engine liveness is a coverage verdict in the platform,
+    # not a container state: when this service is down or its answers are stale,
+    # detections.evaluate() opens `coverage` and never resolves the underlying condition.
+    pull_policy: never
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # 128 MiB / 0.5 cpu / 64 pids is the shape the platform stage has run with since logging. It is a
+    # bound, not a measurement, and it is a small one: sqlite on /data plus one goroutine per probe.
+    # Re-check it against the pinned release before calling it adequate (upgrade.md).
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    volumes:
+      # Gatus's own history (sqlite): results, events, uptime and response-time windows. It is not
+      # platform authority and is backed up separately from the platform database — backup.md.
+      - gatus-data:/data
+      - type: bind
+        # The operator's rendered Gatus document. The product ships the shape in this directory
+        # (config.yaml); the targets inside it are the overlay's (overlay compatibility). Read-only, and
+        # create_host_path: false, so a path nobody wrote stops the boot instead of mounting an
+        # empty file Gatus would then reject with a config error.
+        source: ${LO_GATUS_CONFIG:?absolute path to the rendered Gatus config file}
+        target: /config/config.yaml
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  detector:
+    # The adapter is product code, so it runs in the platform image, not in Gatus's.
+    image: ${LO_PLATFORM_IMAGE:?build the platform image and pin its local id}
+    pull_policy: never
+    command: [python, -m, local_observe.platform.detection_worker]
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      # One rule document per detector process, mounted read-only from LO_DETECTION_RULE_DIR.
+      # The limitation is real and named in docs/COMPONENTS.md's synthetics row: one rule means one
+      # service, so a second monitored target needs a second detector service (or the rule-list
+      # change CONTRACT.md describes), not a second condition in this file.
+      LO_DETECTION_RULE: /rules/availability.yaml
+      LO_INDEX_PATH: /inventory/inventory.db
+      LO_DETECTION_CURSOR: /data/cursor.json
+      # The engine's evaluation cadence, in seconds, 5..3600: the width of the window the adapter
+      # closes on each tick, the interval it refuses to re-run, and the bound the healthcheck below
+      # reads. Bounded in the worker (detection_worker.window_from_environment), which refuses a
+      # value outside it rather than silently adopting one; the healthcheck's staleness bound is
+      # derived from this same value at run time, so the two cannot drift.
+      LO_DETECTION_WINDOW_SECONDS: ${LO_DETECTION_WINDOW_SECONDS:-5}
+      # Gatus addresses an endpoint by its key, which upstream derives as
+      # sanitize(group) + "_" + sanitize(name) (config/key/key.go at v5.36.0) — not by the name the
+      # config file shows. The default is the key of the one endpoint config.yaml in this directory
+      # declares (group lo, name platform-http). A key that does not exist answers 404 and the
+      # adapter files coverage, never a fake verdict; CONTRACT.md states how to read the key back.
+      LO_GATUS_URL: ${LO_GATUS_URL:-http://gatus:8080/api/v1/endpoints/lo_platform-http/statuses}
+      LO_PLATFORM_URL: ${LO_PLATFORM_URL:-http://platform:8002}
+      # Paths, not values (secret files): local_observe/credentials.read_credential prefers the *_FILE form
+      # and the values arrive as the mounts declared at the foot of this file. An environment value
+      # is readable through `docker inspect` and /proc/<pid>/environ on this host.
+      # LO_GATUS_TOKEN_FILE holds the HTTP Basic credential pair for the engine —
+      # base64("<username>:<password>"), no trailing newline — because the pinned Gatus release has
+      # no bearer-token option for the status route this process reads. CONTRACT.md "Credential"
+      # names the upstream files that decide that and the one-line generator.
+      LO_GATUS_TOKEN_FILE: /run/secrets/gatus-token
+      # The container-side NAME stays `LO_PRODUCER_TOKEN_FILE`, because that is the name the worker reads
+      # (the `_FILE` variable `read_credential` resolves in `detection_worker.main()`). What moved is the HOST file
+      # this secret reads: it is this service's own, named by `LO_DETECTOR_PRODUCER_TOKEN_FILE` at the
+      # foot of this file, and the `identity` of the row inside it is the `source` the mounted rule
+      # document names — not the Sigma runner's identity. The whole reason is that comment.
+      LO_PRODUCER_TOKEN_FILE: /run/secrets/detector-producer-token
+      # The engine and the platform are both plaintext HTTP on this project network, which
+      # local_observe/http.py refuses unless this is 1. Set 0 when both are TLS.
+      LO_INTERNAL_ALLOW_HTTP: ${LO_INTERNAL_ALLOW_HTTP:-1}
+    secrets:
+      - gatus-token
+      - detector-producer-token
+    volumes:
+      - detector-data:/data
+      - type: bind
+        source: ${LO_PLATFORM_INDEX_DIR:?inventory snapshot directory}
+        target: /inventory
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${LO_DETECTION_RULE_DIR:?detection rule directory}
+        target: /rules
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      # "Healthy" here means one thing: this process closed a window recently. It reads the cursor's
+      # mtime, which every successful tick rewrites (once when the batch is built, once when intake
+      # acknowledged it), so a detector that cannot reach the platform or the engine goes unhealthy
+      # after three windows and says so with its own container state rather than with silence.
+      # The bound is `max(3 * window, 60)` computed from the same environment value the worker
+      # validates: 60 s at the default 5 s window, 3 h at 3600 s. A non-numeric value makes the
+      # worker refuse to start, and this probe refuse to pass, which is the intended pair.
+      # What it cannot say: whether Gatus is alive. The engine runs `FROM scratch` and hosts no
+      # probe of its own (see the note above), so engine loss arrives as a `coverage` event.
+      test:
+      - CMD
+      - python
+      - -c
+      - >-
+        import os,sys,time; p=os.environ['LO_DETECTION_CURSOR'];
+        w=max(int(os.environ.get('LO_DETECTION_WINDOW_SECONDS','5')),5);
+        sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < max(3*w,60) else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+volumes:
+  gatus-data:
+  detector-data:
+secrets:
+  # Every comment here sits ABOVE its secret name, not between the name and its `file:` line:
+  # tests/test_scripts_lib.py asserts each token file the stage driver writes is declared as
+  # `<name>:` immediately followed by `file: ${LO_*_TOKEN_FILE}`, and a comment in between reads to
+  # that check as a secret fed by nothing.
+  #
+  # base64("<username>:<password>") — see CONTRACT.md, and write it with printf: one trailing
+  # newline is stripped by read_credential and a second one is a credential that never matches.
+  # Mode 0444: Compose bind-mounts a `file:` secret with its host ownership and mode, and this
+  # container has no uid mapping to inherit it from.
+  gatus-token:
+    file: ${LO_GATUS_TOKEN_FILE:?absolute path to the engine credential file (base64 user:password)}
+  # One credential row = one identity, so this is the producer row minted for the DETECTOR identity and
+  # not the Sigma runner's `${LO_PRODUCER_TOKEN_FILE}` (that sharing is the dedicated detector credential, fixed 2026-09-10, the
+  # same defect anomaly deployment support found in components/control/anomaly at the dedicated anomaly credential). One row of the platform's
+  # credentials file carries exactly one `identity`, and `local_observe/platform/state.py` refuses an
+  # event whose `source` is not the identity the request authenticated as — `Source identity differs
+  # from authenticated producer`, answered as HTTP 400 with `error: not_authorised` (`api.py`'s
+  # `stable_code`, read from source and never observed from a container here). One token therefore
+  # cannot stand for two producers.
+  #
+  # This process takes its identity from the RULE DOCUMENT, not from its environment: `tick()` posts
+  # `source=rule['source']` and `detections.evaluate()` stamps that same value on both the `availability`
+  # finding and the `.coverage` event. There is deliberately no `LO_DETECTOR_SOURCE` variable to set, so
+  # the rule is the only place the name lives — and EVERY document in `LO_DETECTION_RULE_DIR` must name
+  # the identity this token was minted for, or that rule's events are refused at intake.
+  #
+  # What that refusal looks like from outside, since it is the reason the fix is not visible in `docker
+  # ps`: the sample this process posts first is ACCEPTED (`Store.put_evidence` keys evidence by the
+  # authenticated identity and reads no `source` field), so a wrong token leaves evidence rows filed
+  # under someone else's name; the event is refused; the `pending` batch is retained and retried every
+  # 2 s; and because a retained batch never re-enters the build branch, the cursor file is never written
+  # again. So — unlike the anomaly producer, whose healthcheck stays green through exactly this failure —
+  # this container goes `unhealthy` about `max(3 × window, 60) s` after the first refusal, and says only
+  # "stopped closing windows": the WARNING names the exception class (`TransportError`), never the
+  # refusal sentence, which is at DEBUG level only. The dedicated detector credential.
+  #
+  # Never a freshly generated secret either: the platform authenticates this process against the
+  # credentials list it already has. Staging the row and the file is examples/full/README.md step 5.
+  # The Compose resource NAME stays distinct from the Sigma manifest's `producer-token` for the other
+  # reason — two include entries declaring one secret name is a merge conflict waiting to happen.
+  detector-producer-token:
+    file: ${LO_DETECTOR_PRODUCER_TOKEN_FILE:?absolute path to the credential file minted for the detector identity}

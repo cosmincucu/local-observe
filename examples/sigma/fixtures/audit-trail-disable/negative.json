@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "case": "negative",
+  "rule": "audit-trail-disable.yaml",
+  "note": "The near misses this rule exists to survive: reading audit policy, listing rules, asking for status, starting the daemon, enabling it (-e 1), and a different service stopped. Each is a record a healthy host ships routinely, so a rule that matched any of them would fire on every window and say nothing.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 8,
+    "usable_count": 8,
+    "match_count": 0
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000013",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/sbin/auditctl",
+        "process.command_line": "auditctl -p"
+      }
+    },
+    {
+      "timestamp_ns": 1788955171000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000014",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/sbin/auditctl",
+        "process.command_line": "auditctl -l"
+      }
+    },
+    {
+      "timestamp_ns": 1788955172000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000015",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/sbin/auditctl",
+        "process.command_line": "auditctl -e 1"
+      }
+    },
+    {
+      "timestamp_ns": 1788955173000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000016",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/systemctl",
+        "process.command_line": "systemctl status auditd"
+      }
+    },
+    {
+      "timestamp_ns": 1788955174000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000017",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/systemctl",
+        "process.command_line": "systemctl start auditd"
+      }
+    },
+    {
+      "timestamp_ns": 1788955175000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000018",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/systemctl",
+        "process.command_line": "systemctl stop docker"
+      }
+    },
+    {
+      "timestamp_ns": 1788955176000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000019",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/journalctl",
+        "process.command_line": "journalctl -u auditd"
+      }
+    },
+    {
+      "timestamp_ns": 1788955177000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000020",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/auditd",
+        "process.command_line": "/usr/sbin/auditd"
+      }
+    }
+  ]
+}

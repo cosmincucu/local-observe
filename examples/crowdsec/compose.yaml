@@ -1,0 +1,22 @@
+# CrowdSec optional integration — the shape an operator adds to their own top-level file
+# (docs/OPERATOR-MODEL.md §2). One `include:` of the component manifest, and nothing else: this file
+# declares no services, no volumes and no secrets of its own, so merging it beside the pinned
+# component buys a checkable model rather than a second copy of the truth.
+#
+# Deliberately NOT in scripts/check_foundation.py's EXAMPLE_MANIFESTS (a fixed three-name tuple that
+# this card does not widen), so the plain gate run does not walk it. Ask about it by name:
+#   python -B scripts/check_foundation.py --compose examples/crowdsec/compose.yaml
+# tests/test_crowdsec_component.py runs exactly that and fails if the answer stops being clean.
+#
+# It joins examples/full, examples/platform or examples/demo for a different reason than the `ai`
+# component's absence does: those three are the compositions a release names, and threat detection engine's row is
+# "Optional". docs/COMPONENTS.md §4 defines `full` as "standard plus explicitly selected optional
+# integrations", which is a selection an operator makes, not a bundle this repository starts.
+#
+# The platform side of the integration is NOT a second include entry here. It is two lines on the
+# platform service you already run — `LO_INTAKE_RULES` and one read-only bind — because a second
+# `platform:` entry would not merge (Compose keeps one definition per service name) and a second
+# container would refuse to serve anyway (the platform takes an exclusive lock on its state database).
+# README.md prints those two lines.
+include:
+  - ../../components/control/crowdsec/compose.yaml

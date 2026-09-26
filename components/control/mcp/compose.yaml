@@ -1,0 +1,165 @@
+# The MCP tool surface as a deployable service (component `mcp`, MCP component).
+#
+# Optional by construction, like `ai` and `crowdsec`: NO shipped example composition includes this
+# file, so a `minimal`, `standard` or `full` bring-up needs no MCP image and no MCP credential, and
+# the operator UI, `/v1/*` and the portal are untouched by its absence — which is exactly the row's
+# `If disabled` clause in docs/COMPONENTS.md ("Browser/UI workflows remain"). The shape to opt into
+# is one `include:` entry added to the operator's own top-level file plus the commented block in
+# `examples/full/.env.example`; CONTRACT.md first, because it states what this surface refuses and
+# what it does not do (it cannot execute anything).
+#
+# One service, and one process that owns nothing. The tool registry and every gate live in
+# `local_observe/platform/tools.py`; this container is that registry behind a bearer gate. It holds
+# no state, opens no database and declares no volume: each tool call leaves here as an HTTP request
+# to the platform signed with the *agent's own* platform credential, so the audit row names an agent
+# rather than "MCP", and destroying this container destroys nothing.
+services:
+  mcp:
+    # Built from components/control/mcp/Dockerfile by the operator (docs/BUILD.md); this repository
+    # publishes nothing and signs nothing. The digest-pinned value is the local image config ID that
+    # build printed — not a registry digest, and versions.json says so in the same words.
+    image: ${LO_MCP_IMAGE:?pin the MCP tool-surface image}
+    # Never pull on start: the value in the environment is the artefact that was reviewed. Same rule
+    # as every other manifest here, and the reason docs/BUILD.md asks for the image ID plus the
+    # source revision it came from.
+    pull_policy: never
+    # Asserted and not observed: no container has been started from this file. It is the same base
+    # interpreter, the same unprivileged uid and the same read-only root the platform image runs
+    # under; the first host run is row 2 of conformance.md and it may disagree about the memory.
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    # A bound, not a measurement. This process imports pydantic (through the SDK) and holds one
+    # small table of agents; the platform gets 256m for the state store this one does not have, so
+    # the same ceiling is generous on paper and unmeasured in fact. cpus/pids follow the sigma
+    # runner's shape: one short-lived request per tool call, no thread pool to grow.
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # The only writable path: uvicorn and the SDK want a temp directory and nothing else. Sized like
+    # the platform's, and no volume is declared anywhere in this file because nothing here is worth
+    # surviving a restart.
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=33554432"]
+    environment:
+      # The one endpoint this process talks to, and the reason `LO_PLATFORM_URL` is required rather
+      # than defaulted: `identities_with_clients` reads it with no fallback, and a surface that
+      # invented a default origin would be an agent reading a platform nobody pointed it at.
+      # Plaintext http:// inside the project network is accepted only while LO_INTERNAL_ALLOW_HTTP=1
+      # (local_observe/http.py refuses otherwise), which is the same pair of lines the sigma runner
+      # and the synthetics detector use.
+      LO_PLATFORM_URL: ${LO_PLATFORM_URL:?Platform endpoint the agents read through}
+      LO_INTERNAL_ALLOW_HTTP: ${LO_INTERNAL_ALLOW_HTTP:-1}
+      # --- the credential source, and it is exactly one of these two -------------------------------
+      # A CONTAINER path, not a host path: the map lives in the directory LO_PLATFORM_POLICY_DIR
+      # already mounts read-only at /config, beside actions.json — the same staging decision
+      # LO_NOTIFY_CHANNELS makes in the platform manifest, and for the same reason (a Compose
+      # `secrets:` entry cannot be declared conditionally, and a required one would stop the install
+      # that mounts no map at all). Blank means unset; a process with NEITHER source configured
+      # refuses to boot rather than serve an open port, and a process with BOTH refuses too.
+      # chat integration's per-agent shape: a JSON list of 1..32 rows, each with exactly the four keys
+      # {identity, role, bearer_token, platform_token}, no more than 16 KiB, bearer tokens at least
+      # 24 characters and unique across rows, roles limited to reader/proposer/executor. A
+      # malformed map, a duplicated token, a fifth key or a human-role row stops the boot.
+      # tools.read_identity_rows is the code and components/control/platform/CONTRACT.md §identity
+      # is the document; this manifest only delivers the file.
+      LO_MCP_IDENTITIES: ${LO_MCP_IDENTITIES:-}
+      # The v0.1 shape instead: one shared reader bearer, four read tools, no action pair. A
+      # container path under the same read-only mount; a shared credential has no answer to "who
+      # asked?", which is why the map is the recommended form and the row says so.
+      LO_MCP_TOKEN_FILE: ${LO_MCP_TOKEN_FILE:-}
+      # Only opened in the shape above: the platform credential this single-token process reads with.
+      # A literal path, never a value (secret files), staged in /config exactly as the platform's own
+      # /config/notify-token is; `read_credential` prefers a file over the environment form of the
+      # same name and refuses a directory, an empty file and anything over 4 KiB. Ignored when the
+      # per-agent map is configured, because each map row carries its own platform_token.
+      LO_READER_TOKEN_FILE: /config/mcp-reader-token
+      # --- the two optional capabilities, both absent-by-default in the honest way -----------------
+      # The bounded series read. Detected at boot, never assumed: with no endpoint named,
+      # platform/query.py::open_reader logs one line and answers None, and `signal_series` is then
+      # ABSENT from the advertised tool list instead of present and failing. Both values are blank by
+      # default so an install that runs no store read has one less credential to place, and the
+      # credential is a path under /config rather than a Compose secret for the same conditional-
+      # secret reason as the map. The user defaults to the read-only `lo-read` account that
+      # components/data/store-signoz/clickhouse-users.d/lo-read.compose.yaml creates: a name, not a
+      # secret, and the password stays a required file when the read is turned on.
+      LO_CLICKHOUSE_URL: ${LO_CLICKHOUSE_URL:-}
+      LO_CLICKHOUSE_READ_USER: ${LO_CLICKHOUSE_READ_USER:-lo-read}
+      LO_CLICKHOUSE_READ_PASSWORD_FILE: ${LO_MCP_READ_PASSWORD_PATH:-}
+      # The declared-graph read, same detection rule: with no index mounted,
+      # topology_neighbourhood is absent from the tool list. The snapshot directory is the SAME host
+      # directory the platform and the sigma runner already mount read-only at /inventory, mounted
+      # here read-only for the same reason — this process must not be able to build an index into the
+      # directory it reads.
+      LO_INDEX_PATH: ${LO_MCP_INDEX_PATH:-/inventory/inventory.db}
+    volumes:
+      # The platform's policy directory: actions.json, the channels document, and — since mcp tool surface —
+      # the MCP identity map live in one directory and arrive in one read-only bind. Sharing the
+      # variable is deliberate, not laziness: two variables naming two copies of a file holding
+      # bearer tokens is two files that can drift, and the drift direction that matters (one map
+      # still holding a rotated token) is exactly what a credential rotation must not leave behind.
+      # `create_host_path: false` makes a directory nobody wrote a refusal that names the path,
+      # rather than an empty directory Docker made and a boot that dies on a missing file.
+      - type: bind
+        source: ${LO_PLATFORM_POLICY_DIR:?action policy directory (holds the MCP identity map)}
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      # Optional, and read-only in the same way as the platform's own /inventory bind. A host path the
+      # environment supplies, so the gate's promise is the one it makes everywhere: we do not write
+      # there. Delete this mount and LO_MCP_INDEX_PATH must be blank, or the topology read is offered
+      # against a file that is not there.
+      - type: bind
+        source: ${LO_INVENTORY_SNAPSHOT_DIR:?immutable inventory snapshot directory}
+        target: /inventory
+        read_only: true
+        bind: {create_host_path: false}
+    # Loopback, like every other publication in this repository, and this is the widening the tuple
+    # in scripts/check_foundation.py demands an argument for:
+    #
+    #   `mcp` joins HOST_PUBLISHED_SERVICES because an MCP client is a PROCESS ON ANOTHER HOST — a
+    #   laptop running a client, or the operator's own agent runtime — and no container on the
+    #   project network can reach it: the platform's token-in-a-file model does not extend to a
+    #   process that is not in this deployment at all. The alternative (mount /mcp on the operator
+    #   factory so the platform's existing loopback port answers both) was taken down by the
+    #   reviewer's correction and costs more than it saves: it puts the 64-KiB request bound and the
+    #   SDK's per-request session machinery in the process that owns the operational database, and
+    #   it makes "the optional integration failed" (integration validation) indistinguishable from "the platform
+    #   failed" — the one distinction the row's `If disabled` clause exists to keep. The publication
+    #   itself is `127.0.0.1:`-prefixed, so nothing newly listens on an interface; reaching the port
+    #   from another machine stays the TLS-and-authentication edge decision it already was for the
+    #   portal and the console, and this component adds no protocol to it.
+    ports: ["127.0.0.1:${LO_MCP_PORT:-18100}:8003"]
+    healthcheck:
+      # A negative probe, deliberately: "the port answers 401 to a request with no credential" is
+      # this service being alive AND enforcing its one security boundary, in one line. A 200 to an
+      # unauthenticated request is a broken deploy, so the probe exits 1 if it ever sees one; a
+      # connection refused is the process being down, which is also 1. The probe sends no credential
+      # on purpose — `tools/list` with a real bearer would prove more, but only at the cost of the
+      # healthcheck reading the identity map, and a probe that opens a file of bearer tokens is a
+      # probe worth not having. Whether an authenticated tools/list answers at all is a row of
+      # conformance.md, not a claim made here.
+      test:
+      - CMD
+      - python
+      - -c
+      - |
+        import sys, urllib.error, urllib.request
+        try:
+            urllib.request.urlopen('http://127.0.0.1:8003/mcp', timeout=3)
+        except urllib.error.HTTPError as answer:
+            sys.exit(0 if answer.code == 401 else 1)
+        except Exception:
+            sys.exit(1)
+        sys.exit(1)
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      # 5m x 2, the ai/homepage ceiling rather than the platform's 10m x 3: this process writes a
+      # line per refusal and per boot, and every durable thing it did is an audit row in the
+      # platform's database, not a line in this log.
+      options: {max-size: 5m, max-file: "2"}

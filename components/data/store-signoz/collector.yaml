@@ -1,0 +1,174 @@
+# Store-internal pipeline, derived from the recorded private source configuration.
+connectors:
+  signozmeter:
+    metrics_flush_interval: 1h
+    dimensions:
+    - name: service.name
+    - name: deployment.environment
+    - name: host.name
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 64
+        auth:
+          authenticator: bearertokenauth
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth
+  prometheus:
+    config:
+      global:
+        scrape_interval: 60s
+      scrape_configs:
+      - job_name: otel-collector
+        static_configs:
+        - targets:
+          - localhost:8888
+          labels:
+            job_name: otel-collector
+processors:
+  batch:
+    send_batch_size: 10000
+    send_batch_max_size: 11000
+    timeout: 10s
+  batch/meter:
+    send_batch_max_size: 25000
+    send_batch_size: 20000
+    timeout: 1s
+  # First processor in every pipeline: shed data before the container is OOM-killed.
+  # Sized for the 1536m collector container: 1100 limit + 256 spike leaves ~180 MiB.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1100
+    spike_limit_mib: 256
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
+    metrics_flush_interval: 60s
+    latency_histogram_buckets:
+    - 100us
+    - 1ms
+    - 2ms
+    - 6ms
+    - 10ms
+    - 50ms
+    - 100ms
+    - 250ms
+    - 500ms
+    - 1000ms
+    - 1400ms
+    - 2000ms
+    - 5s
+    - 10s
+    - 20s
+    - 40s
+    - 60s
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+    enable_exp_histogram: true
+    dimensions:
+    - name: service.namespace
+      default: default
+    - name: deployment.environment
+      default: default
+    - name: signoz.collector.id
+    - name: service.version
+    - name: browser.platform
+    - name: browser.mobile
+    - name: k8s.cluster.name
+    - name: k8s.node.name
+    - name: k8s.namespace.name
+    - name: host.name
+    - name: host.type
+    - name: container.name
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # Store-side transport credential; deliberately distinct from the ingest token. It arrives as a
+  # mounted file, read by the confmap `file` provider, which signoz-otel-collector registers
+  # alongside `env` (signozcol/collector.go at v0.144.8). The provider returns the raw bytes of the
+  # file, so it must hold the token and no trailing newline: create it with `printf '%s' ...`, never
+  # `echo`.
+  bearertokenauth:
+    token: ${file:/run/secrets/store-receiver-token}
+exporters:
+  clickhousetraces:
+    datasource: tcp://clickhouse:9000/signoz_traces
+    low_cardinal_exception_grouping: ${env:LOW_CARDINAL_EXCEPTION_GROUPING}
+    use_new_schema: true
+  signozclickhousemetrics:
+    dsn: tcp://clickhouse:9000/signoz_metrics
+  clickhouselogsexporter:
+    dsn: tcp://clickhouse:9000/signoz_logs
+    timeout: 10s
+    use_new_schema: true
+  signozclickhousemeter:
+    dsn: tcp://clickhouse:9000/signoz_meter
+    timeout: 45s
+    sending_queue:
+      enabled: false
+  metadataexporter:
+    cache:
+      provider: in_memory
+    dsn: tcp://clickhouse:9000/signoz_metadata
+    enabled: true
+    timeout: 45s
+service:
+  telemetry:
+    logs:
+      encoding: json
+  extensions:
+  - health_check
+  - bearertokenauth
+  pipelines:
+    traces:
+      receivers:
+      - otlp
+      processors:
+      - memory_limiter
+      - signozspanmetrics/delta
+      - batch
+      exporters:
+      - clickhousetraces
+      - metadataexporter
+      - signozmeter
+    metrics:
+      receivers:
+      - otlp
+      processors:
+      - memory_limiter
+      - batch
+      exporters:
+      - signozclickhousemetrics
+      - metadataexporter
+      - signozmeter
+    metrics/prometheus:
+      receivers:
+      - prometheus
+      processors:
+      - memory_limiter
+      - batch
+      exporters:
+      - signozclickhousemetrics
+      - metadataexporter
+      - signozmeter
+    logs:
+      receivers:
+      - otlp
+      processors:
+      - memory_limiter
+      - batch
+      exporters:
+      - clickhouselogsexporter
+      - metadataexporter
+      - signozmeter
+    metrics/meter:
+      receivers:
+      - signozmeter
+      processors:
+      - memory_limiter
+      - batch/meter
+      exporters:
+      - signozclickhousemeter

@@ -1,0 +1,32 @@
+# Build context filter for the component images (both Dockerfiles build from the repository
+# root). The builds copy only a component requirements.lock and local_observe/, so everything
+# here is excluded to keep the context small and to keep secrets out of it. Directories that no
+# current Dockerfile copies (examples/, scripts/, inventory/, migration/) are deliberately NOT
+# excluded, so a later component build can still reach them.
+.git
+.gitattributes
+.gitea
+.codex
+.venv
+venv
+scratch
+docs
+tests
+*.log
+*.pat
+*.key
+.env
+.env.*
+*.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.wheels-*
+**/__pycache__/
+**/*.pyc

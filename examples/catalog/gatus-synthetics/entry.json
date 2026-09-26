@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "gatus-synthetics",
+  "entry_version": 1,
+  "description": "LAN synthetic probes from the adopted Gatus engine (gatus for synthetics): local_observe/platform/detection_worker.py reads one endpoint's completed results and files what the platform can judge, and the engine itself is started by an operator overlay rather than by the reference example. This entry names the component that owns the engine's image pin (the synthetics component's own versions.json) and not the platform file that still carries a compatibility mirror of it; it starts nothing.",
+  "decided_by": "D-102",
+  "capabilities": ["container-execution", "collection-network", "durable-storage", "probes", "secrets"],
+  "components": [
+    {
+      "path": "components/control/synthetics",
+      "state": "selected",
+      "relationship": "engine",
+      "pin": {
+        "file": "components/control/synthetics/versions.json",
+        "key": "image"
+      }
+    }
+  ],
+  "modules": [],
+  "if_disabled": "Scheduled LAN probes stop and no availability finding opens from a probe; declared inventory, telemetry collection, Sigma detection and notifications keep working exactly as they did without it."
+}

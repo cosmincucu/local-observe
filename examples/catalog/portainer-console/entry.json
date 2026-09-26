@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "portainer-console",
+  "entry_version": 1,
+  "description": "Portainer as an optional container console: a browser surface an operator runs beside the stack and reaches from the portal. cockpit and portainer allows shipping it as a module and documents it; nothing in this repository starts it, and no Cockpit entry exists here because Cockpit is a host package and not a container. It is a declaration of an integration, not an action: no entry grants a write path.",
+  "decided_by": "D-101",
+  "capabilities": ["container-execution", "operator-access"],
+  "components": [
+    {
+      "path": "components/control/homepage",
+      "state": "selected",
+      "relationship": "surface"
+    }
+  ],
+  "modules": [],
+  "if_disabled": "The portal shows no console link and container management stays with whatever tool the operator already uses; collection, detection and incident state are untouched."
+}

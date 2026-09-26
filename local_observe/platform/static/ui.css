@@ -1,0 +1,531 @@
+:root {
+  font-family:
+    Segoe UI,
+    Arial,
+    sans-serif;
+  color: #202a29;
+  background: #f6f8f8;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #cbd4d1;
+  background: #fff;
+  color: inherit;
+  padding: 9px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  min-height: 38px;
+}
+button:hover {
+  background: #edf3f0;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #237e69;
+  outline-offset: 2px;
+}
+svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+header {
+  height: 68px;
+  border-bottom: 1px solid #d5dedb;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  gap: 16px;
+}
+.brand,
+.session {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.brand strong {
+  font-size: 20px;
+}
+.brand > svg {
+  color: #237e69;
+  width: 25px;
+  height: 25px;
+}
+.environment {
+  font-size: 10px;
+  font-weight: 700;
+  border-left: 1px solid #cbd4d1;
+  padding-left: 12px;
+  color: #616e68;
+}
+/* The badge carries the live delivery mode, so it must be readable at a glance. */
+.environment[data-mode="live"] {
+  color: #b3261e;
+}
+.environment[data-mode="recording"] {
+  color: #237e69;
+}
+.environment[data-mode="off"] {
+  color: #616e68;
+}
+.session {
+  color: #5a6660;
+}
+.session button {
+  width: 38px;
+  padding: 0;
+}
+.workspace {
+  display: grid;
+  grid-template-columns: 192px minmax(0, 1fr);
+  min-height: calc(100vh - 68px);
+}
+nav {
+  padding: 24px 12px;
+  border-right: 1px solid #d5dedb;
+  background: #fff;
+}
+nav button {
+  border: 0;
+  background: none;
+  width: 100%;
+  justify-content: flex-start;
+  margin-bottom: 5px;
+  color: #586760;
+}
+nav button.active {
+  background: #e7f1ec;
+  color: #165d46;
+  font-weight: 600;
+}
+main {
+  padding: 28px 32px;
+  min-width: 0;
+}
+.summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid #d5dedb;
+  padding-bottom: 24px;
+  gap: 24px;
+}
+.summary div {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.summary span {
+  color: #5a6862;
+}
+.summary strong {
+  font-size: 28px;
+  font-weight: 600;
+}
+.summary div:first-child strong {
+  color: #af3f49;
+}
+.summary div:nth-child(2) strong {
+  color: #916b13;
+}
+.summary div:nth-child(3) strong {
+  color: #236c9b;
+}
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 25px 0 16px;
+}
+h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+}
+h2 {
+  font-size: 19px;
+  margin: 0 0 22px;
+}
+.heading > span {
+  color: #64716a;
+  font-size: 12px;
+}
+.filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: #fff;
+  border: 1px solid #cbd4d1;
+  border-radius: 4px;
+  padding: 0 10px;
+  width: 320px;
+  max-width: 100%;
+}
+.search input {
+  border: 0;
+  outline: none;
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  padding: 10px 0;
+}
+select {
+  min-width: 130px;
+  background: #fff;
+  border: 1px solid #cbd4d1;
+  border-radius: 4px;
+  padding: 8px;
+  color: #34443c;
+}
+.table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid #d5dedb;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  text-align: left;
+  table-layout: fixed;
+}
+th {
+  font-size: 12px;
+  font-weight: 600;
+  color: #617068;
+  background: #edf2ef;
+}
+th,
+td {
+  padding: 15px 12px;
+  border-bottom: 1px solid #dce3df;
+  overflow-wrap: anywhere;
+  vertical-align: middle;
+}
+th:first-child {
+  width: 32%;
+}
+th:last-child {
+  width: 60px;
+}
+tr:hover td {
+  background: #f0f5f2;
+}
+td button {
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+}
+.pill {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4c6357;
+}
+.pill.open,
+.pill.failed,
+.pill.dead {
+  color: #a63749;
+}
+.pill.resolved,
+.pill.succeeded,
+.pill.sent {
+  color: #1d7251;
+}
+.pill.pending,
+.pill.unknown {
+  color: #8f650c;
+}
+#empty {
+  padding: 30px 12px;
+  color: #6e7873;
+}
+#error,
+#detail-error,
+#login-error {
+  color: #a63749;
+  overflow-wrap: anywhere;
+}
+dialog {
+  border: 1px solid #cbd4d1;
+  border-radius: 6px;
+  padding: 26px;
+  box-shadow: 0 12px 48px #14282024;
+  width: 560px;
+  max-width: calc(100% - 32px);
+  max-height: 85vh;
+  overflow: auto;
+}
+dialog::backdrop {
+  background: #12271f55;
+}
+#login {
+  width: 360px;
+}
+#login label {
+  display: grid;
+  gap: 10px;
+}
+#login input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #bdcbc3;
+  border-radius: 4px;
+}
+.primary {
+  background: #1c6750;
+  color: #fff;
+  border-color: #1c6750;
+}
+.primary:hover {
+  background: #16543f;
+}
+.detail-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.detail-heading h2 {
+  overflow-wrap: anywhere;
+}
+.detail-heading button {
+  flex-shrink: 0;
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+}
+dl {
+  margin: 0;
+}
+dt {
+  font-size: 12px;
+  font-weight: 600;
+  color: #67776c;
+  margin: 16px 0 6px;
+}
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+#commands,
+.confirmation {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 24px;
+}
+#evidence button {
+  margin-top: 16px;
+}
+/* Stored verification history: read-only, and worded so a recorded verdict cannot be misread as the
+   incident's current state. A 64-character id is the widest thing this panel can be handed, so every
+   text-bearing box in it wraps anywhere rather than pushing the dialog sideways. */
+.verification {
+  margin-top: 24px;
+  border-top: 1px solid #dce3df;
+  padding-top: 6px;
+  min-width: 0;
+}
+.verification h3 {
+  font-size: 15px;
+  margin: 16px 0 0;
+}
+.verification-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.verification-heading button {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.verification p,
+.verification li,
+.verification dd {
+  overflow-wrap: anywhere;
+}
+#verification-state,
+#verification-record-state {
+  color: #5a6660;
+  font-size: 12px;
+  margin: 12px 0 0;
+}
+#verification-ids {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.verification-id {
+  width: 100%;
+  justify-content: flex-start;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.history-label {
+  font-weight: 600;
+  margin: 16px 0 4px;
+}
+.history-note,
+.history-caution {
+  font-size: 12px;
+  color: #5a6660;
+  margin: 0 0 8px;
+}
+.history-caution {
+  border-left: 3px solid #cbd4d1;
+  padding-left: 10px;
+  margin-top: 12px;
+}
+#verification-result dd.verdict {
+  font-weight: 600;
+}
+/* Deliberately the same three colours the record list uses for a status, and deliberately not the green
+   of `succeeded`: an execution can read `succeeded` while its recorded verdict reads `not_cleared`, and
+   the two must not collapse into one impression. */
+#verification-result dd.verdict.not_cleared {
+  color: #a63749;
+}
+#verification-result dd.verdict.unknown {
+  color: #8f650c;
+}
+#verification-result dd.verdict.cleared {
+  color: #236c9b;
+}
+#confirm-subject {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  header {
+    padding: 0 14px;
+    height: auto;
+    min-height: 68px;
+    flex-wrap: wrap;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+  .brand strong {
+    font-size: 18px;
+  }
+  .environment {
+    display: none;
+  }
+  .session {
+    margin-left: auto;
+    font-size: 12px;
+  }
+  .workspace {
+    display: block;
+  }
+  nav {
+    display: flex;
+    overflow-x: auto;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid #d5dedb;
+    gap: 5px;
+  }
+  nav button {
+    width: auto;
+    white-space: nowrap;
+    margin: 0;
+    font-size: 12px;
+    padding: 9px;
+  }
+  main {
+    padding: 20px 14px;
+  }
+  .summary {
+    gap: 12px;
+  }
+  .summary span {
+    font-size: 12px;
+  }
+  .summary strong {
+    font-size: 24px;
+  }
+  .heading {
+    align-items: flex-start;
+  }
+  .heading > span {
+    max-width: 110px;
+    text-align: right;
+  }
+  .filters {
+    gap: 8px;
+  }
+  .search {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+  }
+  select {
+    min-width: 115px;
+    width: 115px;
+  }
+  table {
+    min-width: 540px;
+  }
+  dialog {
+    padding: 20px;
+  }
+}
+:is(#evidence pre) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  table {
+    min-width: 0;
+  }
+  th,
+  td {
+    padding: 12px 7px;
+    font-size: 12px;
+  }
+  th:first-child {
+    width: 34%;
+  }
+  th:last-child {
+    width: 42px;
+  }
+}

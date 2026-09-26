@@ -1,0 +1,41 @@
+# Declared inventory: the intent a human owns. Discovery never writes here — an undeclared
+# resource reaches this file only through a reviewed pull request (docs/DECISIONS.md discovery write policy).
+# Addresses follow the synthetic naming placeholder scheme (10.11.0.0/16, example.test hostnames), so a reader may
+# copy this file. A sweep range is never declared here either: the ranges a sweep may probe live
+# in the operator's own configuration, commented in observed.yaml below.
+schema_version: 1
+resources:
+  - id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1
+    kind: host
+    name: probe-1
+    aliases:
+      - {type: hostname, value: probe-1.example.test}
+      - {type: host.id, value: synthetic-host-001}
+      - {type: ip, value: 10.11.0.21}
+    attributes: {os: linux, environment: demo}
+    relations: []
+  - id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2
+    kind: service
+    name: demo-api
+    aliases:
+      - {type: service.name, value: demo-api, scope: demo}
+    attributes: {environment: demo, enabled: true}
+    relations:
+      - {type: runs-on, target: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1}
+# A second vantage point, commented because it is an example and not an estate fact. Uncomment it
+# (through a reviewed PR, like everything else in this file) to give `lo-platform pathcheck` a second
+# view: the "is it me or them" verdict needs at least two declared vantage points before it can say
+# which side of the path is down, and `pathcheck.py` refuses a verdict whose vantage_resource_id does
+# not resolve here. It is a `kind: host` because that is the closest thing `common.json` admits to "a
+# box that runs probes" — there is no `probe` kind, and inventing one is a schema decision, not a
+# comment. Names and addresses follow synthetic naming (probe-1 above, so this is probe-2; 10.11.0.0/16 and
+# example.test), so nothing here is copyable-but-wrong. One LO_PATHCHECK_CONFIG per vantage point names
+# one of these ids, and each probe host's own runner writes the report this producer reads.
+#  - id: 2b7d2b9e-33c7-426f-b58f-4c2c7cd1f2d9
+#    kind: host
+#    name: probe-2
+#    aliases:
+#      - {type: hostname, value: probe-2.example.test}
+#      - {type: ip, value: 10.11.0.22}
+#    attributes: {os: linux, environment: demo}
+#    relations: []

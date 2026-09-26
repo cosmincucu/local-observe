@@ -1,0 +1,253 @@
+# Experimental reference extraction; see CONTRACT.md and versions.json.
+services:
+  init-clickhouse:
+    restart: 'no'
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    image: ${LO_CLICKHOUSE_IMAGE:?set a digest-pinned image in the private environment}
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 256
+    command:
+    - /bin/sh
+    - -ec
+    - 'printf "%s  /artifacts/histogramQuantile\n" "$$LO_HISTOGRAM_SHA256" | sha256sum -c -
+
+      cp /artifacts/histogramQuantile /var/lib/clickhouse/user_scripts/histogramQuantile
+
+      chmod 755 /var/lib/clickhouse/user_scripts/histogramQuantile'
+    volumes:
+    - type: bind
+      source: ${LO_HISTOGRAM_BINARY:?absolute path to verified linux-amd64 histogramQuantile}
+      target: /artifacts/histogramQuantile
+      read_only: true
+      bind:
+        create_host_path: false
+    - ch-user-scripts:/var/lib/clickhouse/user_scripts
+    platform: linux/amd64
+    environment:
+    - LO_HISTOGRAM_SHA256=${LO_HISTOGRAM_SHA256:?set the verified binary SHA256}
+  zookeeper-1:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    image: ${LO_ZOOKEEPER_IMAGE:?set a digest-pinned image in the private environment}
+    user: root
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 512
+    environment:
+    - ZOO_SERVER_ID=1
+    - ALLOW_ANONYMOUS_LOGIN=yes
+    - ZOO_AUTOPURGE_INTERVAL=1
+    - ZOO_ENABLE_PROMETHEUS_METRICS=yes
+    - ZOO_PROMETHEUS_METRICS_PORT_NUMBER=9141
+    - ZOO_HEAP_SIZE=256
+    volumes:
+    - zookeeper-data:/bitnami/zookeeper
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl -s -m 2 http://localhost:8080/commands/ruok | grep error | grep null
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    platform: linux/amd64
+  clickhouse:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    image: ${LO_CLICKHOUSE_IMAGE:?set a digest-pinned image in the private environment}
+    tty: true
+    mem_limit: 8g
+    cpus: 4
+    pids_limit: 4096
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+    - CLICKHOUSE_SKIP_USER_SETUP=1
+    depends_on:
+      init-clickhouse:
+        condition: service_completed_successfully
+      zookeeper-1:
+        condition: service_healthy
+    configs:
+    - source: ch-cluster
+      target: /etc/clickhouse-server/config.d/cluster.xml
+    - source: ch-udf-path
+      target: /etc/clickhouse-server/config.d/user-defined-functions-path.xml
+    - source: ch-udf-function
+      target: /etc/clickhouse-server/functions/histogram-quantile.xml
+    volumes:
+    - ./clickhouse-memory.xml:/etc/clickhouse-server/config.d/memory-cap.xml:ro
+    - ./clickhouse-query-mem.xml:/etc/clickhouse-server/users.d/query-mem.xml:ro
+    - ch-user-scripts:/var/lib/clickhouse/user_scripts/
+    - clickhouse-data:/var/lib/clickhouse/
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - --spider
+      - -q
+      - 0.0.0.0:8123/ping
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    platform: linux/amd64
+  signoz:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    image: ${LO_SIGNOZ_IMAGE:?set a digest-pinned image in the private environment}
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 1024
+    environment:
+    - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
+    - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
+    - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
+    - SIGNOZ_TOKENIZER_JWT_SECRET=${SIGNOZ_JWT_SECRET:?set in .env}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      signoz-telemetrystore-migrator:
+        condition: service_completed_successfully
+    volumes:
+    - signoz-sqlite:/var/lib/signoz/
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - --spider
+      - -q
+      - localhost:8080/api/v1/health
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    platform: linux/amd64
+    ports:
+    - 127.0.0.1:${LO_UI_PORT:-18081}:8080
+  signoz-telemetrystore-migrator:
+    restart: 'no'
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    image: ${LO_SIGNOZ_COLLECTOR_IMAGE:?set a digest-pinned image in the private environment}
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 1024
+    environment:
+    - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+    - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+    - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+    - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint:
+    - /bin/sh
+    command:
+    - -c
+    - '/signoz-otel-collector migrate bootstrap &&
+
+      /signoz-otel-collector migrate sync up &&
+
+      /signoz-otel-collector migrate async up
+
+      '
+    platform: linux/amd64
+  signoz-otel-collector:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    image: ${LO_SIGNOZ_COLLECTOR_IMAGE:?set a digest-pinned image in the private environment}
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 1024
+    environment:
+    - LOW_CARDINAL_EXCEPTION_GROUPING=false
+    # The receiver credential is a mounted file, read by the collector's confmap `file` provider in
+    # collector.yaml. An environment value here would be visible to `docker inspect` and to
+    # /proc/<pid>/environ. Named per service, because examples/full declares this project beside
+    # the front door, which mounts the same value under its own name; one project cannot declare one
+    # secret name twice. The same variable name on the host holds the source path.
+    - LO_STORE_TOKEN_FILE=/run/secrets/store-receiver-token
+    - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+    - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER=cluster
+    - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION=true
+    - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      signoz-telemetrystore-migrator:
+        condition: service_completed_successfully
+    configs:
+    - source: signoz-otelcol-config
+      target: /etc/otel-collector-config.yaml
+    secrets:
+    - store-receiver-token
+    entrypoint:
+    - /bin/sh
+    command:
+    - -c
+    - '/signoz-otel-collector migrate sync check &&
+
+      exec /signoz-otel-collector --config=/etc/otel-collector-config.yaml
+
+      '
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget --spider -q http://127.0.0.1:13133/
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    platform: linux/amd64
+configs:
+  ch-cluster:
+    content: "<clickhouse>\n    <zookeeper>\n        <node index=\"1\">\n            <host>zookeeper-1</host>\n\
+      \            <port>2181</port>\n        </node>\n    </zookeeper>\n    <macros>\n        <shard>01</shard>\n\
+      \        <replica>example01-01-1</replica>\n    </macros>\n    <remote_servers>\n        <cluster>\n\
+      \            <shard>\n                <replica>\n                    <host>clickhouse</host>\n \
+      \                   <port>9000</port>\n                </replica>\n            </shard>\n      \
+      \  </cluster>\n    </remote_servers>\n</clickhouse>\n"
+  ch-udf-path:
+    content: "<clickhouse>\n    <user_defined_executable_functions_config>/etc/clickhouse-server/functions/*.xml</user_defined_executable_functions_config>\n\
+      </clickhouse>\n"
+  ch-udf-function:
+    content: "<functions>\n    <function>\n        <type>executable</type>\n        <name>histogramQuantile</name>\n\
+      \        <return_type>Float64</return_type>\n        <argument>\n            <type>Array(Float64)</type>\n\
+      \            <name>buckets</name>\n        </argument>\n        <argument>\n            <type>Array(Float64)</type>\n\
+      \            <name>counts</name>\n        </argument>\n        <argument>\n            <type>Float64</type>\n\
+      \            <name>quantile</name>\n        </argument>\n        <format>CSV</format>\n        <command>./histogramQuantile</command>\n\
+      \    </function>\n</functions>\n"
+  signoz-otelcol-config:
+    file: ./collector.yaml
+volumes:
+  clickhouse-data: {}
+  signoz-sqlite: {}
+  zookeeper-data: {}
+  ch-user-scripts: {}
+secrets:
+  store-receiver-token:
+    file: ${LO_STORE_TOKEN_FILE:?absolute path to the store receiver bearer token file}

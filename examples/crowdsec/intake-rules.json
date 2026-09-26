@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "crowdsec": {
+      "crowdsecurity/ssh-bf": {
+        "rule_id": "crowdsec.ssh-brute-force",
+        "kind": "security",
+        "window_seconds": 120,
+        "sample_field": "alert.events_count"
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "case": "positive",
+  "rule": "process-marker.yaml",
+  "note": "Two rows the rule must match, the second in different letter case: the pinned backend compiles every string match to ILIKE, so case-insensitivity is part of the shipped semantics and is asserted rather than assumed. Both rows sit inside the evaluated window [11:59:00Z, 12:00:00Z).",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 2,
+    "usable_count": 2,
+    "match_count": 2
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000001",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955171000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000002",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/LO-Fixture",
+        "process.command_line": "--SIGMA-positive"
+      }
+    }
+  ]
+}

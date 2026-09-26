@@ -1,0 +1,71 @@
+# Full-stack example: the three data components plus the control plane, the operator UI and the
+# operator portal. Composition only — every image, path and credential arrives from the environment
+# file, so this file holds no value that could be filled in wrongly. See README.md in this directory
+# for the ordered bring-up, and examples/demo/compose.yaml for the smaller data-plane-only rehearsal.
+name: local-observe-full
+
+include:
+  # Data plane: store (ClickHouse + SigNoz), the authenticating front door, the Linux agent.
+  # The store entry lists TWO files: the component manifest and
+  # components/data/store-signoz/clickhouse-users.d/compose.yaml, which adds the read-only ClickHouse
+  # query user the Sigma runner authenticates as. That delta is not inside the store manifest
+  # because a required credential written there would also be demanded of examples/demo, which has
+  # no query user to authenticate (DEPENDENCIES.md, "Example compositions and environment
+  # templates"). Compose merges the two paths into one model for this entry, the same mechanism the
+  # platform/operator pair below uses, so `project_directory` is stated explicitly: it makes both
+  # files' relative paths resolve from the store component, which is where lo-query.xml lives.
+  - path:
+      - ../../components/data/store-signoz/compose.yaml
+      - ../../components/data/store-signoz/clickhouse-users.d/compose.yaml
+      - ../../components/data/store-signoz/clickhouse-users.d/lo-read.compose.yaml   # query adapter
+    project_directory: ../../components/data/store-signoz
+  - ../../components/data/front-door/compose.yaml
+  - ../../components/data/agent-linux/compose.yaml
+  # Knowledge plane: the authenticated inventory reader over a built snapshot directory.
+  - ../../components/knowledge/inventory/compose.yaml
+  # Control plane: job engine, job-deadline monitor, compiled-Sigma runner, seasonal anomaly producer,
+  # platform API and operator UI.
+  - ../../components/control/dagu/compose.yaml
+  - ../../components/control/job-observe/compose.yaml
+  - ../../components/control/sigma/compose.yaml
+  # Seasonal-baseline anomaly producer: one `python -m local_observe.platform.anomaly` loop on the
+  # platform's own image, judging each series against its own history instead of a typed limit. Two
+  # prerequisites this file cannot state: the `anomaly-state` volume has to be prepared before the
+  # first `up` (the recipe is components/control/anomaly/CONTRACT.md, and the image an operator holds
+  # is the one it is written for), and `LO_PLATFORM_IMAGE` has to be an image rebuilt from this tree —
+  # the digest pinned in components/control/platform/versions.json predates the module it would run.
+  - ../../components/control/anomaly/compose.yaml
+  # components/control/operator/compose.yaml patches the platform service instead of declaring a
+  # service of its own: it replaces the served ASGI factory so one container answers the role API
+  # and the operator UI on the same port. A separate `include` entry would not merge it (Compose
+  # warns on a conflicting name and keeps only one definition) and a second container would not
+  # work either: the platform takes an exclusive lock on its state database, so the other one
+  # would refuse to serve. Listing both files as ONE include entry merges them in order, which is
+  # what `docker compose -f platform/compose.yaml -f operator/compose.yaml` would do.
+  - path:
+      - ../../components/control/platform/compose.yaml
+      - ../../components/control/operator/compose.yaml
+    project_directory: ../../components/control/platform
+  # The operator portal: one Homepage instance rendering a config directory the product renders
+  # (local_observe/platform/homepage.py). It is its OWN service on its own include entry, unlike the
+  # operator UI above, because it is a second process viewing the platform rather than a second owner
+  # of it: it declares no volume and no depends_on, so deleting this include entry costs the browser
+  # view and nothing else (components/control/homepage/CONTRACT.md, "If the portal is disabled").
+  - ../../components/control/homepage/compose.yaml
+  # LAN synthetics (component `synthetics`, synthetics component): the Gatus engine plus this product's adapter.
+  # Neither service publishes a port: the detector reaches Gatus over this project's network, and
+  # Gatus's status page is deliberately not wired to a loopback publication, because that would add
+  # a name to scripts/check_foundation.py's HOST_PUBLISHED_SERVICES (components/control/synthetics/
+  # CONTRACT.md, "Publication"). Deleting this entry is the component's `If disabled` clause: the
+  # store, the inventory, the incidents and the Sigma path are untouched, and every availability rule
+  # the detector used to file opens `coverage` instead of resolving, which is the designed answer to
+  # an absent engine, not a defect.
+  - ../../components/control/synthetics/compose.yaml
+# Deliberately NOT included, three of them, each optional in the sense `docs/COMPONENTS.md` §4 means: the
+# AI serve (step 8 of README.md), the CrowdSec engine (docs/INSTALLATION.md §6) and the MCP tool surface
+# (step 9). The last is the one this example is most often asked about, because it is the only optional
+# component that publishes a port at all: an MCP client is a process on another host, so it cannot join
+# this project's network, and `127.0.0.1:18100` is the whole of its reach for a deployment that opts in.
+# Adding that line is a decision to let an agent read platform state and file approval requests under its
+# own name; leaving it out is the row's `If disabled` clause, and it holds because nothing else here reads
+# that service — `If disabled` is a structure here, not a hope (tests/test_mcp_component.py).

@@ -1,0 +1,61 @@
+{
+  "component": "rca",
+  "status": "selected",
+  "verified_on": null,
+  "schema_version": 1,
+  "platform": "linux/amd64 inside the platform image (components/control/platform/Dockerfile, python:3.12-slim-bookworm). No image of its own and none to pin: the component is a command in an image that is already pinned.",
+  "docs": "docs/COMPONENTS.md",
+  "selection": {
+    "decided_on": "2026-08-29",
+    "decision": "docs/DECISIONS.md investigation policy: HolmesGPT + small model self-hosted, with a rule floor always active",
+    "plan": "docs/PLAN.md phase 4, 'Rule-based RCA, then HolmesGPT behind a quality gate'",
+    "card": "investigation component (agent-maintained issue list), port twin rca",
+    "what_this_round_selected": "the platform-side half: the RCA bundle, the rule floor, the explanation record, and the CLI that runs one bounded round",
+    "what_this_round_did_not_select": "the executor. HolmesGPT upstream was never fetched or verified here, so its image reference and digest are unknown rather than unset; rca task 5 and its pinned manifest wait on that."
+  },
+  "runtime": {
+    "artifact": "local_observe/platform/rca.py, invoked as `lo-platform rca --config <json> [--index <inventory.db>] --source <id>` inside the platform container",
+    "image": "${LO_PLATFORM_IMAGE} \u2014 the digest is the operator's to resolve and pin, exactly as examples/full/compose.yaml does for every other service in that file",
+    "compose_model": false,
+    "compose_model_reason": "the component writes through Store, and docs/CONTRACTS.md \u00a75 names one platform service as the owner/writer of the operational database while platform/owner.py holds an exclusive lock on that file for the life of the serving process. A second container would be a second writer; the precedent for a row with no Compose model is components/data/agent-windows.",
+    "new_python_dependencies": [],
+    "new_service": false,
+    "new_port": false,
+    "database_schema_change": false,
+    "store_api_change": false,
+    "reads": "the operational database through Store.records, the declared graph through topology.Topology, labels through presentation.resource_info, and every evidence reference through platform/query.py::reauthorise \u2014 never the evidence table directly and never a store client",
+    "writes": "append-only audit rows, operation `rca.explained`, actor = the operator-named --source. No event, incident, outbox, action, evidence or evidence_state write."
+  },
+  "validation": {
+    "runtime_conformance": "not-run",
+    "container_started": false,
+    "corpus_gate_run": false,
+    "unit_suite": "tests/test_rca_bundle.py, tests/test_rca_rules.py, tests/test_rca_llm_fabrication.py and tests/test_rca_component.py, run under the base tier (python -B -m unittest discover -s tests). That is a code-path claim only and not a validation of the component: nothing here has started a container or opened the operational database on a host.",
+    "what_was_measured": "the deterministic rules, the bundle bounds, the fabrication guard against a scripted lying model, and the unchanged core scenario inside a test process",
+    "what_was_not_measured": "any behaviour of any model, and therefore every sentence in the explanation that a model wrote"
+  },
+  "quality_claim": {
+    "precision": null,
+    "published": false,
+    "note": "Task 7 of the port brief and rca's own task 4 say it plainly: no published quality claim before the corpus gate exists. That gate is corpus eval (labelled incident corpus with blind backtest + the no-LLM ablation); it has not run, so no precision figure is recorded here and none may be quoted from this component until one is measured against that corpus. The budget the gate will be measured against lives in docs/PLAN.md phase 4 (`<=3 findings/day`); it is a target and not a result."
+  },
+  "boundaries": {
+    "data_classes_accepted": [
+      "public",
+      "internal",
+      "restricted"
+    ],
+    "data_class_refused": "anything outside local_observe/ai/policy.py::DATA_CLASSES, and an absent class on a bundle. The configuration default is internal, which is a choice someone wrote down and not an inference",
+    "telemetry_samples_in_a_record": false,
+    "model_prose_in_a_record": false,
+    "fabrication_discard_code": "model-prose-discarded",
+    "max_items_per_channel": "MAX_ITEMS in local_observe/platform/rca.py, 8 channels, 62 rows and 20 KB of text at the defaults",
+    "fabrication_guard": "post_validate() \u2014 uuid, dotted-name and number containment against the bundle text the model was actually shown; discarded sentences are named, never silently dropped"
+  },
+  "artefacts": {
+    "CONTRACT.md": "inputs, outputs, the one place the executor's config shape is allowed to be written down, and the refusal that keeps it a proposal",
+    "backup.md": "which Store backups already cover this component, and the restore probe",
+    "upgrade.md": "no upstream version to move; what changes a rule floor, and how to back out",
+    "conformance.md": "the \u00a75 scenario as a host recipe, and this component's `If disabled` clause as a host check"
+  }
+}

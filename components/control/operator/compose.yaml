@@ -1,0 +1,8 @@
+# Merge with the platform component: this replaces its factory, not its state owner.
+services:
+  platform:
+    environment:
+      # Optional account hash in the platform's existing read-only /config mount.
+      # Fresh installs use /config/operator-account.json; blank retains token login.
+      LO_OPERATOR_ACCOUNT_FILE: ${LO_OPERATOR_ACCOUNT_FILE:-}
+    command: [python, -m, uvicorn, local_observe.platform.operator:app_factory, --factory, --host, 0.0.0.0, --port, "8002", --no-access-log]

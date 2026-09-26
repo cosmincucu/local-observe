@@ -1,0 +1,11 @@
+{
+  "status": "experimental",
+  "verified_on": null,
+  "environment": "isolated rootless staging; linux/amd64",
+  "python_base": "library/python@sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef",
+  "datasette": "0.65.3",
+  "datasette_graphql": "2.2",
+  "runtime_dependencies": "requirements.lock",
+  "schema_version": 1,
+  "distribution": "Build first-party images from reviewed source and verify them before recording deployment identities."
+}

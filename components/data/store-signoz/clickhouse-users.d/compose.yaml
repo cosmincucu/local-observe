@@ -1,0 +1,49 @@
+# full example gaps: the read-only ClickHouse query user, as a Compose delta. This file is NOT a standalone
+# Compose file and is never passed to `docker compose -f` on its own. Compose merges it onto
+# components/data/store-signoz/compose.yaml inside ONE `include` entry of
+# examples/full/compose.yaml, which is the same mechanism that example already uses to apply
+# components/control/operator/compose.yaml to the platform service. Read those two docs, then:
+#
+# Why a delta beside the store manifest instead of the store manifest itself: a required `:?` variable
+# written in components/data/store-signoz/compose.yaml lands in EVERY example that includes the
+# store, and DEPENDENCIES.md ("Example compositions and environment templates") requires a line in
+# every example template for it. examples/demo has no Sigma runner and no query user to
+# authenticate, so the demo would have to carry a required credential nothing in it reads. Scoping
+# the delta to the example that has the consumer keeps the demo's contract honest and keeps the
+# new credential next to the one service that needs it.
+#
+# The two Compose behaviours this file depends on, quoted from the specification (files 13-merge.md
+# and 14-include.md of compose-spec/compose-spec at master, read 2026-09-08):
+#   "A YAML sequence is merged by appending values from the overriding Compose file to the previous
+#    one", and for `volumes` and `secrets` "Compose appends new entries that do not violate a
+#    uniqueness constraint" (a volume keys on its `target`, a secret on its name). So the bind below
+#    is added to the clickhouse service's existing mounts instead of replacing them, and the secret
+#    name below is new instead of colliding with the store's own `store-receiver-token`.
+#   "`path` can be set either to a string when a single Compose file is involved, or to a list of
+#    strings when multiple Compose files need to be merged together to define the Compose model to
+#    be included in the local application."
+# Neither behaviour has been executed against a Docker host while drafting this (none was
+# available); examples/full/README.md says what to run to confirm the merge landed.
+services:
+  clickhouse:
+    secrets:
+      - clickhouse-query-credentials
+    volumes:
+    # ClickHouse merges this into its users config; see the header of the file itself for the doc
+    # quote naming the directory the pinned image loads, and for exactly what the user may not do.
+    # The `:ro` suffix is what check_foundation.py requires of any "./" source: the server must not
+    # be able to rewrite the privileges it booted with.
+    - ./clickhouse-users.d/lo-query.xml:/etc/clickhouse-server/users.d/lo-query.xml:ro
+secrets:
+  clickhouse-query-credentials:
+    # The value lo-query authenticates with, in the one XML form ClickHouse's `incl` substitution
+    # reads (ClickHouse configuration docs, "Substitution with file content"): a file containing
+    #   <clickhouse><lo_query_password>the-value</lo_query_password></clickhouse>
+    # A mounted file and not an environment value, so it stays out of `docker inspect` and
+    # /proc/<pid>/environ (the secret files rule). A required `:?` variable is what makes the fail-closed
+    # argument in lo-query.xml hold: no file, no render, no server, no anonymous read-only account
+    # left behind by an unresolvable substitution. examples/full/README.md step 4 writes this file
+    # from the SAME value as LO_CLICKHOUSE_PASSWORD_FILE, because the runner presents that value as
+    # its key and ClickHouse must know it in the same form -- one secret in two envelopes, exactly
+    # like LO_PRODUCER_TOKEN_FILE duplicates one row of the platform credentials file.
+    file: ${LO_CLICKHOUSE_QUERY_CREDENTIALS_FILE:?absolute path to the ClickHouse substitution file holding lo_query_password}

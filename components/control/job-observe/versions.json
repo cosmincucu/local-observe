@@ -1,0 +1,52 @@
+{
+  "status": "selected",
+  "schema_version": 1,
+  "verified_on": null,
+  "runtime_state": "NOT RUN. No container from this directory has been started and no host has been observed with these pieces; every value below is a pin read from an upstream release, not an observation of this product running. That is why COMPONENTS.md cannot call this component built on runtime evidence and why STATUS.md owns the validation claim.",
+  "healthchecks": {
+    "version": "v4.4",
+    "released": "2026-08-31",
+    "license": "BSD-3-Clause",
+    "repository": "https://github.com/healthchecks/healthchecks",
+    "image_repository": "healthchecks/healthchecks",
+    "image_tag": "v4.4",
+    "image_manifest_list_digest": "sha256:aa08a61b0dcfd83f1332eab195d5cec1b595ae076eb8388cadf8a3d597114f9b",
+    "image_digest_amd64": "sha256:770e49ba5482153eb3f90391d86c6a6c64f4b58ac82ff88ac1b54d5b4f23f438",
+    "digest_source": "Docker Hub tags API for healthchecks/healthchecks v4.4, read 2026-09-08; the manifest-list digest is what the v4.4 tag resolves to for all architectures and the amd64 digest is what compose.yaml's LO_HEALTHCHECKS_IMAGE value must hold. Neither was pulled or run from this checkout.",
+    "base_image": "python:3.14.7-slim-trixie (upstream docker/Dockerfile at master, 2026-09-08)",
+    "database_mode": "sqlite (upstream default; DB_NAME points it at /data/hc.sqlite on a named volume)",
+    "documents": [
+      "https://github.com/healthchecks/healthchecks/blob/v4.4/docker/README.md",
+      "https://github.com/healthchecks/healthchecks/blob/v4.4/docker/Dockerfile",
+      "https://github.com/healthchecks/healthchecks/blob/v4.4/docker/uwsgi.ini",
+      "https://github.com/healthchecks/healthchecks/blob/v4.4/hc/settings.py",
+      "https://github.com/healthchecks/healthchecks/blob/master/templates/docs/self_hosted_configuration.md",
+      "https://github.com/healthchecks/healthchecks/blob/master/templates/docs/configuring_prometheus.md",
+      "https://github.com/healthchecks/healthchecks/blob/master/templates/docs/signaling_failures.md",
+      "https://github.com/healthchecks/healthchecks/blob/master/templates/docs/apiv2.md"
+    ]
+  },
+  "systemd_exporter": {
+    "role": "per-host agent, not a service in this component's compose.yaml; see components/data/agent-linux/CONTRACT.md",
+    "version": "v0.7.0",
+    "released": "2025-03-14",
+    "license": "Apache-2.0",
+    "repository": "https://github.com/prometheus-community/systemd_exporter",
+    "image_repository": "prometheuscommunity/systemd-exporter",
+    "image_tag": "v0.7.0",
+    "image_manifest_list_digest": "sha256:78c03f875dfbe8bb13166c48ad7c857d6611dbc1d9d3b2d0f48917da83367951",
+    "image_digest_amd64": "sha256:03b98e1aabd21f4e73934515cb73becdd7fcd217b636293bfdead757074cc08c",
+    "digest_source": "Docker Hub tags API for prometheuscommunity/systemd-exporter v0.7.0, read 2026-09-08. quay.io/prometheuscommunity/systemd-exporter carries the same release; only the Docker Hub names are recorded here because that is where the digests were read.",
+    "listen_port": 9558,
+    "listen_port_source": "webflag.AddFlags(kingpin.CommandLine, \":9558\") in main.go and EXPOSE 9558 in the Dockerfile, both at tag v0.7.0. The README's metric table does not name a port; the two source files do.",
+    "container_user": "nobody (upstream Dockerfile at v0.7.0)",
+    "metric_stability": "every metric in the upstream README's table is labelled UNSTABLE, so a store-side alert rule on one of them is a pin as much as a query is",
+    "documents": [
+      "https://github.com/prometheus-community/systemd_exporter/blob/v0.7.0/README.md",
+      "https://github.com/prometheus-community/systemd_exporter/blob/v0.7.0/Dockerfile",
+      "https://github.com/prometheus-community/systemd_exporter/blob/v0.7.0/systemd/systemd.go"
+    ]
+  },
+  "distribution": "no registry publication or signature claimed by this repository; both images are upstream's",
+  "platform": "linux/amd64; the third-party images above are multi-arch, so compose.yaml states platform and the pins are the amd64 digests"
+}

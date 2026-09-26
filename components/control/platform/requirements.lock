@@ -1,0 +1,31 @@
+# requirements.lock for the platform API image (linux/amd64, CPython 3.12).
+# Generated from requirements.in with, run from the repository root:
+# 
+#   python -m pip download --dest .wheels-platform \
+#       --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 \
+#       --platform manylinux_2_28_x86_64 --platform any \
+#       --python-version 3.12 --only-binary=:all: --implementation cp \
+#       -r components/control/platform/requirements.in
+# 
+# and one --hash=sha256:<digest of each downloaded wheel> line per package (sha256 of the wheel
+# file, as produced by "python -m pip hash"). Do not hand-edit; see docs/BUILD.md.
+attrs==26.1.0 \
+    --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+jsonschema==4.26.0 \
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+jsonschema-specifications==2025.9.1 \
+    --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+pyyaml==6.0.3 \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+referencing==0.37.0 \
+    --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+rpds-py==2026.6.3 \
+    --hash=sha256:ecabd69db66de867690f9797f2f8fa27ba501bbc24540cbdbdc649cd15888ba6
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+uvicorn==0.52.4 \
+    --hash=sha256:f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1

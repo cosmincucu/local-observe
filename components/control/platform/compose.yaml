@@ -1,0 +1,98 @@
+services:
+  platform:
+    image: ${LO_PLATFORM_IMAGE:?pin the platform image}
+    pull_policy: never
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=33554432"]
+    environment:
+      LO_STATE_PATH: /data/platform.db
+      LO_INDEX_PATH: /inventory/inventory.db
+      LO_ACTION_POLICY: /config/actions.json
+      # Deliveries are recorded, never sent, unless the operator opts into live explicitly.
+      LO_NOTIFICATION_MODE: ${LO_NOTIFICATION_MODE:-recording}
+      # Optional. JSON notification-safety policy: budgets, synthetic sources, test window.
+      # If it declares delivery_mode, that value must equal LO_NOTIFICATION_MODE or boot fails.
+      LO_NOTIFICATION_POLICY: ${LO_NOTIFICATION_POLICY:-}
+      # Optional. JSON label/display mapping applied when formatting human-facing messages.
+      LO_DISPLAY_CONFIG: ${LO_DISPLAY_CONFIG:-}
+      # Optional. Path to the observation document summarised by GET /v1/overview.
+      LO_OVERVIEW_PATH: ${LO_OVERVIEW_PATH:-}
+      # Optional. Telegram channel config JSON (token, chat_id); honoured in live mode only.
+      LO_TELEGRAM_CONFIG: ${LO_TELEGRAM_CONFIG:-}
+      # Optional. Channels document: a JSON list of every channel this process may send on, in the
+      # operator's preference order (CONTRACT.md). Its value is a PATH inside the read-only /config
+      # mount below, and so is every credential an entry names — a `token_file` (webhook, ntfy, matrix),
+      # a `url_file` (slack, whose webhook URL is itself the secret), a `key_file` (pagerduty), a
+      # `password_file`/`recipients_file` (email), a `config` (telegram) — which is the only route a
+      # channel credential has into this container: no `*_TOKEN` environment value exists for a channel
+      # and none may be added, and no `secrets:` entry is declared for one either, because a Compose
+      # secret cannot be conditional and a required one would stop the recording-mode install that has
+      # no channel to configure. Read in live mode only, so a recording install never opens the files the
+      # document names. Leave it empty for a recording install or a single-channel one; a channel that
+      # two configuration routes both claim fails the boot.
+      LO_NOTIFY_CHANNELS: ${LO_NOTIFY_CHANNELS:-}
+      # Role credentials arrive as a mounted file, never as an environment value: an env
+      # value is readable by anyone who can run `docker inspect` or read /proc/<pid>/environ.
+      LO_PLATFORM_CREDENTIALS: /run/secrets/platform-credentials
+      # The MCP tool surface's per-agent credentials (chat integration): a JSON list of
+      # {identity, role, bearer_token, platform_token} rows, staged in the policy directory below
+      # exactly as actions.json is. Blank by default, and blank means "not mounted": an install that
+      # runs no MCP service, or runs one with the single shared token of v0.1, boots unchanged. Only the
+      # MCP entry point (local_observe.platform.mcp:app_factory) ever opens this file -- the API factory
+      # above never reads the variable -- and a mounted map that is malformed, or that holds a human-role
+      # row, stops the MCP boot rather than serving a surface whose identity model is a guess.
+      # Refusing the map when LO_MCP_TOKEN_FILE is also set is the same rule: one credential source.
+      LO_MCP_IDENTITIES: ${LO_MCP_IDENTITIES:-}
+      LO_NOTIFY_URL: ${LO_NOTIFY_URL:-}
+      # The webhook channel is optional and a Compose secret cannot be declared conditionally, so
+      # its credential is a file in the read-only /config directory the action policy already comes
+      # from: an install that only records deliveries boots with no such file, and live mode with a
+      # configured LO_NOTIFY_URL and no file fails the boot rather than serving a dead channel.
+      LO_NOTIFY_TOKEN_FILE: /config/notify-token
+      LO_NOTIFY_ALLOW_HTTP: ${LO_NOTIFY_ALLOW_HTTP:-0}
+    secrets:
+      - platform-credentials
+    volumes:
+      - platform-data:/data
+      - type: bind
+        source: ${LO_PLATFORM_INDEX_DIR:?index snapshot directory}
+        target: /inventory
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        # /config carries the action policy, the optional channels document named by
+        # LO_NOTIFY_CHANNELS and every credential that document points at, all read-only: the process
+        # is given configuration, never a place to write its own channel set.
+        source: ${LO_PLATFORM_POLICY_DIR:?action policy directory}
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+    ports: ["127.0.0.1:${LO_PLATFORM_PORT:-18083}:8002"]
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - >-
+        import json,os,urllib.request;
+        c=next(x for x in json.load(open(os.environ['LO_PLATFORM_CREDENTIALS'])) if x['role']=='reader');
+        urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8002/v1/status',
+        headers={'Authorization':'Bearer '+c['token']}),timeout=3).close()
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+volumes:
+  platform-data:
+secrets:
+  platform-credentials:
+    file: ${LO_PLATFORM_CREDENTIALS_FILE:?path to the role credentials JSON}

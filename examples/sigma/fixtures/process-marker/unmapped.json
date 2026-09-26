@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "case": "unmapped",
+  "rule": "process-marker.yaml",
+  "note": "The missing-mapped-field case: three rows arrive, one of them without process.executable, so usable_count is below source_count and the window is not fresh. The compiler maps an absent attribute to NULL rather than an empty string, which is what keeps a field the collector dropped from reading as a negative result.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 3,
+    "usable_count": 1,
+    "match_count": 1
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000009",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955171000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000010",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955172000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000011",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture"
+      }
+    }
+  ]
+}

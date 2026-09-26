@@ -1,0 +1,7 @@
+# Runtime dependencies of the platform API image.
+# Transitive closure + sha256 hashes live in requirements.lock; regenerate as described in
+# docs/BUILD.md. Core deps mirror [project.dependencies] in pyproject.toml, uvicorn mirrors
+# the platform-api extra.
+PyYAML==6.0.3
+jsonschema==4.26.0
+uvicorn==0.52.4

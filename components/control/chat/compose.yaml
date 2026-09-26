@@ -1,0 +1,192 @@
+# AnythingLLM — the optional chat surface (component `chat`, chat integration).
+#
+# Optional by construction, exactly as `ai` is: NO shipped example includes this file, so a
+# `minimal`, `standard` or `full` bring-up needs no chat image, no chat credential and no chat
+# decision. The opt-in is one item added to an example's existing `include:` list (never a second
+# `include:` key) plus the environment block described in CONTRACT.md section 8.
+# The integration remains provisional until validated against the selected deployment.
+#
+# What this service is NOT, stated once here because it is the whole design:
+#   * not an approver — it proposes and reads; a human decides in the portal (CONTRACT.md section 4);
+#   * not a Telegram client — its own Telegram connector is never configured (section 6);
+#   * not a knowledge base — nothing here ingests documents, and answers are meant to come from MCP
+#     tools whose evidence the platform already holds (section 3).
+services:
+  chat:
+    image: ${LO_CHAT_IMAGE:?the AnythingLLM image, pinned to a digest you resolved from the registry you pull from - components/control/chat/versions.json records the one this row read on 2026-09-09 and how}
+    # Nothing infrastructure-grade upgrades itself. The digest in the environment is the artefact a
+    # human reviewed; a pull at boot would put an unread build behind a contract written about
+    # another one. This matters more here than anywhere else in this tree: the pinned build writes
+    # its own database schema through `prisma migrate deploy` at every boot (docker/docker-entrypoint.sh),
+    # so an unreviewed boot is a schema migration nobody approved.
+    pull_policy: never
+    # uid/gid 1000, because the image was built that way: docker/Dockerfile at the pinned commit
+    # creates the `anythingllm` user from ARG_UID/ARG_GID, both default 1000, and the publish
+    # workflow passes no build-args (re-read at that commit on 2026-09-10: `ARG ARG_UID=1000`,
+    # `useradd -l -u "$ARG_UID" -m -d /app ... anythingllm`, a `USER anythingllm` line, and zero
+    # `build-args:` keys in the workflow). 65532 — every other manifest in this tree — would not be able to
+    # write the volume Docker seeds with the image's own ownership. That is still an inference about the
+    # image, not its config: versions.json `unverified` names the one inspect command that turns it into a
+    # fact. Check it on first boot.
+    user: "1000:1000"
+    read_only: true
+    restart: unless-stopped
+    # Required, with the operator's own number, because this container is the one component in this
+    # tree that is optional *because of its size*: 1.1 GB compressed, and upstream's stated minimum is
+    # 2 GB RAM for the container alone while hardware baseline's published floor is 16 GB for the whole `minimal`
+    # host and this belongs to `standard`. Cap it too low and the Node process is OOM-killed mid-chat
+    # with nothing in the log to say so; leave it uncapped and one runaway agent loop takes the host
+    # that is also running the store. versions.json carries both figures and the arithmetic.
+    mem_limit: ${LO_CHAT_MEM_LIMIT:?memory ceiling for the chat surface - upstream states 2 GB as the minimum for the container alone, and that figure is theirs, not measured here}
+    # 256, not the 96-128 a small web API gets: one container runs TWO Node servers (the web API and
+    # the document collector, both started by docker/docker-entrypoint.sh) and the collector spawns a
+    # Chromium per scrape through Puppeteer. A tight pids cap kills the child and leaves the parent
+    # healthy-looking, which is the worst failure mode available.
+    pids_limit: 256
+    cpus: ${LO_CHAT_CPUS:-2}
+    # cap_drop ALL with no cap_add. Upstream's own compose adds SYS_ADMIN so Puppeteer's bundled
+    # Chromium can use its Linux sandbox; the same Dockerfile-era README offers the inverse choice in
+    # docker/.env.example — ANYTHINGLLM_CHROMIUM_ARGS="--no-sandbox,--disable-setuid-sandbox" is
+    # "only required on Linux machines ... and do not want to use the --cap-add=SYS_ADMIN docker
+    # argument". This manifest takes that documented second branch: no new-privilege capability in a
+    # container whose settings file holds provider keys, and a browser that runs unsandboxed if the
+    # collector ever scrapes a link. Say the cost plainly: link ingestion is NOT a feature of this
+    # profile (section 3), so what is weakened is a path this deployment should never take, and the
+    # alternative — a container that can mount overmounts and setns — is not something a chat surface
+    # gets for free.
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      # Fixed literal, not a variable: the healthcheck below probes this port by number, and a
+      # publication variable that could be pointed at a different listen port would let the probe
+      # pass for a server listening somewhere else. Nothing is published today (see "Publication").
+      SERVER_PORT: "3001"
+      # The one variable whose absence is data loss. docker/docker-entrypoint.sh prints a five-line
+      # WARNING and boots anyway when STORAGE_DIR is unset — "Not setting this will result in data
+      # loss on container restart" — because the SQLite database, the vector store, the MCP server
+      # registry and the push keys all resolve under it. Set it explicitly to the mount point below
+      # rather than trusting the image default, so a rebuild that moves the default moves the state
+      # silently.
+      STORAGE_DIR: /app/server/storage
+      # Telemetry is ON in the pinned build unless this exact string is set: server/models/telemetry.js:50
+      # returns null only when `process.env.DISABLE_TELEMETRY === "true"`, and the PostHog client
+      # otherwise initialises at boot (utils/boot/index.js calls setupTelemetry()). A chat surface on
+      # an operator's LAN phoning a vendor analytics endpoint by default is not an option to weigh; it
+      # is a line to write.
+      DISABLE_TELEMETRY: "true"
+      # /api/docs is a full OpenAPI description of every route in an install that holds provider keys.
+      # Upstream's own .env.example calls disabling it "recommended for production deployments".
+      DISABLE_SWAGGER_DOCS: "true"
+      # Payload capture, the half of chat integration's "retention OFF" that is achievable in this product (the
+      # rest is in backup.md): the transcript is still written to the database — no flag at the pinned
+      # commit stops that, and claiming otherwise would be the fiction this clause exists to prevent —
+      # but it is not viewable through the UI or the workspace APIs, so a second reader of the surface
+      # cannot browse an operator's incident history. CONTRACT.md section 7 states where the bytes are.
+      DISABLE_VIEW_CHAT_HISTORY: "1"
+      # An AnythingLLM "workspace" delete is not recoverable and holds the chat history of everything
+      # in it. Present-with-any-value disables the action in the UI and the APIs (docker/.env.example).
+      WORKSPACE_DELETION_PROTECTION: "1"
+      ANYTHINGLLM_CHROMIUM_ARGS: "--no-sandbox,--disable-setuid-sandbox"
+      # A bound on the agent loop, taken from upstream's own documented example value rather than an
+      # invented one: without it one bad tool response can chain until the provider's budget is gone.
+      # This is the same instinct as every other bound in this tree — refuse rather than notice later.
+      AGENT_MAX_TOOL_CALLS: ${LO_CHAT_MAX_TOOL_CALLS:-10}
+      # Deliberately ABSENT, each with what its presence would cost:
+      #   AGENT_AUTO_APPROVED_SKILLS   "skills that are auto-approved ... invoked without user
+      #                                interaction" (docker/.env.example). Setting it for any platform
+      #                                tool would move an approval into the chat client, where the
+      #                                platform has no idea who agreed. integration validation's approval separation is
+      #                                the clause this refuses, and the client-side gate is not the
+      #                                boundary anyway (CONTRACT.md section 4).
+      #   MCP_NO_COOLDOWN              upstream's comment: "can lead to infinite recursive calls of the
+      #                                same function". The bound above stays.
+      #   SIMPLE_SSO_ENABLED / AUTH_TOKEN / VECTOR_DB / any *_API_KEY
+      #                                settings that carry a secret or a policy belong in the mounted
+      #                                file, not in a container environment that `docker inspect`
+      #                                shows to anyone on the host (the rule at the top of
+      #                                scripts/check_foundation.py, applied here to a third-party
+      #                                name it cannot itself police).
+    secrets:
+      # The settings file /app/server/.env, mounted rather than inlined. The pinned build reads it with
+      # `dotenv.config()` from a cwd of /app/server (server/index.js), so this path is not a
+      # preference — it is the only place the build looks.
+      - source: chat-settings
+        target: /app/server/.env
+    volumes:
+      # Everything the component keeps. server/.gitignore at the pinned commit enumerates it: the
+      # SQLite database (`file:../storage/anythingllm.db` in server/prisma/schema.prisma), the LanceDB
+      # vector store, documents, generated files, push-notification keys, the MCP server registry the
+      # app itself writes, and the embedding cache. One named volume, project-scoped, backed up by
+      # components/control/chat/backup.md — and a restore of it puts a chat history back on the host,
+      # which is why that recipe starts by asking whether the operator wants those bytes at all.
+      - chat-storage:/app/server/storage
+    tmpfs:
+      # Scratch for two Node servers in a read-only root. size= with a uid/gid so a tmpfs mounted for
+      # a read-only root is still writable by uid 1000.
+      - /tmp:size=256m,mode=1777
+      # The collector's inbox and outbox. Ephemeral on purpose and by argument: this profile ingests
+      # nothing, so a document uploaded to hotdir has exactly one correct lifetime — the container's.
+      # versions.json `unverified` names what is not known: that the collector writes nothing else.
+      - /app/collector/hotdir:size=64m,uid=1000,gid=1000
+      - /app/collector/outputs:size=64m,uid=1000,gid=1000
+    expose: ["3001"]
+    # Publication — deliberately NOT shipped yet, and this is the one place that says why.
+    #
+    # The row's role is a phone surface (phone surface), so the intended line is a loopback publication like
+    # every other human-facing console here:
+    #     ports: ["127.0.0.1:${LO_CHAT_PORT:-18101}:3001"]
+    # Adding it requires THREE changes at once, and only one of them is in this file:
+    #   1. `chat` in scripts/check_foundation.py's HOST_PUBLISHED_SERVICES — the argument is that this
+    #      login (its own session/`validatedRequest` middleware — seen in
+    #      `server/endpoints/agentSkillWhitelist.js` at the pinned commit — not this product's role
+    #      credentials; the product's identity story is CONTRACT.md section 4, and what has to be named
+    #      there is the approver, not the browser). The 127.0.0.1 prefix widens no
+    #      interface: anything beyond the Docker host goes through the same
+    #      TLS + authentication edge recipe the Homepage portal documents and likewise does not start.
+    #   2. the pinned tuple in tests/test_ai_component.py's
+    #      test_the_manifest_publishes_nothing_and_the_gate_list_is_untouched, which asserts the list
+    #      by equality so no row widens it silently — a deliberate design, and the reason this line is
+    #      still a comment: all three land in one commit, and docs truth's rule is that a widening is
+    #      argued, never inherited.
+    #   3. this component's own test_publication_is_commented_and_names_the_two_edits in
+    #      tests/test_chat_component.py, which pins the opposite state today and would fail the moment
+    #      this line went live without it.
+    # The cost of shipping it unpublished is honest and named: `docker compose up` here yields a
+    # surface reachable only from inside the project network or by `docker compose exec`, which is a
+    # rehearsal and not a phone. CONTRACT.md section 3 calls the row `planned`, not `built`, and this
+    # comment is the reason.
+    healthcheck:
+      # Upstream's own probe, corrected to fail: docker/docker-healthcheck.sh curls /api/ping and then
+      # checks the code in bash, and /api/ping is an unauthenticated 200 `{online:true}`
+      # (server/endpoints/system.js:81). A bare `curl --write-out ... --output /dev/null` in exec form
+      # would exit 0 whatever the server answered — a healthcheck that can never go red. `-f` makes
+      # curl itself fail on a 4xx/5xx, which is the semantics the upstream script intends.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/api/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # The entrypoint runs `prisma generate` and `prisma migrate deploy` before the server binds, on
+      # a cold read of the database. One minute is upstream's own start_period; doubled here because
+      # this repository has never watched it boot and a false `healthy` is a lie told to `compose ps`.
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  # Project-scoped and un-nameable by design (the gate refuses `name`/`external` here): the state is
+  # the install, and an install that quietly points at someone else's volume is a restore surprise.
+  chat-storage:
+secrets:
+  chat-settings:
+    # AnythingLLM's own settings file: SERVER_PORT/JWT_SECRET/SIG_KEY/SIG_SALT/AUTH_TOKEN and any
+    # provider key, in plaintext, at the path dotenv reads. Its layout is upstream's and this
+    # repository does not own it — versions.json records which keys exist at the pinned commit and
+    # which are unread. Two consequences an operator must accept before opting in, both in
+    # CONTRACT.md section 7: the pinned build REWRITES this file on a UI action
+    # (`POST /api/system/update-env` → dumpENV → fs.writeFileSync at updateENV.js:1546), which a
+    # read-only mount refuses; and anything written into it persists in the host file, outside every
+    # retention rule this product has. Create it owned so uid 1000 can read the mount — Compose
+    # bind-mounts a `file:` secret with its host ownership and mode, it does not copy it — and expect
+    # the onboarding wizard's provider-key save to fail here, loudly, rather than silently widening
+    # the mount.
+    file: ${LO_CHAT_SETTINGS_FILE:?absolute path to the AnythingLLM settings file, mounted read-only at /app/server/.env}

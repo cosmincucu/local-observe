@@ -1,0 +1,78 @@
+# A reference monitoring module: the host metrics the Linux collector already scrapes (module contract).
+#
+# This is the "block" of deployment baseline in its machine-readable form: which declared resources to collect from,
+# what to collect, how often, and what this installation may show and page about as a result. It is a
+# DECLARATION and nothing more — no product code reads it into a running collector. The operator's
+# overlay renders `collection` into the pinned agent's config (deployment separation), and the operator's dashboard
+# repository is what consumes `default_graphs`; the product writes neither (see
+# local_observe/modules/__init__.py).
+#
+# Validate it (this is also what tests/test_modules_loader.py does):
+#   build an index from examples/inventory/declared.yaml, then
+#   ModuleLoader('examples/modules', index_path=<index>, store=<store facade facade>, window=<Window>).load()
+schema_version: 1
+name: host-metrics
+module_version: 1
+description: >-
+  Per-host CPU time from the Linux collector's hostmetrics receiver. Declared against the synthetic
+  demo host of examples/inventory/declared.yaml; copy the term, change the identity, keep the shape.
+
+# Identity only (module contract): a declared UUID, or an alias the inventory index keys on. v0.1's
+# `applies_to: "kind=host AND hostname=probe-1"` is refused here, and a term that matches nothing is
+# refused too rather than binding to an empty set. host.id is the alias canonical identifier recommends precisely
+# because a hostname is the thing that gets renamed.
+applies_to:
+  any_of:
+    - alias: {type: host.id, value: synthetic-host-001}
+
+# An OTel fragment, not a collector config: receiver, interval and the attribute keys the collector's
+# `resource/identity` processor sets. The six scrapers, the 30s interval and the three attribute keys
+# are quoted from components/data/agent-linux/collector.yaml (hostmetrics.collection_interval,
+# hostmetrics.scrapers, processors.resource/identity.attributes). Endpoints, paths and credentials
+# have no field in this schema at all: the collector reads its ingest token from a mounted file, and a
+# place for a secret in a declaration is the place one eventually appears.
+collection:
+  receiver: hostmetrics
+  interval_seconds: 30
+  scrapers: [cpu, load, memory, disk, network, filesystem]
+  resource_attributes: [host.name, resource_id, service.name]
+
+# One datapoint, deliberately. `system.cpu.time` is the only host-metric series this repository itself
+# names — literal in collector.yaml's cpu scraper block, asserted on the wire by
+# scripts/check_windows_agent.py and probed in the store by scripts/conformance_linux.py. The other
+# five scrapers are ENABLED in that file but their series names are recorded nowhere in this tree, and
+# a module may only declare a name its proof can ask about: declaring a plausible-looking upstream list
+# is the fabricated coverage this contract exists to refuse. Adding them is a measured store read
+# against a real install, not a transcription.
+datapoints:
+  - name: system.cpu.time
+    unit: s
+    type: counter
+    description: >-
+      Cumulative CPU time, one series per (cpu, state) pair — the attributes collector.yaml's cpu
+      scraper names explicitly. A monotonic counter: alert on its rate or on its absence, never on the
+      raw value.
+
+# Intent for the operator's dashboard repository, and nothing renders it here (deployment separation, public upstream). A series
+# named here is proven against the store at load, or the module refuses to load: a panel that would
+# render an empty graph is a guarantee the collector never made.
+default_graphs:
+  - title: CPU time per core and state
+    datapoints: [system.cpu.time]
+
+# `mode: absence` is alert conditions's clock-judged condition, and it is the only condition a raw cumulative
+# counter can honestly support without a rate step nobody has configured here: "no sample of this
+# series arrived for 300 seconds" means the agent stopped reporting. 300 is ten scrape intervals at
+# 30s, so one missed scrape is not a page. The loudness is one of the three severities intake admits;
+# turning this declaration into a conditions.Rule (which also needs id, resource_id, source and the
+# severity ladder it cites) is the operator's overlay, not something the product does.
+default_alerts:
+  - name: host-metrics-cpu-absent
+    datapoint: system.cpu.time
+    mode: absence
+    within_seconds: 300
+    severity: warning
+    summary: No system.cpu.time sample for ten scrape intervals; the agent stopped reporting.
+
+# No `multi_instance` block: nothing in this tree discovers sub-resource instances yet, and the
+# compiler ships without an example for the reason in local_observe/modules/compiler.py.

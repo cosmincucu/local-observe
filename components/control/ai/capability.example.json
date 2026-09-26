@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "context_tokens": "unknown",
+  "tools": false,
+  "json_mode": "unknown",
+  "streaming": "unknown",
+  "vision": "unknown",
+  "parallel": "unknown",
+  "quant": "unknown",
+  "measured_tok_per_s": "unknown"
+}

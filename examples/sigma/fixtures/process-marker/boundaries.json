@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "case": "boundaries",
+  "rule": "process-marker.yaml",
+  "note": "Half-open window semantics, one row per edge. The SQL filters timestamp >= start_ns AND timestamp < end_ns, so the row exactly at 11:59:00Z is inside, the row exactly at 12:00:00Z belongs to the next window and must not be counted twice, and the row one second before the window was already evaluated by an earlier tick.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 1,
+    "usable_count": 1,
+    "match_count": 1
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955140000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000006",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955200000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000007",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955139000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000008",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    }
+  ]
+}

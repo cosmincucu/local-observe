@@ -1,0 +1,82 @@
+# Platform staging fragment: the pieces of a rehearsal that are NOT a component.
+#
+# synthetics component moved the `gatus:` and `detector:` service blocks out of this file and into
+# components/control/synthetics/compose.yaml, together with the `gatus-data` and `detector-data`
+# volumes and the `gatus-token` and `producer-token` secret entries they carried. Nothing was
+# renamed — LO_GATUS_IMAGE, LO_GATUS_CONFIG, LO_GATUS_URL, LO_GATUS_TOKEN_FILE, LO_DETECTION_RULE_DIR
+# and LO_DETECTION_CURSOR still mean what they meant here, so an environment file written for this
+# stage still resolves; two optional lines were added to the manifest (LO_DETECTION_WINDOW_SECONDS
+# and LO_PLATFORM_URL, both defaulted) and `LO_PLATFORM_URL`/`LO_GATUS_URL` stopped being hardcoded.
+# `examples/platform/compose.yaml` pulls the new manifest in as its own `include` entry, which is why
+# this fragment must not name those two services at all: two include entries declaring one service
+# name keep only one definition, so the merge would drop one silently.
+#
+# What is left is exactly what belongs to a stage and to no component: the read-only /checks bind the
+# platform patch carries, the probe target the synthetic check watches (a python http.server on the
+# platform image, which only a rehearsal needs), and the recording notification sink.
+services:
+  platform:
+    volumes:
+      - type: bind
+        source: ${LO_PLATFORM_CHECKS_DIR:?reviewed conformance scripts}
+        target: /checks
+        read_only: true
+        bind: {create_host_path: false}
+  demo-target:
+    image: ${LO_PLATFORM_IMAGE:?build the stage image and pin its local id}
+    pull_policy: never
+    command: [python, -m, http.server, '8000', --directory, /data]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 32
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  notification-sink:
+    image: ${LO_PLATFORM_IMAGE:?build the stage image and pin its local id}
+    pull_policy: never
+    command: [python, /checks/notification_sink.py]
+    environment:
+      # Every credential on this host arrives as a mounted file, never an environment value: an env
+      # value is readable by anyone who can run `docker inspect` or read /proc/<pid>/environ here.
+      # The variable names below are the HOST paths of these files; each container sees only the
+      # path it mounts. The `file:` sources are at the foot of this file.
+      LO_NOTIFY_TOKEN_FILE: /run/secrets/notify-token
+    secrets:
+      - notify-token
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 32
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - notification-data:/data
+      - type: bind
+        source: ${LO_PLATFORM_CHECKS_DIR:?}
+        target: /checks
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+volumes:
+  notification-data:
+# Every service in this project carries the `json-file` cap the component manifests use, because the
+# composition runs the detector: one INFO line per tick is ~43,000 lines a day at the 2 s loop the
+# the platform rehearsal requires. Verify resource limits for the chosen installation.
+# Uncapped, that is bounded only by the daemon default on the staging host, and the same daemon holds
+# the demo store's volume. 10 MiB x 3 files per service caps the whole project at tens of MiB of logs;
+# a stage whose logs rotate out from under a failed run loses its own evidence, so the cap is stated
+# here rather than inherited. The detector's own copy of the cap travels with it in the component
+# manifest, so moving the service did not loosen it.
+secrets:
+  # Created by the platform stage driver as one-token files, no trailing newline (`printf '%s'`).
+  # The two the detector and the engine needed (`gatus-token`, `producer-token`) are now declared by
+  # components/control/synthetics/compose.yaml; the host variables behind them are unchanged.
+  notify-token:
+    file: ${LO_NOTIFY_TOKEN_FILE:?absolute path to the notification-sink bearer token file}

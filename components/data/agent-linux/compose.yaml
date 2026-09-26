@@ -1,0 +1,46 @@
+services:
+  agent-linux:
+    image: ${LO_OTEL_IMAGE:?set a digest-pinned collector image}
+    platform: linux/amd64
+    user: "0:0"
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 256
+    environment:
+      # The ingest credential arrives as a mounted file, and this one matters more than the others:
+      # the agent runs on an observed host, where the container environment is readable by anyone
+      # with root on that machine and is copied into anything the collector spawns. The confmap
+      # `file` provider reads the value from the mount, so the secret never enters the environment.
+      # The same variable name on the host holds the source path.
+      LO_INGEST_TOKEN_FILE: /run/secrets/agent-ingest-token
+      LO_INGEST_URL: ${LO_INGEST_URL:-http://lo-front-door:4318}
+      LO_HOST_NAME: ${LO_HOST_NAME:?set the observed host name}
+      LO_RESOURCE_ID: ${LO_RESOURCE_ID:?set the declared UUID}
+      LO_FILESYSTEM_MOUNT_PATTERN: ${LO_FILESYSTEM_MOUNT_PATTERN:-.*}
+    secrets:
+      # Named per service, so including the front door beside it in one project cannot
+      # declare the same secret name twice.
+      - agent-ingest-token
+    volumes:
+      - ./collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - agent-state:/var/lib/otelcol
+      - type: bind
+        source: ${LO_HOST_ROOT:?absolute root of the Linux host to observe}
+        target: /hostfs
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${LO_LOG_DIR:?absolute directory of approved input logs}
+        target: /input
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  agent-state: {}
+secrets:
+  agent-ingest-token:
+    file: ${LO_INGEST_TOKEN_FILE:?absolute path to the ingest bearer token file}

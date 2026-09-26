@@ -1,0 +1,113 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). This one does not build: see `unshipped:`.
+# Authoring contract: components/control/sigma/CONTRACT.md, "Writing a rule here".
+title: A board write came from an account outside its lane
+id: b862a24d-7a60-4fc5-af5a-cdae2789dd9a
+status: experimental
+description: >-
+  An identity the operator has not named did something on the project board, or a named identity did
+  something outside the lane it was given (minting a token, changing protection, membership or webhooks),
+  or a write arrived with no identity at all. Three directions, one record set: the board is a
+  machine other machines write to, so "who was that" has to be asked before somebody asks it by hand.
+author: local-observe
+derived_from: >-
+  v0.1 rule `detections/gitea-actor-outside-lane.yaml` plus `detections/allowlists/gitea-actors.txt`
+  (private estate sources). Re-derived as Sigma. **The allowlist file does not cross**: it is 25
+  lines of real account logins, which is an identity list and not detection content. What replaces it
+  is the `parameters:` block below. No login, host name or count is copied.
+logsource:
+  product: devops
+  category: audit
+detection:
+  unknown_actor:
+    Actor:
+      - ''
+  admin_shape:
+    Action|contains:
+      - token
+      - webhook
+      - protect
+      - member
+      - permission
+  condition: unknown_actor or admin_shape
+level: medium
+enabled: false
+measured:
+  false_positives: null
+  because: >-
+    unmeasured. v0.1 sampled 50 recently-updated objects and found every write in lane — quoted
+    below — and it also recorded that the stream this rule reads did not exist at all, which is the
+    more important half of its own measurement and the reason a zero finding count there carried no
+    information. Nothing here re-measures either.
+  window: none
+  population: none
+  measured_on: null
+  source: none
+parameters:
+  actors:
+    source: >-
+      the operator's overlay: one login per line with its lane, never this repository. v0.1 kept it in
+      a text file beside the rule and rendered it into the SQL at load time; that file is an identity
+      list and stays private.
+    lanes:
+      act: identities expected to MUTATE the board (issues, comments, labels, pull requests)
+      prompt: identities whose comments are handed to a model as instructions
+    empty: deny-all
+    why_empty_is_safe: >-
+      with no actor named, no identity is known, so every board write on the stream reads as
+      out-of-lane and the rule is at its loudest. The unsafe direction is the opposite one — an
+      absent list read as "everything listed", which turns a missing overlay into an all-clear. An
+      empty `prompt` lane is likewise safe: the admin-shape branch then fires for every listed
+      account instead of excusing the one human expected to do admin things, so the failure is a page
+      to read, not a silence.
+unshipped:
+  blocker: compile
+  refusal: Only the linux process_creation mapping is enabled
+  reason: >-
+    The gate refuses the log source (`product: devops`, `category: audit`) before anything else, and
+    four more refusals wait behind it, each a separate piece of work: `Actor` and `Action` are not in
+    the reference field mapping and have no verified store fixture; the `empty-string` selection that
+    spells "the record arrived with no actor" is refused outright, because the initial mapping admits
+    non-empty ASCII strings only and a null/empty match is a mapping decision, not a value to type;
+    the lane lists are a runtime input the build does not take (the compiler validates a parameter's
+    *shape* and its fail-closed policy and refuses to bake values in — see CONTRACT.md — so SQL
+    committed here could never be the SQL that answered "is this actor known?"); and v0.1's
+    admin-shape screen is a case-insensitive regular expression over the operation name, whose
+    modifier is not in the validated set the compiler admits. `tests/compiler/test_sigma_content_rules.py`
+    asserts the first refusal is still this file's actual failure, so this reason cannot quietly go
+    stale.
+why: |
+  WHAT THIS ASSERTS, IN THREE DIRECTIONS (v0.1's shape, kept because each one catches a different
+  failure):
+
+    * **outside the allowlist** — an account with no business writing here did something. v0.1's
+      reason for the rule was an identity that changed without the name changing: an agent harness
+      switched signing accounts and eleven days of writes read as the old account, which nothing
+      could notice. Attribution answers "who did that" only once somebody asks; this asks first.
+    * **admin-shaped op by a listed actor** — the identity is known and the *operation* is not in its
+      lane: tokens, users, orgs, teams, webhooks, branch protection, membership. Those mint power,
+      and no board-writing agent needs them. Only the prompt-lane account is expected to do them.
+    * **actor missing from the record** — a record with no actor at all. This is a producer bug, not
+      an attack, and it is the case an audit query must never answer with "nobody". It is the one
+      branch here that needs no allowlist at all.
+
+  TWO LANES, NOT ONE LIST. v0.1 deliberately kept the `act` lane (who may write) narrower than the
+  `prompt` lane (whose comments are handed to a model as instructions), because widening the second
+  to the first would let any write-capable identity steer the delivery worker. The shape is kept in
+  the `parameters:` block above; the values are the operator's, and adding a login to the `act` lane
+  is a diff in his overlay reviewed there — which is exactly why it was never going to be a value
+  this repository could supply.
+
+  SILENCE HERE MEANS "THERE IS NO STREAM", NOT "ALL CLEAR" — v0.1 measured this directly: the audit
+  source this rule reads had **zero** records over 30 days, because the forge's audit table was not
+  being shipped at all. So a finding count of 0 was the expected value and carried no information,
+  and the check that carried the information was "how many rows in that stream exist". This
+  repository has the same hazard and a name for it: a window with no rows opens
+  `sigma.<uuid>.coverage` and never resolves the finding beside it. A deployment that mounted a
+  compiled version of this rule against an unmapped log source would see coverage open, not quiet —
+  which is the only reason it is safe to leave the file here unbuilt.
+
+  NOISE EXPECTATION, QUOTED AND NOT REPRODUCED: over the 50 most recently updated objects in one
+  board v0.1 found every write in lane (two identities, 50 opens and 40 comments), and recorded that
+  the sample was narrow because the board was agent-run — so the real false-positive risk was a NEW
+  account, and the allowlist file was where that got resolved, deliberately, in a diff.

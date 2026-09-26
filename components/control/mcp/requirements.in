@@ -1,0 +1,20 @@
+# Runtime dependencies of the MCP tool-surface image (component `mcp`, MCP component).
+#
+# Four lines, and each earns its place by being imported at boot:
+#   mcp        - the official Python SDK, `mcp.server.fastmcp` + `mcp.types`, the two names
+#                local_observe/platform/mcp.py imports and refuses loudly without (the [project]
+#                optional extra `mcp` in pyproject.toml pins the same version, and this line may not
+#                drift from it: a surface built against another SDK is a different protocol version
+#                than the one components/control/mcp/CONTRACT.md describes).
+#   uvicorn    - the ASGI server the CMD line runs, exactly as components/control/platform does.
+#   PyYAML     - local_observe/inventory/validation.py imports `yaml`, and tools.py imports
+#                `canonical`/`timestamp` from that module, so the read surface cannot start without it.
+#   jsonschema - the same module's `Draft202012Validator`.
+#
+# Transitive closure + sha256 hashes live in requirements.lock; regenerate as described in
+# docs/BUILD.md. The platform's own lock (components/control/platform/requirements.lock) is the
+# sibling; the two share the three base pins and must be regenerated together when one moves.
+mcp==1.29.1
+PyYAML==6.0.3
+jsonschema==4.26.0
+uvicorn==0.52.4

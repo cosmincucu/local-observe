@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:local-observe:schema:v1/common.json",
+  "$defs": {
+    "uuid": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 256},
+    "kind": {"enum": ["host", "device", "service", "storage", "endpoint", "backup-job", "credential-reference"]},
+    "alias": {
+      "type": "object", "additionalProperties": false, "required": ["type", "value"],
+      "properties": {
+        "type": {"enum": ["hostname", "host.id", "ip", "legacy_id", "service.name"]},
+        "value": {"$ref": "#/$defs/text"},
+        "scope": {"type": "string", "maxLength": 128}
+      }
+    },
+    "aliases": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/alias"}, "uniqueItems": true},
+    "attributes": {
+      "type": "object", "maxProperties": 100,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128},
+      "additionalProperties": {"type": ["string", "number", "boolean", "null"], "maxLength": 2048}
+    },
+    "credential_refs": {
+      "type": "object", "maxProperties": 50,
+      "additionalProperties": {"type": "string", "pattern": "^(bao|vault|env|file):[^\\s]+$", "maxLength": 512}
+    }
+  }
+}

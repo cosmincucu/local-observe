@@ -1,0 +1,72 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). This one does not build: see `unshipped:`.
+# Authoring contract: components/control/sigma/CONTRACT.md, "Writing a rule here".
+title: A client's blocklist hits jumped far above its own baseline
+id: a1da1dd3-8cc7-47c6-bcab-586e96c61a6a
+status: experimental
+description: >-
+  One client resolved names the resolver denied at a rate several times its own recent average, or
+  appeared for the first time with a non-trivial count. A device announcing adware or malware looks
+  exactly like this, and a fleet-wide threshold catches neither: the normal rate differs wildly per
+  device, so a phone that chats to trackers all day and a device that never does cannot share one
+  number.
+author: local-observe
+derived_from: >-
+  v0.1 rule `detections/dns-blocklist-spike.yaml` (private estate source). Re-derived as Sigma
+  against the reference schema; no text, resolver address, client name, sample domain or count
+  copied. The history in `why:` is v0.1's own, quoted from its `why:`/`proof:` blocks.
+logsource:
+  product: dns
+  category: dns_query
+detection:
+  blocked:
+    response_policy: BLOCKED
+  condition: blocked
+level: medium
+enabled: false
+measured:
+  false_positives: null
+  because: >-
+    unmeasured, and it would be the wrong measurement even if a DNS stream existed here: v0.1
+    tuned this rule by the ratio between a client's hour and its own seven-day baseline, which is a
+    number computed from two windows of the same series, not from a predicate over one window.
+  window: none
+  population: none
+  measured_on: null
+  source: none
+unshipped:
+  blocker: construct
+  refusal: Only the linux process_creation mapping is enabled
+  reason: >-
+    Two refusals, and the second is the interesting one. The gate meets the log source first: no DNS
+    field set is mapped, so `response_policy` (and v0.1's `client_name`) have nothing to compile
+    against. Behind that refusal sits the one no field mapping can clear: this file's `detection:` is
+    only the *matcher* half of the rule — "a query was blocked" — and the finding is the ratio of two
+    windows of the same client's own history. A Sigma rule is a predicate over records in a window;
+    it has no join, no baseline and no per-key history, so the honest options are (a) ship this as
+    `response_policy: BLOCKED` and page on every blocked lookup, which is a rule that always fires
+    and therefore says nothing, or (b) don't ship it. This file is (b), with the matcher kept in
+    place so the day the field mapping grows the comparison is already specified.
+why: |
+  WHERE THE COMPARISON BELONGS IN THIS REPO. "Several times its own recent average" is a *metric*
+  condition, and this repo already has that layer: `local_observe/platform/conditions.py` judges
+  sustained/band/absence conditions and `local_observe/platform/dynamic_bands.py` learns a band from
+  a series' own history (both alert conditions, evidence at the unit tier, never against a running store). The
+  port of this rule is therefore **not** a Sigma artifact: it is a series — blocked-lookup count per
+  declared client resource — fed to the learned-band condition, whose `skipped(insufficient)` case is
+  the same coverage pattern the Sigma runner already uses. Two consequences a reviewer should hold:
+
+    * it needs the client to be a **declared inventory resource** with a UUID, because every finding
+      in this repo resolves a `resource_id` before it files one, and an undeclared device has no
+      right to a verdict;
+    * a baseline that is genuinely absent must stay a finding, not a skipped row. That is the whole
+      content of v0.1's tuning story below, and it is the reason this file is not simply deleted.
+
+  THE LESSON, QUOTED FROM v0.1 AND WORTH KEEPING LOUDLY. Its query joined the recent window to the
+  seven-day baseline as an **INNER** join until 2026-08-26, which meant a client with no history —
+  the first day of a new device, a guest phone, a renamed host — produced no output row. So the rule
+  could not fire for the clients most worth catching, and reported nothing while doing it: silence
+  read as "all clear". Changing the join to LEFT and labelling those rows `NEW-CLIENT` fixed it. The
+  general rule this repo inherits: **a check that cannot run must not look like a check that passed**
+  — which is what `sigma.<uuid>.coverage` is for here, and what the absent-sensor fixture in
+  `tests/test_sigma_content.py` pins.

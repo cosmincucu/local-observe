@@ -1,0 +1,53 @@
+schema_version: 1
+source: synthetic-fixture
+snapshot_id: a17e7b22-5cfb-49ea-898a-083f5d31d3ac
+observed_at: '2026-09-06T12:00:00Z'
+status: ok
+complete: false
+scope: [aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1]
+observations:
+  - observation_id: host-001
+    resource_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1
+    kind: host
+    name: probe-1-renamed
+    aliases: [{type: hostname, value: PROBE-1.EXAMPLE.TEST.}]
+    attributes: {os: linux, environment: demo}
+    evidence: ['fixture:host-001']
+  - observation_id: new-service-001
+    kind: service
+    name: discovered-demo-api
+    aliases: [{type: service.name, value: discovered-demo-api, scope: demo}]
+    attributes: {environment: demo}
+    evidence: ['fixture:new-service-001']
+
+# Discovery providers: what each source is allowed to read, and how it is configured.
+#
+# Every provider below returns observations only. Nothing here is a write target: an undeclared
+# observation becomes a proposal file and then a review PR (docs/DECISIONS.md discovery write policy), never a line
+# of declared inventory. The declaration side of this example is declared.yaml, which the sweep
+# ranges below deliberately do not appear in.
+#
+# docker_provider — one rootless daemon, five inspected fields, no whole-container read. The
+# socket argument is the operator's own rootless per-user socket path, which is why it is named here
+# as a variable and never written out in an example:
+#
+#   DockerProvider(['demo', 'inventory-stage'], source='demo-docker',
+#                  socket=ROOTLESS_SOCKET, expected_root=DOCKER_DATA_ROOT)
+#
+# kube_provider — a listing the operator captured elsewhere; this product holds no cluster client:
+#
+#   KubeProvider(source='demo-kube', listing=read_document('work/pods.json'))
+#
+# sweep_provider — the ranges live in the operator's own config tree, never in a product file. synthetic naming
+# reserves 10.11.0.0/16 for any address a reader may copy into a real file, so the example uses
+# 10.11.0.0/24 under an allowlist ceiling of 10.11.0.0/16; a range outside RFC 1918, or outside the
+# allowlist, or written without host bits cleared, is refused before the first address is probed:
+#
+#   SweepProvider(source='demo-sweep', cidrs=['10.11.0.0/24'], sweep_allowlist=['10.11.0.0/16'],
+#                 prober=operator_prober, max_addresses=254)
+#
+# A sweep cannot be named in a JSON config file at all: probing needs a prober, no JSON document
+# carries a callable, and this repository ships no default one — worker.provider_from_config() says
+# so rather than inventing a scanner. The prober an operator supplies may be an ARP-cache read, a
+# DHCP-lease list or a switch query; it is never ICMP, and never a subprocess started here.
+

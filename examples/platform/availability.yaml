@@ -1,0 +1,5 @@
+id: synthetic-http
+kind: availability
+resource_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2
+source: stage-detector
+max_age_seconds: 30

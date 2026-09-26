@@ -1,0 +1,6 @@
+html, body { background: #f5f7f8 !important; color: #263238; letter-spacing: 0; }
+.service-card { background: #fff !important; border: 1px solid #dbe1e5; border-radius: 6px; box-shadow: none !important; }
+#myTab { background: #e9eef0; }
+#myTab [role="tab"] { color: #35434b; }
+#myTab [role="tab"][aria-selected="true"] { background: #d6eee7; color: #075c4a; }
+.service-block { background: #f0f3f5 !important; color: #243640; font-weight: 500; }

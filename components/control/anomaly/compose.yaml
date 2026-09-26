@@ -1,0 +1,191 @@
+# Seasonal-baseline anomaly producer: one `python -m local_observe.platform.anomaly` loop, run as its
+# own service so the platform API does not also become the judge of every series in the deployment.
+#
+# What this service decides that nothing else can: whether a value is strange **for that series at
+# that hour**. Every other producer compares a number with a limit somebody typed into a file; this one
+# learns the band from the series' own history (`median ± k · 1.4826 · MAD` per seasonal bucket) and is
+# the only place in the product that can say "normal here, would not be normal at 04:00". What leaves
+# here is one ordinary `kind='anomaly'` event per series per window, posted to platform intake: an
+# anomaly is an input to incidents and never a page of its own, and this process reads no notification
+# mode (`local_observe/platform/anomaly.py:18-21`) -- the page-or-not decision stays the platform
+# service's, as it is for every other producer's event.
+#
+# Status: SHIPPED AS A MANIFEST, NEVER STARTED. No container from this directory has been started, no
+# `docker compose config` has rendered this file -- not even since `examples/full/compose.yaml` began
+# including it on 2026-09-10 (anomaly deployment support, the dedicated anomaly credential), which is a claim about this tree and not about a
+# deployment. The modules it runs are this checkout's
+# `local_observe/platform/anomaly.py` + `anomaly_cursor.py`, and
+# `versions.json` records both their commits and why the platform image pinned on this tree cannot
+# contain them. Every runtime claim below is therefore about the code in the image, not about a
+# deployment; `conformance.md` lists the checks that would make it one.
+services:
+  anomaly:
+    # The platform's image, not a new one: the producer is a module inside `local_observe/platform/`,
+    # so a second image would be a second build of the same package with its own lock to rot. That
+    # reuse has a price and versions.json states it -- the digest pinned in
+    # components/control/platform/versions.json was verified before these two modules landed, so an
+    # operator who points this service at that image gets a `No module named` refusal, not a producer.
+    # The message names the requirement because this is the failure an operator actually meets: an
+    # image built before these modules existed, or a value left unset.
+    image: ${LO_PLATFORM_IMAGE:?Build containing local_observe.platform.anomaly, pinned by digest}
+    # Built locally from this checkout and never pulled: a daemon that could fetch this tag could also
+    # fetch one that judges differently, and a silently-changed judge is a changed detection surface.
+    pull_policy: never
+    platform: linux/amd64
+    command: [python, -m, local_observe.platform.anomaly]
+    # The image's own runtime user (`USER 65532:65532` in components/control/platform/Dockerfile),
+    # spelled here so the mount ownership in CONTRACT.md has one owner. Overriding it makes the cursor
+    # volume's 0700 directory unreadable to the process that needs it.
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    # 256 MB / 0.5 CPU: the same envelope as the Sigma runner, which is the right order of magnitude
+    # because this worker holds the same shape of working set -- one bounded query result per series
+    # (2 000 rows) plus at most 16 series and one cursor document under 2 MiB. It is a cap, not a
+    # measurement: no container has been started, so nothing here says what the process actually uses.
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # The only writable path outside /state is /tmp, and nothing in this worker is documented to need
+    # it: `anomaly_cursor.save` writes its temp file beside the cursor, in /state. Kept at 32 MB
+    # because the CPython interpreter and the `json` stdlib may want scratch, and a refused start is
+    # harder to read than a small mount.
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=33554432"]
+    environment:
+      # The container-side path of the reviewed series document. The host path is
+      # `LO_ANOMALY_CONFIG_FILE` below, mounted at this address -- the two names are deliberately
+      # distinct, because one variable used for both makes a reader guess which side of the mount a
+      # value belongs to. Unset, `anomaly.main` treats the producer as not configured: one INFO line
+      # and exit 0, so this path must be set whenever the service is meant to judge anything.
+      LO_ANOMALY_CONFIG: /config/anomaly.json
+      # Where this producer remembers which windows it judged and what it still owes the platform.
+      # Fixed to the named volume below, and it has to be: the cursor's parent must already exist at
+      # mode 0700 (`anomaly_cursor.private_parent`), which a bind of an operator directory would put
+      # on a path the gate forbids (`check_foundation` refuses any non-read-only bind). Wrong path ->
+      # the container refuses at startup and never writes; an unset value -> a configured producer
+      # refuses to start, because delivering verdicts it cannot re-send is not a safe way to run.
+      LO_ANOMALY_CURSOR: /state/cursor.json
+      # The producer identity, and the token's counterpart: the cursor records it, and a restored
+      # cursor written under a different value is refused rather than re-anchored over. It must match
+      # the identity THIS service's producer token was minted for (its own file, not the Sigma runner's
+      # -- see the `secrets:` block at the foot of this file); mismatch and every POST to
+      # /v1/events is refused (HTTP 400, `not_authorised`) in a way the operator reads as "the store is rejecting my data". No default: a
+      # guessed identity is a second producer sharing one name, which the dedup would fold into the
+      # first one's events.
+      LO_ANOMALY_SOURCE: ${LO_ANOMALY_SOURCE:?Bound producer identity, the same name its token was issued to}
+      # The read-only inventory snapshot; `/inventory` is the mount below. Every series' `resource_id`
+      # must resolve in this index or the whole round refuses before its first query, so pointing this
+      # at an old snapshot makes the producer silent and loud at once (one refusal line per round)
+      # rather than quietly judging a resource nobody declared.
+      LO_INDEX_PATH: /inventory/inventory.db
+      LO_CLICKHOUSE_URL: ${LO_CLICKHOUSE_URL:?Explicit query endpoint}
+      # The only value here with a default, and deliberately so, exactly as in the Sigma manifest:
+      # `lo-query` is not a secret but the name components/data/store-signoz/clickhouse-users.d/
+      # lo-query.xml creates (readonly=1, allow_ddl=0, SELECT on the signal databases only). The
+      # password beside it stays a required file, so this default cannot authenticate a producer as
+      # someone else -- an unset LO_CLICKHOUSE_PASSWORD_FILE still stops `config`. Set it only if you
+      # created a different name in your own store.
+      LO_CLICKHOUSE_USER: ${LO_CLICKHOUSE_USER:-lo-query}
+      # Both credentials arrive as mounted files, never as environment values: an env value is
+      # readable through `docker inspect` and /proc/<pid>/environ of every process in this container.
+      # `read_credential` prefers the `_FILE` variable's contents; the host paths are the two
+      # `secrets:` entries at the bottom. The query password underneath is the same file the Sigma
+      # runner already mounts; the producer token is NOT -- it is this service's own file, named by
+      # `LO_ANOMALY_PRODUCER_TOKEN_FILE`, and the reason is the comment on that `secrets:` entry.
+      LO_CLICKHOUSE_PASSWORD_FILE: /run/secrets/anomaly-clickhouse-password
+      LO_PLATFORM_URL: ${LO_PLATFORM_URL:?Platform intake}
+      LO_PRODUCER_TOKEN_FILE: /run/secrets/anomaly-producer-token
+      # Both endpoints are plaintext HTTP on the isolated Compose network; the shared clients refuse
+      # http:// unless this is exactly 1. Set 0 when both endpoints are HTTPS -- leaving it 1 against
+      # an HTTPS deployment breaks nothing here, but it keeps a plaintext path permitted.
+      LO_INTERNAL_ALLOW_HTTP: ${LO_INTERNAL_ALLOW_HTTP:-1}
+      # This manifest's own knob, and the only number here that is not read by the product code: it is
+      # consumed by the healthcheck below and by nothing else. The cursor's mtime advances only when a
+      # window is judged, so a producer that is idle writes nothing for a whole evaluation window on
+      # purpose -- an allowance of one window would call that unhealthy. CONTRACT.md carries the rule
+      # (`>= max(evaluation_seconds) + 2 x tick_seconds`), the shipped default of 1800, and the one way
+      # it produces a false alarm: raise `evaluation_seconds` in the config file and not this value and
+      # the container goes `unhealthy` while judging exactly as it always did. Non-numeric or unset ->
+      # the probe exits 1, which reads as unhealthy: the fail-closed direction for a liveness check.
+      LO_ANOMALY_STALE_SECONDS: ${LO_ANOMALY_STALE_SECONDS:-1800}
+    secrets:
+      - anomaly-clickhouse-password
+      - anomaly-producer-token
+    volumes:
+      # Named volume, not a bind: `check_foundation.check_model` refuses any bind that is not
+      # read-only, and a cursor is a write. What the image brings to this path changed on 2026-09-10:
+      # components/control/platform/Dockerfile now creates /state at mode 0700 owned 65532, so on an
+      # image built from this tree the producer's `private_parent` check should pass on a volume
+      # nobody touched -- UNBUILT HERE, so unverified. The image pinned in that component's
+      # versions.json (2026-09-06) predates the line and carries no /state at all: a fresh volume then
+      # arrives `root:root` mode 0755 and `private_parent` refuses exactly that, so it must be prepared
+      # BEFORE the first `up`. CONTRACT.md carries that recipe as the fallback it now is, marked NOT
+      # RUN, the repair for an operator who ran `up` first, and conformance row 2.11 is the check that
+      # decides which of the two paths an operator is on.
+      - anomaly-state:/state
+      - ${LO_ANOMALY_CONFIG_FILE:?Host path of the reviewed anomaly series document}:/config/anomaly.json:ro
+      - ${LO_INVENTORY_SNAPSHOT_DIR:?Immutable inventory directory}:/inventory:ro
+    # No `ports:` at all. Nothing reaches this service over the host interface: it is a producer that
+    # opens two outbound connections and serves nothing. `anomaly` is therefore deliberately absent
+    # from `check_foundation.py`'s HOST_PUBLISHED_SERVICES, and adding it there would widen the
+    # exposed surface to buy nothing.
+    # No `depends_on:` either, and not for tidiness: `check_example` refuses a dependency naming a
+    # service this manifest does not declare, so an entry like `depends_on: [platform]` makes this
+    # component unusable on its own -- the shape it was written for, and the shape it keeps now that
+    # examples/full includes it (the merged model would resolve `platform`, this file alone would not).
+    # Start order does not matter anyway: a round that cannot reach the store or intake logs one refusal
+    # and repeats on the next tick, cursor unmoved.
+    healthcheck:
+      # A cursor-staleness probe, in the same shape as components/control/sigma/compose.yaml, and it
+      # proves less than it looks like: **"this producer has stopped advancing windows"**, not "this
+      # process is alive". The producer writes the cursor only when a window is judged, so an idle
+      # producer looks still -- hence the allowance comes from LO_ANOMALY_STALE_SECONDS above and not
+      # from a hard-coded constant. A hung process that still completes a window keeps a green
+      # container; a wedged start is invisible to it too, because Compose reports `starting` through
+      # `start_period` and this probe answers 1 (missing file) the moment that window closes.
+      # 90 s of `start_period` is enough because `anomaly.main` runs one `tick` before its first sleep
+      # and a new series writes its first window to the cursor before the store is asked anything
+      # (`anomaly.py:749-764`), so a healthy first round writes within seconds of the start.
+      test:
+      - CMD
+      - python
+      - -c
+      - >-
+        import os,sys,time; p=os.environ['LO_ANOMALY_CURSOR'];
+        a=float(os.environ.get('LO_ANOMALY_STALE_SECONDS','1800'));
+        sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < a else 1)
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      # 10 MB x 3 is the cap the platform README's log-volume table already computed this worker
+      # against: at the shipped 300 s tick, with one round line plus one line per series reached,
+      # ~1,152 lines a day for a three-series configuration is about 109 days of history -- the
+      # longest retention of any looping worker here, and the reason a backlog walk is bounded by
+      # MAX_WINDOWS_PER_ROUND rather than by the size of the gap.
+      options: {max-size: 10m, max-file: "3"}
+volumes:
+  anomaly-state:
+secrets:
+  # Two names of their own, not the Sigma manifest's `producer-token` / `clickhouse-password`:
+  # Compose raises on conflicting top-level resource definitions across an `include`, and `sigma`
+  # already declares both. Whether two *identical* definitions would have merged cleanly is not
+  # verifiable offline (no `docker compose config` was run from this repository), so the names are
+  # distinct. The host paths underneath are NOT one shared pair any more : the
+  # query password is still Sigma's file, because one store has one read-only query user, but the
+  # producer token is this service's own, because one row of the platform's credentials file carries
+  # exactly one `identity` and `local_observe/platform/state.py` refuses an event whose `source` is not
+  # the identity the request authenticated as ('Source identity differs from authenticated producer').
+  # Reusing `${LO_PRODUCER_TOKEN_FILE}` here -- which is what anomaly component shipped -- therefore produced a
+  # container that started, judged every configured series and had every POST to /v1/events refused,
+  # because `LO_ANOMALY_SOURCE` and `LO_SIGMA_SOURCE` are two names and that file holds one token. One
+  # credential row = one identity, so a second producer is a second row and a second `_FILE`. The
+  # staging recipe is examples/full/README.md step 5 and CONTRACT.md section 4.
+  anomaly-clickhouse-password:
+    file: ${LO_CLICKHOUSE_PASSWORD_FILE:?absolute path to the read-only ClickHouse query credential file}
+  anomaly-producer-token:
+    file: ${LO_ANOMALY_PRODUCER_TOKEN_FILE:?absolute path to the credential file minted for the anomaly identity}

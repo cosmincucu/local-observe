@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "case": "positive",
+  "rule": "audit-trail-disable.yaml",
+  "note": "One row per branch of the OR: the flag that disables kernel auditing, and the service control that stops the daemon. Both are conjunctions (executable AND words), which is what keeps the rule off the same binaries doing something else.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 2,
+    "usable_count": 2,
+    "match_count": 2
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000011",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/sbin/auditctl",
+        "process.command_line": "auditctl -e 0"
+      }
+    },
+    {
+      "timestamp_ns": 1788955180000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000012",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/systemctl",
+        "process.command_line": "systemctl stop auditd"
+      }
+    }
+  ]
+}

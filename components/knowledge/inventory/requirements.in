@@ -1,0 +1,8 @@
+# Runtime dependencies of the inventory API image.
+# Transitive closure + sha256 hashes live in requirements.lock; regenerate as described in
+# docs/BUILD.md. Core deps mirror [project.dependencies] in pyproject.toml, the two datasette
+# pins mirror the inventory-api extra.
+PyYAML==6.0.3
+jsonschema==4.26.0
+datasette==0.65.3
+datasette-graphql==2.2

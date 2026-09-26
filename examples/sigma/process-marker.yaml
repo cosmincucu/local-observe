@@ -1,0 +1,48 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). Authoring contract:
+# components/control/sigma/CONTRACT.md, "Writing a rule here".
+# This one is the product's own conformance fixture, not a threat claim: it exists so the runner,
+# the artifact checks and the coverage verdicts can be exercised against a rule nobody has to
+# argue about. Its `id` is quoted verbatim by tests/test_security_dualwrite.py and its `level` is
+# `medium` because it is a pipeline test, not a claim about anybody's network.
+title: Local Observe Synthetic Process Marker
+id: 5d2cb39c-5f2a-4b40-b346-a2a00e0a8d09
+status: experimental
+description: Product-owned synthetic rule for pipeline conformance, not an estate threat claim.
+author: local-observe
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  selection:
+    Image|endswith: /lo-fixture
+    CommandLine|contains: --sigma-positive
+  condition: selection
+level: medium
+enabled: true
+measured:
+  false_positives: null
+  because: >-
+    This rule is a synthetic pipeline fixture. It exercises positive, negative, missing-data, window-boundary and recovery behavior. A fixture population cannot establish a false-positive rate for real traffic; the rule therefore remains unmeasured.
+  window: none
+  population: the product's own synthetic fixture
+  measured_on: null
+  source: components/control/sigma/conformance.md
+why: |
+  WHAT THIS IS FOR. One rule with a known match set, so the compiled-artifact path (`sigma_compile`
+  → committed SQL → `sigma_runner.artifact()` checks → bounded ClickHouse query → canonical events →
+  durable cursor replay) can be tested end to end without asserting anything about a real network.
+  It is shipped enabled because the deployment ships it: `components/control/sigma/compose.yaml`
+  mounts one reviewed compiled artifact, and this is the one reviewed compiled artifact the product
+  can supply without knowing the operator's hosts.
+
+  WHY IT IS STILL COUNTED AS UNMEASURED. "Enabled and shipped" and "measured" are two different
+  claims, and the honest headline `sigma_runner.measurement_report()` prints keeps them apart: this
+  rule is 1 of the shipped and 1 of the unmeasured. notification budget's precision budget is about rules that
+  touch real traffic, and a fixture is not traffic.
+
+  DO NOT MAKE THIS RULE SMARTER. Its two matched values are the values
+  `scripts/sigma_fixture.py` writes, and its `id` is
+  quoted verbatim by `tests/test_security_dualwrite.py`. Changing a matched value without changing
+  the synthetic source is not a rule edit, it is a broken conformance path — and the compiler tier
+  recompiles this file byte-for-byte against the committed SQL, so the pair cannot drift silently.

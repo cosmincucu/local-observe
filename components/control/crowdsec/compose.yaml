@@ -1,0 +1,143 @@
+# CrowdSec Security Engine — the optional decision store (component `crowdsec`, crowdsec).
+# Optional by construction, like `ai`: NO shipped example composition includes this file, so a
+# `minimal`, `standard` or `full` bring-up needs no CrowdSec image and no CrowdSec credential. The
+# shape to opt into is `examples/crowdsec/`, which is one `include:` entry added to the operator's own
+# top-level file (docs/OPERATOR-MODEL.md §2). CONTRACT.md first: it separates what was read upstream at
+# the pinned tag from what has never been run, and it states plainly that this service blocks nothing.
+#
+# One service, on purpose. threat detection engine kept CrowdSec's deciding half ("Local API as decision store"), and the
+# image README for the pinned tag is explicit that agent and Local API are the same executables that may
+# run "in the same or separate containers". A two-container split buys nothing at this size and doubles
+# the credentials to manage; the bouncer that would sit at the end of this chain is NOT here at all, and
+# CONTRACT.md states why the gate would refuse it if it were (`check_model`: "unexpected host privilege/
+# network access") and why that refusal is the correct one rather than an obstacle to work around.
+services:
+  crowdsec:
+    # Pinned by digest in components/control/crowdsec/versions.json, which records both the release tag
+    # and the debian flavour's digest (journald needs the debian build: the image README says the alpine
+    # one has no journalctl support). compose.yaml therefore states `platform: linux/amd64` — the digest
+    # below is that architecture's manifest, so a host on another architecture must resolve the index
+    # digest named in versions.json rather than silently read a manifest nobody checked.
+    image: ${LO_CROWDSEC_IMAGE:?pin by digest, from versions.json (read from the registry, not a tag page)}
+    platform: linux/amd64
+    # Nothing infrastructure-grade upgrades itself: the daemon must never pull this image at boot. The
+    # hub content this container installs on first start (parsers, scenarios) is versioned separately
+    # from the binary, so a silent pull changes the detection surface as well as the engine.
+    pull_policy: never
+    read_only: true
+    restart: unless-stopped
+    # Asserted, not observed: no container has been started from this manifest. The two paths this
+    # image must write are both writable volumes below, and the image README names no third one; if the
+    # first host run disagrees, the fix is another tmpfs line and not a writable root.
+    tmpfs: [/tmp:size=64m]
+    # No `user:` line, and that is a deviation from components/control/ai/compose.yaml that deserves the
+    # sentence: the entrypoint writes the machine and bouncer credential files into /etc/crowdsec on
+    # first start, and the pinned image drops no privileges of its own. Running this as a non-root uid is
+    # a row in conformance.md to be earned on a host, not a line written here unchecked.
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # A Go engine plus the hub's parsers: 256 MiB / 1 cpu / 128 pids is a bound, not a measurement, and
+    # it is deliberately roomier than the 128 MiB Gatus gets, because this one keeps SQLite and the log
+    # tails of several sources in the same process. Re-check it against the pinned release on the first
+    # host run (upgrade.md) — an OOM-killed engine reads as "no attacks today".
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 128
+    environment:
+      # The detection scope threat detection engine actually authorised: ssh/proxy brute force, "fed from files/journald",
+      # and nothing else. The default below is the image's OWN default collection (image README at the
+      # pinned tag: "by default crowdsecurity/linux is installed"); the ssh and proxy collections
+      # threat detection engine narrows to are deliberately NOT named here, because no catalogue of hub collection names was
+      # reachable from this checkout on 2026-09-09 (hub.crowdsec.net's API answered 404 to a GET) and a
+      # name invented from memory installs a parser nobody has seen. CONTRACT.md "Hub content" says what
+      # to read and where, and `crowdsecurity/linux` is the honest starting point rather than a claim.
+      COLLECTIONS: ${LO_CROWDSEC_COLLECTIONS:-crowdsecurity/linux}
+      # community blocklist dependency: the community blocklist is off by default and one line opts in. `DISABLE_ONLINE_API` is
+      # the upstream variable that stops the Central API channel the blocklist arrives on; the value
+      # shipped here is `true`, so an untouched deployment shares no signals and imports no blocklist.
+      # What the pinned documentation claims for this variable is "Disable online API registration for
+      # signal sharing" — whether switching it to false fully stops the blocklist pull as well has never
+      # been observed here, and conformance.md keeps that as a row to prove, not a promise.
+      DISABLE_ONLINE_API: ${LO_CROWDSEC_CAPI_DISABLED:-true}
+      # The agent half stays ON (upstream default), because a LAPI-only container reads no logs and threat detection engine
+      # named the ssh/proxy scenarios fed from files/journald as the half it wanted. `DISABLE_LOCAL_API`
+      # is deliberately unset: this container is its own LAPI.
+      LOCAL_API_URL: http://crowdsec:8080
+      # No host port is published (see the note at the foot of this file), so this is the address the
+      # bouncer overlay and `crowdsec.py`'s reader would use on the project network. Plaintext HTTP
+      # inside the project network is what every other manifest here does and what
+      # local_observe/http.py refuses unless LO_INTERNAL_ALLOW_HTTP is set to 1.
+      # Timezone for its own log lines. Left to the image default (UTC) on purpose: every host in the
+      # reference deployment keeps UTC, and a security engine stamping local time is a correlation cost
+      # paid by whoever reads the incident later.
+    volumes:
+      # REQUIRED by the image since v1.7.0: without a volume here the container refuses to start
+      # (image README, "Required configuration / Volumes"). This is the state an operator cannot
+      # regenerate — decisions, machine and bouncer credentials, the enrolment record — so it is
+      # named, backed up and restored in backup.md rather than treated as container scratch.
+      - crowdsec-data:/var/lib/crowdsec/data
+      # Config plus the credentials the entrypoint mints on first start. A named volume, not a bind, so
+      # the state is project-scoped like every other volume here (`check_model` refuses an
+      # `external`/`name`ed volume for exactly that reason).
+      - crowdsec-config:/etc/crowdsec
+      # Acquisition: one YAML per log source (image README's recommended shape). Rendered by the
+      # operator, mounted read-only, and `create_host_path: false` so a directory nobody wrote stops the
+      # boot instead of mounting the empty one Docker would happily create — an empty acquis.d is an
+      # engine that watches nothing while reporting itself healthy.
+      - type: bind
+        source: ${LO_CROWDSEC_ACQUIS_DIR:?absolute directory of acquisition YAML files, one per log source}
+        target: /etc/crowdsec/acquis.d
+        read_only: true
+        bind: {create_host_path: false}
+      # The log files themselves, read-only. Which host paths are the overlay's to name (overlay compatibility): this
+      # manifest cannot say where an estate keeps its sshd logs, and shipping a guess would be shipping
+      # someone else's topology.
+      - type: bind
+        source: ${LO_CROWDSEC_LOG_DIR:?absolute directory holding the log files the acquisition YAML names}
+        target: /logs
+        read_only: true
+        bind: {create_host_path: false}
+      # profiles.yaml is where auto-block authority's "only these alerts reach anybody" lives upstream: its `filters`
+      # decide which alerts notify, and its `decisions` list is what CrowdSec asks a bouncer to do. Both
+      # are read-only mounts of an operator-rendered file, and the shipped example
+      # (examples/crowdsec/profiles.yaml) restricts the notification to the brute-force scenarios.
+      - type: bind
+        source: ${LO_CROWDSEC_PROFILES_FILE:?absolute path to the rendered profiles.yaml}
+        target: /etc/crowdsec/profiles.yaml
+        read_only: true
+        bind: {create_host_path: false}
+      # The HTTP notification plugin's config: the URL it posts alerts to
+      # (`http://platform:8002/v1/intake/crowdsec`) and the bearer token in its `headers:` block. That
+      # token is the `crowdsec` producer row of the platform role file, so this file is a credential
+      # carrier and belongs at mode 0400 on the host, never in git. It is also the one part of this
+      # component scripts/check_foundation.py cannot see: the gate polices LO_* environment values, and
+      # this secret travels inside a mounted YAML.
+      - type: bind
+        source: ${LO_CROWDSEC_NOTIFICATIONS_FILE:?path to the rendered notification config (carries a token; 0400)}
+        target: /etc/crowdsec/notifications/http.yaml
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+    # No healthcheck: the pinned image is not verified to carry a probe-able endpoint that answers
+    # without credentials, and `cscli` needs the API credentials this container keeps to itself. Engine
+    # liveness is therefore the coverage verdict in the platform, exactly as it is for Gatus
+    # (components/control/synthetics/compose.yaml says the same thing about its engine): when this
+    # service is down, alerts stop arriving and the declared rule's coverage stays firing. conformance.md
+    # keeps "a usable credential-free readiness endpoint exists" as a not-run row.
+volumes:
+  crowdsec-data:
+  crowdsec-config:
+# Deliberately absent, each with its reason kept next to it rather than in a document nobody opens:
+#   ports:            nothing is published. The reference consumer of the Local API is a container on
+#                     the project network, and the human surface is `docker compose exec crowdsec cscli
+#                     decisions list`. Adding a `127.0.0.1:8080:8080` line is upstream's own example and
+#                     would mean naming `crowdsec` in check_foundation.py's HOST_PUBLISHED_SERVICES with
+#                     an argument; this component ships neither, and the argument stays available.
+#   secrets:          none. The blocklist is off, so no Central API credential exists to mount; when an
+#                     operator opts in, the credential lands in /etc/crowdsec (the config volume) via
+#                     `cscli capi register`, which a human runs — see CONTRACT.md "Enrolment".
+#   network_mode / privileged: not here, and not needed by this service. The thing upstream runs with
+#                     them is the bouncer, which this repository does not ship; see CONTRACT.md
+#                     "The bouncer is an overlay, and the gate is right".

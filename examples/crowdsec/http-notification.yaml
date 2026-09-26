@@ -1,0 +1,70 @@
+# CrowdSec HTTP notification plugin config — the outbound half of the inbound path (crowdsec).
+# Mounted read-only at /etc/crowdsec/notifications/http.yaml by
+# components/control/crowdsec/compose.yaml. Rendered by the operator, kept at mode 0400, never
+# committed: the `Authorization` header below is a credential, and it is the one secret on this
+# component that scripts/check_foundation.py's credential rule cannot see (that rule polices LO_*
+# environment values in Compose models; this value travels inside a mounted YAML).
+#
+# Shape source: `cmd/notification-http/http.yaml` at the pinned tag v1.8.1 (read 2026-09-09) — `type`,
+# `name`, `log_level`, `format`, `url`, `method`, `headers`, and the template's own commented `group_wait`,
+# `group_threshold`, `max_retry`, `timeout`. The plugin's own field list is narrower still
+# (`cmd/notification-http/main.go` at the same tag parses only name/url/unix_socket/headers/
+# skip_tls_verification/method/log_level/cert_path/key_path/ca_cert_path): `format` is rendered by the
+# Local API's notification manager before the plugin is called, and the plugin sends the rendered text as
+# the request body. Nothing here is invented; what is not quoted there is left at its default by omission.
+
+type: http
+name: http_default
+
+# `log_level: info` is what the page's example carries. Lower it to `warn` once the intake path is
+# proven, because at `info` this plugin logs what it posted — and a posted alert body contains source
+# addresses, which is the kind of text an operator does not want in a json-file log by default.
+log_level: info
+
+# One key, added to upstream's template rather than taken from it, and this is the whole integration
+# seam in one line: upstream's shipped default is `format: |` + `{{.|toJson}}`, whose output "goes in the
+# http request body" (its own comment) and is therefore a bare JSON **array** — and this platform's POST
+# handler answers 400 `Expected a JSON object body` to any body that is not a JSON object (`api.py`, the
+# branch that guards every write route). Wrapping the array in one named key is the operator-side edit
+# that reconciles the two without weakening either: no product code changes, no envelope contract is
+# loosened for the other four sources, and the array itself still arrives byte-for-byte as `toJson`
+# rendered it. `local_observe/platform/crowdsec.py::alerts` reads that key and nothing else; the
+# component's CONTRACT.md names this as the single place where an operator must not paste upstream's
+# default verbatim.
+format: |
+  {"alerts": {{.|toJson}}}
+
+# The accompanying intake rules select each alert's native events_count through
+# sample_field: alert.events_count. No metadata transformation or event-detail counting is needed.
+
+# The platform's one inbound webhook path for this source. Plaintext HTTP on the project network,
+# which is what every internal hop in this repository does and what local_observe/http.py refuses
+# unless LO_INTERNAL_ALLOW_HTTP=1; this container is the sender, so the flag belongs to whatever
+# component posts next. `platform` is the service name in
+# components/control/platform/compose.yaml, whose container port is 8002; the published
+# 127.0.0.1:18083 host port is NOT this address and must not be used from inside the network.
+url: http://platform:8002/v1/intake/crowdsec
+
+method: POST
+
+# Replace the whole value below with the token of the `producer` row whose identity is exactly
+# `crowdsec` in the platform role file. The identity has to match because api.py's `intake_target`
+# refuses a `/v1/intake/<source>` POST whose path names anyone other than the authenticated caller —
+# so a shared producer token cannot post as CrowdSec, and a CrowdSec token cannot post as anything
+# else. A wrong or missing token is a 401 at this plugin's retry counter, and the alerts land nowhere:
+# not a degraded verdict, an absent one, which is why README.md makes the first-run proof the first
+# thing an operator does after enabling this file.
+headers:
+  Authorization: Bearer REPLACE-WITH-THE-CROWDSEC-PRODUCER-TOKEN
+
+# Bounded on purpose. `group_wait` batches for ten seconds and `group_threshold` sends sooner once ten
+# alerts have accumulated, so a brute-force burst becomes one POST rather than fifty. Two ceilings sit
+# behind it, and neither is this number: the route refuses a body over 64 KiB (`api.py`) and the
+# adapter refuses an envelope over 50 alerts (`crowdsec.MAX_ALERTS`), so an alert list that is large
+# enough to matter is refused whole rather than partially admitted. Ten per POST keeps the ordinary case
+# far inside both. `max_retry` keeps the plugin trying while the platform restarts; `timeout` is the
+# plugin's own deadline for one attempt.
+timeout: 10s
+max_retry: 3
+group_wait: 10s
+group_threshold: 10

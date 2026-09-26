@@ -1,0 +1,74 @@
+{
+  "status": "experimental",
+  "schema_version": 1,
+  "component": "agent-windows",
+  "platform": "windows/amd64; a native executable -- no container, no Compose model, no image digest",
+  "verified_on": "2026-09-08",
+  "collector": {
+    "distribution": "otelcol-contrib",
+    "version": "0.159.0",
+    "release_repo": "open-telemetry/opentelemetry-collector-releases",
+    "release_tag": "v0.159.0",
+    "asset": "otelcol-contrib_0.159.0_windows_amd64.tar.gz",
+    "url": "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.159.0/otelcol-contrib_0.159.0_windows_amd64.tar.gz",
+    "publisher_checksum_asset": "otelcol-contrib_0.159.0_windows_amd64.tar.gz.sha256",
+    "publisher_checksum_url": "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.159.0/otelcol-contrib_0.159.0_windows_amd64.tar.gz.sha256",
+    "archive_sha256": "86434cf172aa91a5fc148978dad9bfaacd25a80bd2df93f19015814e7c5359bb",
+    "binary_sha256": "e15e33cbd50c5890abff1776a997c56b007a1d1bbf617e9faac80dabd016d8cb",
+    "publisher_checksum_verified": true,
+    "binary_executed": true,
+    "binary_execution_scope": "run from a private directory with an isolated config against a loopback receiver by scripts/check_windows_agent.py; never installed as a service, never pointed at production ingest",
+    "signature_verified": false
+  },
+  "provenance": {
+    "verified_on": "2026-09-08",
+    "method": "download the asset named in collector.asset -> hash the download and compare it with the publisher's own checksum file (publisher_checksum_url) -> list the archive members and reject absolute or traversal paths -> extract otelcol-contrib.exe and hash it -> compare with collector.binary_sha256 -> only then install. Each step refuses; the recipe and its commands are in CONTRACT.md.",
+    "archive_member_paths": [
+      "README.md",
+      "otelcol-contrib.exe"
+    ],
+    "archive_contains_absolute_or_traversal_paths": false,
+    "publisher_checksum_matched_download": true,
+    "extracted_binary_matched_pinned_sha256": true,
+    "checksum_checked_against": "the .sha256 asset served by the same GitHub release, not a third-party mirror and not the file named in this repository",
+    "signature_verification": "not performed. A sigstore bundle (<asset>.sigstore.json) is published beside the release asset and this repository ships no sigstore/cosign dependency, so nothing here verifies it. No signature and no registry publication is claimed for this component.",
+    "distribution": "one GitHub release asset fetched over HTTPS; the estate builds nothing here and publishes nothing"
+  },
+  "windows_event_log": {
+    "component_type": "windows_event_log",
+    "deprecated_alias": "windowseventlog",
+    "stability": "alpha (logs only); unsupported on darwin and linux",
+    "documentation": "https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.159.0/receiver/windowseventlogreceiver/README.md",
+    "present_in_pinned_build": "otelcol-contrib.exe components lists windows_event_log from module .../receiver/windowseventlogreceiver v0.159.0 (measured 2026-09-08)",
+    "channel_and_query_are_exclusive": true,
+    "channel_and_query_refusal": "either `channel` or `query` must be set, but not both",
+    "used_by": "collector-security.yaml, an opt-in overlay that collector.yaml does not load",
+    "fields_used": [
+      "query",
+      "start_at",
+      "max_reads",
+      "poll_interval",
+      "raw",
+      "storage",
+      "retry_on_failure"
+    ],
+    "options_not_selected": {
+      "event_driven_scraping": "alpha feature gate stanza.windows.eventDrivenScraping, off in the pinned build's default gate list",
+      "resolve_sids": "adds LSA calls per event; not validated here, so SIDs arrive unresolved",
+      "remote": "collection over the network needs its own permissions review",
+      "exclude_providers": "the query bounds the read; provider exclusion is a noise knob, not a privacy one",
+      "path": "reads an .evtx archive instead of a live channel"
+    }
+  },
+  "upstream": {
+    "selected": "0.159.0",
+    "current_at_time_of_writing": "v0.160.0 (2026-09-02)",
+    "why_not_the_newest": "the front door, the store collector and this agent are one contrib version; the remediation ledger records the 0.159.0 -> 0.160.0 move as pending-data-pass (store-signoz versions.json, validation.collector_upgrade), and a pin moves on its own branch with a reason and a rollback line, never inside another component's change"
+  },
+  "validated": {
+    "os_build": "10.0.26200 (windows/amd64)",
+    "native_conformance": "conformance.md",
+    "machine_readable_pin_read_by": "scripts/check_windows_agent.py",
+    "security_channel": "overlay loads and carries an event with stable identity on a non-Security channel; Security-channel delivery, service installation, and native upgrade/restore are not run -- see conformance.md and CONTRACT.md"
+  }
+}

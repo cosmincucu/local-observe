@@ -1,0 +1,26 @@
+# Example declarations for the full-stack example (see ../README.md, step 2).
+# The two ids below are PLACEHOLDERS. Copy this file into your deployment directory and replace
+# the host id there with one you generate, then set LO_RESOURCE_ID in the environment file to the
+# same value: the Sigma runner refuses to evaluate a resource it cannot resolve in the index.
+#   python3 -c "import uuid; print(uuid.uuid4())"
+# Every name here is generic on purpose; this file describes no real machine.
+schema_version: 1
+resources:
+  - id: a2bb9adb-a78a-429c-b13c-d4e11dec9510
+    kind: host
+    name: host-01
+    aliases:
+      - {type: hostname, value: host-01}
+      - {type: hostname, value: host-01.example.invalid}
+      - {type: host.id, value: synthetic-host-01}
+      - {type: ip, value: 198.51.100.11}
+    attributes: {os: linux, environment: example}
+    relations: []
+  - id: 1de70eea-c3cc-46e9-ae91-87a62e5c90ce
+    kind: service
+    name: example-service
+    aliases:
+      - {type: service.name, value: example-service, scope: example}
+    attributes: {environment: example, enabled: true}
+    relations:
+      - {type: runs-on, target: a2bb9adb-a78a-429c-b13c-d4e11dec9510}

@@ -1,0 +1,133 @@
+# Product Gatus configuration — the SHAPE, not an operator's deployment.
+#
+# Ownership (overlay compatibility): this product owns the shape of a Gatus document; the operator's overlay owns the
+# targets inside it. Copy this file to a private path, render the two marked lines, then point
+# LO_GATUS_CONFIG at your copy — the manifest in this directory mounts it read-only at
+# /config/config.yaml with create_host_path: false, so editing this checkout edits the pin, not your
+# running engine. Why that path works with no environment variable: the engine's own default is the
+# RELATIVE path `config/config.yaml` (config/config.go, DefaultConfigurationFilePath) and the image is
+# `FROM scratch` with no WORKDIR in the runtime stage, so the working directory is `/` and the default
+# lands exactly where the bind puts the file. GATUS_CONFIG_PATH is the override if you mount elsewhere,
+# and it may name a DIRECTORY, whose *.yaml files upstream deep-merges with `endpoints` concatenated
+# (README, "You can specify a custom path") — an operator who wants to keep this shipped file untouched
+# and add targets in a second document can bind a directory and do exactly that; this manifest binds one
+# file on purpose, so that shape is a stated option and not the default. An invalid `security:` block is
+# not a warning: main.go panics on a configuration that fails to load, so the container dies and
+# `restart: unless-stopped` makes it a crash loop, which is loud. Upstream also expands $VAR / ${VAR} in
+# the document from the container's own environment (config/config.go, os.ExpandEnv at the pinned tag);
+# this file deliberately uses no variables, because an unset one expands to an empty string and every
+# empty required field here is one the engine would either reject at boot or run open on. CONTRACT.md
+# names what was read at v5.36.0 and what stays UNVERIFIED.
+#
+# Bound the way the rest of this repository bounds things: Gatus keeps
+# storage.maximum-number-of-results (default 100) results per endpoint, and the adapter in
+# local_observe/platform/detections.py refuses an envelope with more than 1000 rows rather than
+# truncating one.
+
+storage:
+  type: sqlite
+  path: /data/gatus.db
+
+# Authentication on the status API. This block is the reason the component exists in this form: the
+# adapter in local_observe/platform/detection_worker.py presents a credential to Gatus, and an
+# absent `security:` key makes that gesture decorative — at the pinned release every route under
+# /api/v1/endpoints/<key>/statuses is registered on a router that gets an auth middleware ONLY when
+# this key is present (api/api.go: "ORDER IS IMPORTANT: all routes applied AFTER the security
+# middleware will require authn"; config/web has no auth option of its own). Delete this block and
+# the engine answers anyone on the project network — which is what the staging example still does,
+# and says so in examples/platform/gatus.yaml.
+#
+# RENDER BOTH MARKED LINES. `username` must equal the user half of the base64 pair in
+# LO_GATUS_TOKEN_FILE, and `password-bcrypt-base64` must be the URL-alphabet base64 of the bcrypt hash
+# of the password half of it (generator and the exact wire shape, including the two different base64
+# alphabets: CONTRACT.md "Credential"). The markers are not valid base64 on purpose, and the failure
+# they produce is a boot failure, not an open door: `security.Config.ValidateAndSetDefaults` only asks
+# that both fields be non-empty (security/basic.go isValid), so a marker passes validation, and then
+# `ApplySecurityMiddleware` runs `base64.URLEncoding.DecodeString` on the hash field and returns the
+# error (security/config.go, reached from api/api.go, which panics on it). An unrendered copy therefore
+# never serves a request: the container dies at once and `restart: unless-stopped` makes it a crash
+# loop the operator sees, while every rule the detector used to file reads `coverage`. The alternative
+# — shipping a well-formed fake hash — would put a credential-shaped string in the tree and boot an
+# engine that answers 401 to everything, which is quieter and no more usable.
+#
+security:
+  basic:
+    username: RENDER-ME-lo-detector
+    password-bcrypt-base64: RENDER-ME-base64-of-the-bcrypt-hash
+
+endpoints:
+  # Exactly one target, and it is an in-project service: this proves the mechanism (engine reaches a
+  # declared service, evaluates a condition, persists a result, and the adapter files a verdict from
+  # it) without shipping a LAN sweep. Real targets are overlay edits, one at a time, with an explicit
+  # opt-in — CONTRACT.md "Targets" states the rule and the reserved placeholder scheme (synthetic naming) an
+  # example address must come from.
+  - name: platform-http
+    group: lo
+    # Key = lo_platform-http, which is what LO_GATUS_URL in compose.yaml addresses.
+    url: http://platform:8002/v1/status
+    # 30 s keeps a day of probes to ~2,900 requests. Keep the detection rule's max_age_seconds at
+    # three times this or the coverage verdict flaps between two probes: the shipped default of 120
+    # satisfies it, and examples/platform/availability.yaml's 30 was authored for a 2 s staging
+    # probe, not for this interval.
+    interval: 30s
+    client:
+      timeout: 5s
+    conditions:
+      # The platform serves /v1/status to an authenticated reader and answers 401 to everyone else
+      # (local_observe/platform/api.py). This check therefore asks "is the HTTP surface answering",
+      # never "is the platform authorised": 0 (connection refused, DNS failure, timeout) or any 5xx
+      # makes the result unsuccessful, which is what the adapter turns into a firing availability
+      # finding. Documented at the pinned tag as `[STATUS] == any(200, 429)` in README's condition
+      # table, so `any()` on [STATUS] is not an invention of this file.
+      - "[STATUS] == any(200, 401)"
+
+  # ---------------------------------------------------------------------------
+  # NOT SHIPPED, DECLARED HERE: the certificate-expiry stages (gatus for synthetics).
+  #
+  # The three stages the abandoned bespoke engine used to compute in code are three Gatus
+  # *endpoints*, not three code paths — one condition each, because conditions inside one endpoint
+  # are ANDed and the adapter reads one boolean per endpoint (detections.gatus_sample). Crossing
+  # into a tighter stage is then a different endpoint failing, i.e. a different rule_id, which is
+  # what keeps 30/14/1-day from swallowing each other. Feature used for each stage, at the pinned
+  # tag: the `[CERTIFICATE_EXPIRATION]` placeholder compared against a duration (README's
+  # placeholder table, and the `tls://`/`starttls://` endpoint examples which use exactly this form).
+  #
+  # Not shipped because the placeholder needs a TLS endpoint and this file declares zero real
+  # targets; uncomment one per certificate you own and add one rule document per stage.
+  # Stages are 720h/336h/24h = 30/14/1 days, the certificate-warning stages this file declares.
+  # The TLS observation adapter reads certificate expiry as
+  # 30/14/3-day — the discrepancy is flagged in that brief, not resolved here.
+  #
+  # - name: cert-30d
+  #   group: tls
+  #   url: tls://10.11.0.10:636          # synthetic naming reserved placeholder range only in a shipped file
+  #   interval: 6h
+  #   conditions:
+  #     - "[CERTIFICATE_EXPIRATION] > 720h"
+  # - name: cert-14d
+  #   group: tls
+  #   url: tls://10.11.0.10:636
+  #   interval: 6h
+  #   conditions:
+  #     - "[CERTIFICATE_EXPIRATION] > 336h"
+  # - name: cert-1d
+  #   group: tls
+  #   url: tls://10.11.0.10:636
+  #   interval: 1h
+  #   conditions:
+  #     - "[CERTIFICATE_EXPIRATION] > 24h"
+  #
+  # DNS the same way (`type: DNS` plus `[DNS_RCODE] == NOERROR`), and a hostname from synthetic naming's
+  # `example.test` domain rather than an address:
+  #
+  # - name: resolver-hub
+  #   type: DNS
+  #   group: dns
+  #   url: 10.11.0.1:53
+  #   dns:
+  #     query-name: hub.example.test
+  #     query-type: A
+  #   interval: 5m
+  #   conditions:
+  #     - "[DNS_RCODE] == NOERROR"
+  # ---------------------------------------------------------------------------

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "case": "negative",
+  "rule": "process-marker.yaml",
+  "note": "Three near misses that must not match: the right command line on the wrong executable, the right executable with the fixture's own negative argument, and an unrelated process. A rule that fires on any of these has stopped testing the pipeline and started paging on it.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 3,
+    "usable_count": 3,
+    "match_count": 0
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000003",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/other",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955171000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000004",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--ordinary-negative"
+      }
+    },
+    {
+      "timestamp_ns": 1788955172000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000005",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/env",
+        "process.command_line": "echo nothing"
+      }
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "component": "chat",
+  "status": "selected",
+  "verified_on": null,
+  "schema_version": 1,
+  "provisional": "This provisional chat integration requires independent end-to-end validation.",
+  "platform": "linux/amd64 and linux/arm64 are both published; never started here",
+  "image": {
+    "upstream": "Mintplex-Labs/anything-llm",
+    "release": "v1.16.1",
+    "release_url": "https://github.com/Mintplex-Labs/anything-llm/releases/tag/v1.16.1",
+    "source_commit": "35c58d89907e675a8c4fb10544c19be0f050f611",
+    "source_commit_committed_at_utc": "2026-08-27T16:16:40Z",
+    "image_reference": "docker.io/mintplexlabs/anythingllm:1.16.1",
+    "image_digest": "sha256:05617e7bece7fd6eddc4f5b4176cd87fff74d7da88d988a6109b95481cce122c",
+    "image_digest_media_type": "application/vnd.oci.image.index.v1+json (multi-arch index; the tag carries attestation manifests too - the publish workflow sets provenance: mode=max and sbom: true, so the index is not just two platform manifests)",
+    "linux_amd64_digest": "sha256:b7b570b8bfc0bd2a64097439524a38542784eea03522db9d30256f5e711f52fc",
+    "linux_arm64_digest": "sha256:e08b510ca44e43605d50dc86241275f36bb92d56e41a99122017d33b75b13aab",
+    "compressed_size_bytes": {
+      "amd64": 1101725314,
+      "arm64": 1100460336,
+      "stated_in_words": "1,101,725,314 bytes compressed for amd64 - about 1.1 GB of download, and more than that on disk once unpacked. Anyone calling this component \"light\" should read this number first; it is roughly the whole download of the telemetry store stack.",
+      "uncompressed_bytes": null,
+      "uncompressed_note": "null is honest, not lazy: the registry API reports the compressed layer total only. Upstream's own disk figure is 5 GB of storage for a working instance (see system_requirements below), which is the number to plan against, and nothing here has measured either."
+    },
+    "digest_provenance": {
+      "read_on": "2026-09-09",
+      "url": "https://hub.docker.com/v2/repositories/mintplexlabs/anythingllm/tags/1.16.1",
+      "method": "Docker Hub tag metadata: digest identifies the index, images[].digest identifies each platform, and full_size/images[].size records compressed bytes. This is registry metadata, not runtime acceptance.",
+      "also_published_at": "The upstream build workflow also publishes to GHCR. Resolve the selected registry independently before setting LO_CHAT_IMAGE; no GHCR digest is asserted here.",
+      "cross_check": "the release page (linked above) dates v1.16.1 at 2026-08-27, and the tag record's tag_last_pushed is 2026-08-27T16:44:35Z - about 28 minutes after the tagged commit. That agreement is the only provenance link available without a signature check."
+    },
+    "licence": {
+      "spdx": "MIT",
+      "read_at": "https://github.com/Mintplex-Labs/anything-llm/blob/v1.16.1/LICENSE (\"The MIT License, Copyright (c) Mintplex Labs Inc\"), read 2026-09-09",
+      "also_stated_by": "Use the component contract and reviewed upstream pin; validate against your installation.",
+      "bundling": "nothing from this image is copied into this repository, so NOTICE carries no entry for it: the component names an image the operator pulls. If a future release vendors a file from it, that notice moves in the same change as the file."
+    }
+  },
+  "runtime_facts_read_at_the_pinned_commit": {
+    "read_on": "2026-09-09, every line from source at https://github.com/Mintplex-Labs/anything-llm/tree/35c58d89907e675a8c4fb10544c19be0f050f611",
+    "docker/Dockerfile": "base image `ubuntu:noble-20251013`; build args ARG_UID/ARG_GID default 1000 and the image creates user `anythingllm` (home /app) with those ids and chowns /app; uv/uvx 0.6.10 are installed \"for MCP support\"; ENV ANYTHING_LLM_RUNTIME=docker, NODE_ENV=production, DEPLOYMENT_VERSION=1.16.1; HEALTHCHECK runs /usr/local/bin/docker-healthcheck.sh; ENTRYPOINT is [\"/bin/bash\", \"/usr/local/bin/docker-entrypoint.sh\"]; a USER line exists (unlike the llama.cpp serve this row sits beside)",
+    ".github/workflows/build-and-push-image-semver.yaml": "passes NO build-args, so the published image carries ARG_UID=1000/ARG_GID=1000 - this is the inference behind `user: \"1000:1000\"` in compose.yaml, and it stays an inference (see `unverified`)",
+    "docker/docker-entrypoint.sh": "warns loudly and boots anyway when STORAGE_DIR is unset - \"Not setting this will result in data loss on container restart\"; then, from /app/server: `npx prisma generate`, `npx prisma migrate deploy`, `node /app/server/index.js` in one background job and `node /app/collector/index.js` in another, under `wait -n` + `exit $?`. Two facts follow and both are load-bearing: ONE container runs TWO servers (the web API and the document collector), and the boot regenerates code into its own filesystem.",
+    "docker/docker-healthcheck.sh": "curls http://localhost:${SERVER_PORT:-3001}/api/ping and exits 0 on 200 - the probe this manifest reuses verbatim; curl is installed in the base stage",
+    "docker/docker-compose.yml": "upstream's own file bind-mounts ./.env to /app/server/.env and ../server/storage to /app/server/storage, plus collector/hotdir and collector/outputs; runs `user: ${UID:-1000}:${GID:-1000}`; and adds cap_add SYS_ADMIN. It does NOT set read_only. The cap is what upstream needs to run Puppeteer's Chromium without the `--no-sandbox` env; this manifest drops ALL caps instead and names the consequence in CONTRACT.md.",
+    "docker/.env.example": "SERVER_PORT=3001, STORAGE_DIR=\"/app/server/storage\", and the seedable secrets SIG_KEY, SIG_SALT and JWT_SECRET (the last \"Only needed if AUTH_TOKEN is set\", minimum 12 chars; the others 32). It also documents `DISABLE_VIEW_CHAT_HISTORY=1`, `AGENT_AUTO_APPROVED_SKILLS` (\"skills that are auto-approved ... invoked without user interaction\"), `MCP_NO_COOLDOWN`, `AGENT_MAX_TOOL_CALLS`, `ANYTHINGLLM_CHROMIUM_ARGS=\"--no-sandbox,--disable-setuid-sandbox\"` as the documented alternative to cap_add SYS_ADMIN, and `DISABLE_SWAGGER_DOCS=\"true\"` recommended for production.",
+    "server/index.js": "`require(\"dotenv\").config()` with no path argument while the entrypoint has already `cd /app/server/`, so /app/server/.env is the settings file; binds SERVER_PORT or 3001; `cors({ origin: true })` - the API answers any browser origin, which is why publication stays on loopback.",
+    "server/prisma/schema.prisma": "`datasource db { provider = \"sqlite\", url = \"file:../storage/anythingllm.db\" }` relative to server/prisma/, i.e. /app/server/storage/anythingllm.db - inside STORAGE_DIR. The SQLite file is the component's state, and it holds the user table, the API keys table (`api_keys.secret`), workspaces, threads, chats and the MCP registry's sibling settings.",
+    "server/utils/helpers/updateENV.js": "line 1546: `const envPath = path.join(__dirname, \"../../.env\"); fs.writeFileSync(envPath, envResult, { flag: \"w\" })` inside `dumpENV()`, called from `updateENV()` at line 1416 under `if (process.env.NODE_ENV === \"production\")`. Reached from POST /api/system/update-env (endpoints/system.js:590) and from /api/system/update-password (line 626). So the pinned build WRITES ITS OWN SETTINGS FILE, including any provider key, in plaintext, on a UI action - the reason CONTRACT.md states what the read-only mount costs instead of pretending the mount is free.",
+    "server/utils/logger/index.js": "in NODE_ENV=production the only winston transport is Console - no log file is written inside the container, so container logs plus the json-file cap below are the whole story.",
+    "server/utils/MCP/hypervisor/index.js": "imports StdioClientTransport, SSEClientTransport AND StreamableHTTPClientTransport from @modelcontextprotocol/sdk; `#parseServerType` returns \"http\" when the entry has a `url`; `createHttpTransport` constructs `new StreamableHTTPClientTransport(url, { requestInit: { headers: server.headers } })` (line 428) or the SSE equivalent (line 434). This is the single fact the whole \"MCP is the seam\" design rests on, and it is true of the pinned commit: MCP component's Streamable-HTTP facade with a bearer header is reachable from this surface. Validate this transport against the selected MCP deployment.",
+    "server/utils/MCP/hypervisor, server/.gitignore": "the server registry is `${STORAGE_DIR}/plugins/anythingllm_mcp_servers.json` (hypervisor resolves it from STORAGE_DIR; server/.gitignore lists it). It is application state the app writes, not config this repository can ship - which is why no LO_ variable names the MCP endpoint and why the tool allowlist cannot be expressed in YAML (CONTRACT.md, \"The allowlist and where it is actually enforced\").",
+    "server/.gitignore": "the enumerated write set under storage/: anythingllm.db (+ -journal), lancedb/, assets/, documents/, comkey/, tmp/, vector-cache/, exports/, imports/, anythingllm-fs/, generated-files/, generated-images/, plugins/agent-skills/, plugins/agent-flows/, plugins/office-extensions/, plugins/anythingllm_mcp_servers.json, push-notifications/, direct-uploads/, logs/server.log. backup.md's scope is this list, not a guess.",
+    "server/index.js route list": "the pinned build mounts its OWN Telegram bot (endpoints/telegram.js, `TelegramBotService.bootIfActive()` in utils/boot/index.js), web push (endpoints/webPush.js, `PushNotifications.setupPushNotificationService()` at boot) and a mobile API (endpoints/mobile/). \"bootIfActive\" is the whole clause-4 argument in one identifier: with no bot token configured, no Telegram process starts. Nothing in this product's examples configures one.",
+    "server/utils/telemetry/index.js, server/models/telemetry.js": "telemetry is ON unless `DISABLE_TELEMETRY === \"true\"` (exact string compare; models/telemetry.js:50 returns null only on \"true\" or dev). compose.yaml therefore sets it, and a test asserts the setting is present rather than hoping the reader notices."
+  },
+  "system_requirements": {
+    "read_on": "2026-09-09",
+    "url": "https://docs.anythingllm.com/installation-docker/system-requirements",
+    "recommended_minimum": {
+      "ram": "2 GB",
+      "cpu": "2 cores with AVX2",
+      "storage": "5 GB"
+    },
+    "hard_requirement": "\"Your CPU must support the AVX2 instruction set. This is the one hard requirement AnythingLLM has of your hardware.\" The default vector database, LanceDB, compiles against an Intel Haswell (2013) baseline; on a CPU without AVX2 the upstream text says the server \"is killed the moment LanceDB loads and the container exits\" with an Illegal instruction from the entrypoint's line 7. Check inside the guest: `lscpu | grep -o avx2`. The documented escape is to move off LanceDB by setting VECTOR_DB - an operator decision, not a manifest line, so this file names the check and conformance.md carries it as a pre-flight.",
+    "against_q33": "The standard composition can enable chat; the foundation baseline is 16 GB."
+  },
+  "hermes_identity": {
+    "state": "OPEN - no additional assistant harness is selected",
+    "question": "Any additional harness needs an explicit upstream identity and integration contract.",
+    "what_was_read": "An alternative assistant is a candidate only, not a selected dependency.",
+    "ask": "Select and validate an explicit upstream project before adding a component.",
+    "why_it_is_not_a_detail": "A harness must not introduce a second approval authority."
+  },
+  "validation": {
+    "image_digests_resolved": true,
+    "image_pulled": false,
+    "container_started": false,
+    "runtime_conformance": "not-run",
+    "component_in_an_example": false,
+    "component_in": "no shipped example composes this manifest; the opt-in is one item added to the existing include list, documented in CONTRACT.md section 8 and in examples/full/README.md step 10 (never a second include: key, which Compose would drop)",
+    "static_gate": "scripts/check_foundation.py's model rules are run over this manifest directly by tests/test_chat_component.py, because no example include line puts it inside check_example - the same arrangement AI integration recorded for `ai`",
+    "approval_separation": "tested at the platform boundary (tests/test_chat_approval_separation.py): a proposer-role credential - the shape a chat-issued per-agent token arrives as - can propose and cannot decide, cannot claim and cannot spend a second approval. The MCP-layer version of that test is blocked on MCP component's deployable service and is listed in conformance.md as blocked-on-MCP component, never as pass: the tools themselves shipped with mcp tool surface (platform/tools.py::agent_registry), and the execute_action tool refuses before any platform request (platform/tools.py::execute_tool), so no MCP credential of any role claims an action through that surface at all.",
+    "upgrade_rehearsal": "not-run",
+    "backup_restore": "not-run - the recipe in backup.md has never been executed against a running container; it is derived from the pinned commit's write set",
+    "evidence": "none: no docs/evidence note exists for this component, and none may be written until something has run"
+  },
+  "distribution": "no image is published by this project; the reference names upstream's, resolved from a dated registry read. Nothing here has been pulled, started, backed up or restored.",
+  "unverified": [
+    "that the published image's user is uid/gid 1000:1000. The Dockerfile defaults and the absence of build-args in the publish workflow both say so; neither is the image's own config. Prove it before the first boot: docker image inspect --format '{{.Config.User}}' mintplexlabs/anythingllm@sha256:05617e7bece7fd6eddc4f5b4176cd87fff74d7da88d988a6109b95481cce122c - if it answers anything else, the named volume's ownership and this manifest's `user:` line are both wrong together.",
+    "that the container boots with read_only: true. The entrypoint runs `npx prisma generate` from /app/server, which regenerates a client into the image root; whether the pinned build's already-generated client makes that a no-op is unknown, and if it is not a no-op the first boot fails with EROFS. conformance.md row 3 is the check and CONTRACT.md names the two remedies; neither has been applied.",
+    "that /app/collector writes nothing outside the paths this manifest makes writable. The entrypoint always starts the collector; its hotdir/outputs are bind-mounted in upstream's own compose and are tmpfs here.",
+    "the uncompressed image size on disk, and the 5 GB upstream storage figure, which is upstream's number for a working instance rather than a measurement of one.",
+    "whether the pinned release can run with no vector database at all. This product's shape wants none - answers arrive through MCP tools, not a knowledge base - but no VECTOR_DB value meaning \"off\" was found in docker/.env.example at the pinned commit, so the manifest does not claim one.",
+    "that AGENT_AUTO_APPROVED_SKILLS is empty by default in the shipped UI state; the manifest never sets it and the refusal it needs is server-side, but no run has confirmed the client default.",
+    "Compatibility with the assistant client selected by the operator."
+  ]
+}

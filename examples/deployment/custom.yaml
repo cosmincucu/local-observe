@@ -1,0 +1,18 @@
+schema_version: 1
+id: example-deployment
+homepage: {title: Example deployment, theme: light, color: gray}
+overrides: []
+content:
+  - id: user.media
+    kind: tile
+    spec:
+      name: Jellyfin
+      group: core.consoles
+      order: 0
+      config: {href: 'https://media.example.test', icon: jellyfin.png}
+  - id: user.energy
+    kind: dashboard
+    spec:
+      title: Household energy
+      variables: {host: automation-controller}
+      widgets: []

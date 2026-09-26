@@ -1,0 +1,73 @@
+# The default Windows agent: host metrics plus one bounded file-log glob, exported over OTLP HTTP.
+# It reads no Windows Event Log channel. The Security channel is a separate, opt-in pipeline in
+# collector-security.yaml, which this file does not reference -- see that file and CONTRACT.md for
+# the privilege it needs and what stays off while it is not selected.
+extensions:
+  file_storage:
+    directory: ${env:LO_AGENT_STATE_DIR}
+    create_directory: true
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.time:
+            attributes: [cpu, state]
+      memory: {}
+      disk: {}
+      network: {}
+      filesystem: {}
+  filelog:
+    include: ['${env:LO_LOG_GLOB}']
+    start_at: beginning
+    storage: file_storage
+    max_concurrent_files: 16
+    retry_on_failure:
+      enabled: true
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  resource/identity:
+    attributes:
+      - {key: host.name, value: '${env:LO_HOST_NAME}', action: upsert}
+      - {key: resource_id, value: '${env:LO_RESOURCE_ID}', action: upsert}
+      - {key: service.name, value: local-observe-agent, action: insert}
+exporters:
+  otlp_http:
+    endpoint: ${env:LO_INGEST_URL}
+    headers:
+      # The ingest credential is read from a file, not from the process environment: an environment
+      # value is readable by anyone who can read this host's process data and is inherited by every
+      # child the collector spawns. The path below is the one CONTRACT.md names -- confmap does not
+      # nest `${file:${env:…}}`, so the path cannot come from the environment -- and this pinned
+      # Windows build ships the `file` provider that reads it (evidence in CONTRACT.md). The file
+      # holds the token and NO trailing newline (create it with printf '%s', never echo): for a
+      # plain-scalar file the provider passes the bytes through verbatim, so a newline would be
+      # sent inside the Authorization header. If you move the file, change this line to match.
+      Authorization: Bearer ${file:C:/local-observe/agent/secrets/ingest-token}
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+service:
+  telemetry:
+    metrics:
+      level: none
+  extensions: [file_storage]
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resource/identity]
+      exporters: [otlp_http]
+    logs:
+      receivers: [filelog]
+      processors: [memory_limiter, resource/identity]
+      exporters: [otlp_http]

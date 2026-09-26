@@ -1,0 +1,12 @@
+{
+  "status": "experimental",
+  "verified_on": null,
+  "platform": "linux/amd64; isolated rootless Docker",
+  "schema_version": 1,
+  "python_base": "library/python@sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef",
+  "runtime_dependencies": "requirements.lock",
+  "uvicorn": "0.52.4",
+  "gatus_image": "twinproduction/gatus@sha256:8df964117ac6a78749ec8cd00039a499268156b874c3a110dc58de7e312c1ab5",
+  "gatus_image_note": "MIRROR ONLY. components/control/synthetics/versions.json is authoritative.",
+  "distribution": "Build first-party images from reviewed source and verify them before recording deployment identities."
+}

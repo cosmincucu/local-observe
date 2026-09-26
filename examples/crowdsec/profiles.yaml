@@ -1,0 +1,55 @@
+# CrowdSec profile — the shape this component ships for the decisions-only engine (crowdsec).
+# Mounted read-only at /etc/crowdsec/profiles.yaml (compose.yaml), rendered by the operator, never
+# committed.
+#
+# Shape source, read 2026-09-09 at the pinned tag v1.8.1: the shipped default profile
+# (`config/profiles.yaml`) supplies the `filters`, `decisions`, `notifications` and `on_success` keys
+# below, and `pkg/csconfig/profiles.go::ProfileCfg` is the closed field list they are decoded against —
+# `name`, `debug`, `filters`, `decisions`, `duration_expr`, `on_success`, `on_failure`, `on_error`,
+# `notifications`. That decoder runs `dec.KnownFields(true)`, so a key outside that list is not ignored:
+# the Local API refuses to start. It is why the one deliberate difference below sits *inside* the
+# `decisions` list rather than beside it.
+#
+# The one deliberate difference from upstream's example, and it is auto-block authority's, not style:
+#
+# `simulated: true` on the decision, not on the profile. `models.Decision` carries the field
+# (`pkg/models/decision.go` at v1.8.1, `Simulated *bool`), and `pkg/csprofiles/csprofiles.go` copies it
+# onto every decision the profile emits (lines 102-109 at that tag: a simulated reference decision marks
+# the produced decision simulated; otherwise an alert already in simulation mode does the same). Upstream's
+# shipped profile creates a plain `ban`, which is harmless while no bouncer exists and dangerous the moment
+# one does: a bouncer applies whatever decisions exist, so auto-created bans plus a bouncer are exactly the
+# hand-rolled auto-block threat detection engine replaced — and the platform's approval gate does not sit in that path,
+# because the platform is not the one deciding. Deleting this one line is the act that starts blocking,
+# which is why it carries this paragraph.
+#
+# What is NOT verified, and `versions.json` repeats it: what a bouncer does with a decision that arrives
+# carrying `simulated: true` is upstream's answer, not one measured here. This repository's own reader
+# (`local_observe/platform/crowdsec.py::LocalApi`) reads decisions and shows that flag as text; it never
+# acts on it.
+#
+# The filter is upstream's own sentence, kept verbatim, and its cost is stated here rather than hidden: it
+# notifies about alerts CrowdSec itself marked for remediation (`Alert.Remediation == true`), so an alert
+# from a scenario the engine considers non-remediable never reaches the platform and is not visible here at
+# all. Widening it to `Alert.GetScope() == "Ip"` alone is the one-line change that turns this into an
+# observation channel for every IP-scoped alert; it changes POST volume, not blocking, because the block
+# decision lives in `decisions:` above.
+name: lo-ip-scoped-only
+
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+
+decisions:
+  - type: ban
+    # Four hours: bounded, non-zero, and upstream's own number, so a decision nobody revisits expires on
+    # its own instead of outliving the reason it was made for.
+    duration: 4h
+    simulated: true
+
+# The plugin name has to match the `name:` in /etc/crowdsec/notifications/http.yaml exactly — the profile
+# selects notifications by name alone, and `ProfileCfg.Notifications` is a list of strings, so there is no
+# place to put a URL or a format here. A profile naming a notification that no plugin file registers is a
+# silent zero, not an error: CrowdSec decides, and nobody is told.
+notifications:
+  - http_default
+
+on_success: break

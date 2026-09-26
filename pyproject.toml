@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-observe"
+version = "0.1.0.dev0"
+description = "Self-hosted telemetry, incident investigation and operational workflows"
+license = "Apache-2.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["PyYAML==6.0.3", "jsonschema==4.26.0"]
+
+[project.optional-dependencies]
+inventory-api = ["datasette==0.65.3", "datasette-graphql==2.2"]
+platform-api = ["uvicorn==0.52.4"]
+mcp = ["mcp==1.29.1"]
+
+[project.scripts]
+lo-inventory = "local_observe.inventory.cli:main"
+lo-platform = "local_observe.platform.cli:main"
+lo-deployment = "local_observe.deployment.cli:main"
+lo-operator-setup = "local_observe.deployment.operator_setup:main"
+
+[tool.setuptools.packages.find]
+include = ["local_observe*"]
+
+[tool.setuptools.package-data]
+"local_observe.inventory" = ["schemas/*.json"]
+"local_observe.platform" = ["static/*"]

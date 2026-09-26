@@ -1,0 +1,72 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). This one does not build at all: see `unshipped:`.
+# Authoring contract: components/control/sigma/CONTRACT.md, "Writing a rule here".
+title: A Windows event log was cleared
+id: 26618b5f-42be-46a6-afd7-9afa600f6929
+status: experimental
+description: >-
+  Windows event ID 1102 — an event log, including the Security log, was cleared. One record is the
+  finding: nothing scheduled, supervisory or operational clears a security log, so there is no
+  threshold to tune and no baseline to learn. The row names who did it.
+author: local-observe
+derived_from: >-
+  v0.1 rule `detections/windows-audit-log-cleared.yaml` (private estate source). Re-derived as
+  Sigma; no text, host name, account domain, actor or count copied. The counts quoted below are
+  v0.1's own, quoted from its `why:`/`proof:` blocks, and were not reproduced.
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 1102
+  condition: selection
+level: critical
+enabled: false
+measured:
+  false_positives: null
+  because: >-
+    unmeasured here, and the shape of its measurement is not a false-positive count anyway: v0.1's
+    claim for this rule was that the event never occurs, quoted below. "Never occurs on one estate
+    in twelve days" is not a rate this repository can inherit, and no Windows log population exists
+    in this tree to measure against.
+  window: none
+  population: none
+  measured_on: null
+  source: none
+unshipped:
+  blocker: compile
+  refusal: Only the linux process_creation mapping is enabled
+  reason: >-
+    Three refusals stand between this file and a compiled artifact, and they are listed in the order
+    the pinned gate meets them, because they are three different pieces of work. (1) The gate
+    enables exactly one log source — `product: linux`, `category: process_creation` — and refuses
+    anything else rather than silently emitting SQL over fields it has never mapped. That is the
+    error text recorded in `refusal:` above. (2) Behind it, no field here is mapped: `EventID`,
+    `Channel` and `TargetLogName` are not in the reference mapping, and the mapping's own error says
+    "extend fixtures before enabling" — extending it means real store fixtures, since a field added
+    to the compiler without a verified read against the collection is a rule that quietly matches
+    nothing. (3) Behind that, the value type: the initial mapping admits non-empty ASCII strings
+    only, and `EventID: 1102` is a number. Item (3) is not pedantry — v0.1's own proof records that
+    the equivalent numeric comparison against the live map column died with an HTTP 500 (`Bad get:
+    has UInt64, requested Float64`) and would have made the whole rule one permanent error line.
+    Quoted, not reproduced.
+why: |
+  WHAT THIS ASSERTS, AND WHY IT IS WORTH ANYTHING. It is the one event whose *absence* proves nothing
+  and whose *presence* is never routine. Nothing in this rule needs tuning because nothing benign
+  produces it, and that is the only kind of security rule a small operator can afford to page on
+  without a measured precision budget. v0.1 shipped the SQL form of this against the estate's modelled
+  Windows stream and measured zero occurrences over its window; the same file recorded that its
+  belt-and-braces matching (mapped action, unmapped fallback spelling, raw event id) existed because
+  if the producer's mapping regressed, the rule must not be the thing that goes quiet.
+
+  WHY IT IS NOT PORTED AS A WORKING RULE. Its content is a Windows event, and this repo's Sigma path
+  is one Linux process-creation mapping (threat detection engine's "our own thin runner" plus ~80 lines of field
+  mapping, and `docs/COMPONENTS.md`'s `detections` row says collection/query remains). Shipping this
+  file with a compiled artifact would mean inventing a mapping and asserting it works, which is the
+  one thing the compiler gate exists to make impossible.
+
+  WHERE THE LINUX HALF OF THIS IDEA WENT. "The trail was destroyed" is partly expressible without
+  Windows: the *commands* that destroy a trail are process creations, and they are in the enabled
+  mapping. That form is `audit-trail-disable.yaml`, shipped with committed SQL. What it does not
+  cover is the Windows event itself, and nothing in this repository claims otherwise: on a host whose
+  Security channel is collected, this rule stays unbuilt and the event is stored but undetected.

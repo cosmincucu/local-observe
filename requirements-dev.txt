@@ -1,0 +1,10 @@
+-r requirements-test-base.txt
+mcp==1.29.1
+# CI tooling. Test/CI only: never imported by product code, never listed in pyproject, and the
+# hash-locked Sigma compiler tier does not install this file. Pins are exact because a formatter or
+# tracer that changes under a green job turns a lint/coverage gate into a moving target.
+# coverage runs the base tier in .gitea/workflows/ci.yml (that step installs the same pin inline,
+# because the base tier must not install this file - it carries mcp).
+coverage==7.16.0
+# ruff lints local_observe/, tests/, scripts/, components/ and examples/ in CI; see ruff.toml for the disabled debt list.
+ruff==0.16.6

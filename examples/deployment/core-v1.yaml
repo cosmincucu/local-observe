@@ -1,0 +1,23 @@
+schema_version: 1
+name: core
+version: 0.1.0-demo.1
+content_contract: 1
+content:
+  - id: core.overview
+    kind: group
+    spec: {name: Platform, tab: Overview, order: 0, collapsed: false}
+  - id: core.consoles
+    kind: group
+    spec: {name: Consoles, tab: Consoles, order: 10, collapsed: true}
+  - id: core.operator
+    kind: tile
+    spec:
+      name: Incidents
+      group: core.overview
+      order: 0
+      config: {href: 'https://observe.example.test', icon: mdi-alert-circle-outline}
+  - id: core.health
+    kind: dashboard
+    spec:
+      title: Platform health
+      widgets: []

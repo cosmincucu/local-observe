@@ -1,0 +1,83 @@
+# The platform STAGE's Gatus document — one endpoint, on purpose, and one thing it is NOT.
+#
+# This is the document the platform rehearsal is built FROM, and it is the only Gatus config
+# committed under examples/. A fresh stage run does not mount these bytes: the driver renders its own
+# authenticated copy — this document plus a `security.basic` block — at
+# <work tree>/runtime/gatus-config.yaml, names that file in LO_GATUS_CONFIG and writes it just
+# before the services start (the driver creates it, so the path exists only after a stage run). A
+# manual bring-up stays operator-configured: copy this file out
+# and render it yourself. synthetics component left its probe exactly as it was and moved the *services*
+# that consume it into components/control/synthetics/compose.yaml; the shape a production stack should
+# render from is components/control/synthetics/config.yaml, not this file.
+#
+# What this file deliberately lacks is a `security:` block, and at the pinned release (v5.36.0) that
+# is not a cosmetic omission: api/api.go registers the status routes on a router that receives an
+# authentication middleware only when `security` is present, so an engine started from THESE bytes
+# answers GET /api/v1/endpoints/<key>/statuses for anyone who can reach the project network. The
+# detector still sends it a credential (LO_GATUS_TOKEN_FILE — see examples/platform/.env.example for
+# what its contents must now be), and an engine booted from this unrendered document ignores it. That
+# is a property of the committed template, not of the component and not of a fresh stage: the closed
+# shape is what the driver renders (this document plus a `security.basic` block holding the bcrypt hash
+# of the run's own synthetic password), and the rendered copy — not this file — is what LO_GATUS_CONFIG
+# points at. The stage exists to inject failures into services on a disposable host, and the one file
+# the live host already runs is not quietly changed into a different auth posture by a card about
+# directory layout. The closed shape, the credential generator and the two commands that prove
+# the difference are in components/control/synthetics/CONTRACT.md and conformance.md (row 8 / step 2).
+#
+# Key derivation, so LO_GATUS_URL can name it: group `staging` + name `synthetic-http` becomes the key
+# `staging_synthetic-http` (config/key/key.go at v5.36.0 sanitises each half and joins them with `_`).
+storage:
+  type: sqlite
+  path: /data/gatus.db
+endpoints:
+  # A plain 200 from a service this stage owns and can stop with its own hands: the whole point is the
+  # "inject one service failure ... recovery updates it" scenario in docs/COMPONENTS.md §5, which
+  # needs a target the operator can kill. components/control/synthetics/config.yaml therefore probes a
+  # declared service instead and cannot be stopped by hand as neatly.
+  - name: synthetic-http
+    group: staging
+    url: http://demo-target:8000/
+    # 2 s, not the component's 30 s: this interval is what examples/platform/availability.yaml's
+    # max_age_seconds: 30 was authored against. Keep the ratio (interval well inside max_age_seconds)
+    # if you move either number, or the coverage verdict flaps between two probes.
+    interval: 2s
+    conditions:
+      - "[STATUS] == 200"
+
+  # Optional declarations (Gatus v5.36.0 syntax; replace these reserved targets).
+  # Named local-observe attribution is configured in the detector RULE document,
+  # not in this Gatus document: assertions maps the exact condition expression to
+  # a safe name. See docs/units/synthetic-assertions.md. Gatus supplies the probe.
+  # - name: http-ready
+  #   url: https://service.example.com/
+  #   interval: 30s
+  #   conditions:
+  #     - "[STATUS] == 200"
+  #     - "[HEADERS].X-Ready == yes"
+  # - name: dns-ready
+  #   url: 192.0.2.53:53
+  #   dns:
+  #     query-name: service.example.com
+  #     query-type: A
+  #   interval: 30s
+  #   conditions:
+  #     - "[DNS_RCODE] == NOERROR"
+  # - name: cert-30d
+  #   url: tls://service.example.com:443
+  #   interval: 6h
+  #   conditions:
+  #     - "[CERTIFICATE_EXPIRATION] > 720h"
+  # - name: cert-14d
+  #   url: tls://service.example.com:443
+  #   interval: 6h
+  #   conditions:
+  #     - "[CERTIFICATE_EXPIRATION] > 336h"
+  # - name: cert-3d
+  #   url: tls://service.example.com:443
+  #   interval: 1h
+  #   conditions:
+  #     - "[CERTIFICATE_EXPIRATION] > 72h"
+  # Separate Gatus endpoints are independent boolean rules. certcheck's injected
+  # helper adds a tightest-stage condition from measured certificate facts;
+  # Gatus statuses do not export expiry/SAN facts for that helper. Its provider
+  # and durable worker packaging remain unimplemented; this is not a deployment.

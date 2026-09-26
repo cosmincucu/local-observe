@@ -1,0 +1,77 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+    create_directory: true
+  # Read from the mounted file, not from an environment value. The `file` provider returns the raw
+  # bytes of the file, so the file must hold the token and NOTHING ELSE -- no trailing newline
+  # (create it with `printf '%s' ...`, never `echo`), or the newline lands inside the header value.
+  bearertokenauth:
+    token: ${file:/run/secrets/front-door-ingest-token}
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        auth: {authenticator: bearertokenauth}
+      http:
+        endpoint: 0.0.0.0:4318
+        auth: {authenticator: bearertokenauth}
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 96
+  attributes/redact:
+    actions:
+      - {key: password, action: delete}
+      - {key: api_key, action: delete}
+      - {key: authorization, action: delete}
+      - {key: http.request.header.authorization, action: delete}
+      - {key: gen_ai.prompt, action: delete}
+      - {key: gen_ai.completion, action: delete}
+      - {key: gen_ai.request.prompt, action: delete}
+      - {key: gen_ai.response.completion, action: delete}
+      - {key: gen_ai.input.messages, action: delete}
+      - {key: gen_ai.output.messages, action: delete}
+      - {key: llm.prompts, action: delete}
+      - {key: llm.completions, action: delete}
+      - {key: llm.openai.prompt_text, action: delete}
+      - {key: llm.openai.messages, action: delete}
+
+exporters:
+  otlp:
+    endpoint: ${env:LO_STORE_OTLP_ENDPOINT}
+    tls: {insecure: true}
+    # The store receiver authenticates too; this is a second, separate credential.
+    headers:
+      Authorization: Bearer ${file:/run/secrets/front-door-store-token}
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      queue_size: 3000
+      num_consumers: 4
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+
+service:
+  extensions: [health_check, file_storage, bearertokenauth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact]
+      exporters: [otlp]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact]
+      exporters: [otlp]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact]
+      exporters: [otlp]

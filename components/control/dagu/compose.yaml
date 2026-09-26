@@ -1,0 +1,69 @@
+services:
+  dagu:
+    image: ${LO_DAGU_IMAGE:?Digest-pinned engine image}
+    entrypoint: [/usr/local/bin/tini, -g, --]
+    command: [dagu, start-all, --config, /run/secrets/dagu-config]
+    user: "1000:1000"
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 96
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      DAGU_HOME: /var/lib/dagu
+      DAGU_DAGS_DIR: /dags
+      DAGU_WIKI_DIR: /var/lib/dagu/wiki
+      DAGU_AUTH_MODE: basic
+      DAGU_AUTH_BASIC_USERNAME: ${LO_DAGU_USERNAME:-lo-runner}
+      # No DAGU_AUTH_BASIC_PASSWORD here, and no bare-password secret either: Dagu 2.16.2 binds
+      # that variable to the config key `auth.basic.password`, and viper lets the environment win
+      # over the config file, so keeping the binding would re-expose the secret as an env value even
+      # with --config set. The password lives only in the config file that `command:` names, in the
+      # shape recorded under `secrets:` at the foot of this file.
+      DAGU_HOST: 0.0.0.0
+    secrets:
+      - dagu-config
+    volumes:
+      - dagu-data:/var/lib/dagu
+      # The job definitions are the operator's, not the checkout's. A `./dags` bind would resolve
+      # relative to THIS file's directory, so every deployment that includes this manifest would
+      # run the DAGs shipped in the repository -- and the repository ships none (the directory does
+      # not exist in the checkout), so the runner silently starts with no work and nobody is told
+      # which of the two states it is in. An absolute host path in a required variable makes the
+      # choice explicit, and `create_host_path: false` makes a missing directory a boot failure
+      # rather than an empty bind Docker creates for you.
+      # The directory is read-only because Dagu's UI can otherwise write a new DAG file into it, and
+      # the runner would then execute command lines nobody reviewed. Create it empty and put approved
+      # job files in it (see examples/full/README.md).
+      - type: bind
+        source: ${LO_DAGU_DAGS_DIR:?absolute path to the operator-approved DAG directory}
+        target: /dags
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs: [/tmp:size=16m]
+    # Loopback-only like every other publication here (the UI authenticates with the runner's
+    # basic-auth password and starts jobs). The port is a variable so this component can be
+    # composed beside another that already holds a host port; examples/full records the number it
+    # uses. Before full example gaps this line read `127.0.0.1:18084:8080`, which made the port undisplaceable
+    # while every other component in the same example took an `LO_*_PORT`.
+    ports: ["127.0.0.1:${LO_DAGU_PORT:-18084}:8080"]
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  dagu-data:
+secrets:
+  dagu-config:
+    # A rendered Dagu YAML file, not a bare password: Dagu 2.16.2 reads this credential from a
+    # config file (--config is one of the base flags every subcommand takes) and has no file-only
+    # form for the value itself. Dagu is told the type is YAML, so the mount name needs no suffix.
+    # The file holds exactly:
+    #   auth:
+    #     basic:
+    #       password: "<the runner password>"
+    # `auth.mode` and the username stay in the environment above; Dagu applies env bindings on top
+    # of the file, so anything named in both places is decided by the environment.
+    file: ${LO_DAGU_CONFIG_FILE:?absolute path to the rendered Dagu config file holding auth.basic.password}

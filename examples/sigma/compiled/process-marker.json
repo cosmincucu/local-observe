@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rule_id": "5d2cb39c-5f2a-4b40-b346-a2a00e0a8d09",
+  "rule_sha256": "4341e543d7b32e1b4771ffada636f933a4d5013e852a3ac8c2e1607e3c55e7e2",
+  "compiler": {
+    "pysigma": "1.5.0",
+    "pysigma-backend-clickhouse": "1.1.1"
+  },
+  "mapping": "signoz-logs-v2-linux-process-v1",
+  "dataset": "linux.process_creation",
+  "required_fields": [
+    "CommandLine",
+    "Image"
+  ],
+  "measurement": {
+    "status": "unmeasured",
+    "reason": "This rule is a synthetic pipeline fixture. It exercises positive, negative, missing-data, window-boundary and recovery behavior. A fixture population cannot establish a false-positive rate for real traffic; the rule therefore remains unmeasured."
+  },
+  "parameters": {},
+  "sql": "WITH logs AS (SELECT if(mapContains(attributes_string, 'process.command_line'), attributes_string['process.command_line'], NULL) AS CommandLine, if(mapContains(attributes_string, 'process.executable'), attributes_string['process.executable'], NULL) AS Image FROM signoz_logs.distributed_logs_v2\nWHERE timestamp >= {start_ns:UInt64} AND timestamp < {end_ns:UInt64}\nAND resources_string['resource_id'] = {resource_id:String}\nAND attributes_string['event.dataset'] = {dataset:String})\nSELECT count() AS source_count, countIf(isNotNull(CommandLine) AND isNotNull(Image)) AS usable_count,\ncountIf(coalesce((Image ILIKE '%/lo-fixture' AND CommandLine ILIKE '%--sigma-positive%'), false)) AS match_count FROM logs FORMAT JSON",
+  "sql_sha256": "28d8dee4a952c3327ad3192cb1b6f43f20ce2879f4fee967c1a4b331dc0ae2c2"
+}

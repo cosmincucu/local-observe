@@ -1,0 +1,57 @@
+{
+  "status": "experimental",
+  "schema_version": 1,
+  "verified_on": null,
+  "runtime_state": "Runtime conformance is not-run; validate the reference composition before use.",
+  "image": "twinproduction/gatus@sha256:8df964117ac6a78749ec8cd00039a499268156b874c3a110dc58de7e312c1ab5",
+  "release": {
+    "tag": "v5.36.0",
+    "released": "2026-05-19",
+    "upstream_release": "https://github.com/TwiN/gatus/releases/tag/v5.36.0",
+    "repository": "https://github.com/TwiN/gatus",
+    "license": "Apache-2.0",
+    "latest_release_tag_on_the_day_this_was_read": "v5.36.0 (no newer release exists yet; `latest` is a build channel, not a version)"
+  },
+  "digests": {
+    "value_used_by_LO_GATUS_IMAGE": "sha256:8df964117ac6a78749ec8cd00039a499268156b874c3a110dc58de7e312c1ab5",
+    "what_that_value_is": "the linux/amd64 image manifest of v5.36.0 (Content-Type application/vnd.oci.image.manifest.v1+json). compose.yaml therefore states `platform: linux/amd64`; an image pinned to one architecture and started on another is a pull failure with no diagnosis.",
+    "index_digest_of_the_same_release": "sha256:c5f210d095fa78e6efaa20ffeb14803f2ba4f10615e16a6d12087697149617f0",
+    "what_the_index_digest_is": "the OCI image index the `v5.36.0` tag resolves to (all architectures, Content-Type application/vnd.oci.image.index.v1+json). Use this value if you drop `platform:` and run another architecture; the `stable` tag carries the identical index and the identical amd64 digest, so `stable` and `v5.36.0` are the same content today.",
+    "verified_by": "sha256 of the manifest bytes returned by the registry, compared to the digest used to request them (self-hash), not to a tag page that asserted it"
+  },
+  "digest_provenance": {
+    "registry_url": "https://registry-1.docker.io/v2/twinproduction/gatus/manifests/v5.36.0",
+    "read_on": "2026-09-09",
+    "method": "Use the component contract and reviewed upstream pin; validate against your installation.",
+    "resolved_with": "python -B -c \"import sys; sys.path.insert(0, 'scripts'); from resolve_images import resolve; print(resolve('twinproduction/gatus:v5.36.0'))\" -> {'source_index_digest': 'sha256:c5f210d0...', 'image': 'twinproduction/gatus@sha256:8df96411...', 'platform': 'linux/amd64'} on 2026-09-09; :stable returned the identical pair and :latest returned index sha256:c6ee1cc4... / amd64 sha256:09f5805b...",
+    "tag_list_read": "https://hub.docker.com/v2/repositories/twinproduction/gatus/tags, paginated to all 134 unique tag names on 2026-09-09: 131 of the form vX.Y.Z (newest by numeric compare, v5.36.0) plus three moving channels \u2014 experimental, latest, stable",
+    "release_tag_vs_stable": "v5.36.0 and stable carry the same linux/amd64 digest (sha256:8df96411...) and the same index digest on that date. Pinning the release tag's digest is still the point: `stable` is a channel that will move to the next release without asking."
+  },
+  "superseded_digest": {
+    "value": "sha256:52bf60b1e1c431a6d6ab0342c27d92898b51192c117dece05f5751681fa27d63",
+    "where_it_lived": "Compatibility value formerly recorded in components/control/platform/versions.json.",
+    "why_it_was_rejected": "It could not be attributed to a release. Retained as an upstream pin audit trail; use the selected release digest for new installations.",
+    "still_resolves": true,
+    "rollback": "Setting LO_GATUS_IMAGE back to this digest is a supported, deliberate act with a reason, and it is a downgrade to content no release names. Record it in upgrade.md, not here."
+  },
+  "mirror": {
+    "file": "components/control/platform/versions.json",
+    "key": "gatus_image",
+    "why_it_still_exists": "The catalogue seed now names this directory's versions.json:image. The old platform key is retained as a compatibility mirror, not as the authority. tests/test_catalog_registry.py asserts the seed's owning path and key because the old pointer still resolves. tests/test_gatus_component.py keeps the two image values equal. Removing the mirror and its guard is a separate change.",
+    "authority": "components/control/synthetics/versions.json",
+    "authority_rule": "this file is authoritative for the Gatus pin; the platform key above is a mirror that no catalogue entry reads any more"
+  },
+  "depends_on": {
+    "adapter": "local_observe/platform/detection_worker.py (window, cursor, pending batch) over local_observe/platform/detections.py::gatus_sample (the envelope it refuses) and ::evaluate (the coverage rule)",
+    "credential_delivery": "local_observe/credentials.py::read_credential, which prefers LO_GATUS_TOKEN_FILE over any value",
+    "rule_document": "one availability rule per detector process, mounted from LO_DETECTION_RULE_DIR; its resource_id must resolve in the built inventory snapshot or evaluate() refuses the tick",
+    "config_contract": "components/control/synthetics/config.yaml, whose `security.basic.username` and bcrypt hash must agree with the base64 pair in LO_GATUS_TOKEN_FILE; CONTRACT.md states which of those was read at the pinned tag and which has never been sent to a running engine"
+  },
+  "credentials": {
+    "mounted_files": "Two, both read as `_FILE` paths by the detector: LO_GATUS_TOKEN_FILE (the engine's HTTP Basic pair, standard-alphabet base64 of `user:password`) and LO_PRODUCER_TOKEN_FILE, whose container path /run/secrets/detector-producer-token is unchanged. The environment carries paths and never values.",
+    "producer_token_is_its_own": "LO_DETECTOR_PRODUCER_TOKEN_FILE supplies a dedicated producer credential. Its platform identity must equal the source in every mounted rule. A mismatched identity is refused with not_authorised and the pending batch is retained. See CONTRACT.md and examples/full/README.md.",
+    "unverified": "Runtime authentication and delivery are not-run. Conformance checklist row 15 covers missing, mismatched and matching producer credentials."
+  },
+  "platform": "linux/amd64; the pin above is that architecture's manifest digest",
+  "distribution": "upstream image pulled by digest; this repository builds nothing here, publishes no image and claims no signature"
+}

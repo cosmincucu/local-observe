@@ -1,0 +1,129 @@
+<!-- Bounded multi-row analysis user for the platform read path (query adapter).
+
+WHY A SECOND USER EXISTS. `lo-query.xml` beside this file was written for one consumer: the Sigma
+runner, which asks one aggregate question per window and whose profile therefore states
+`max_result_rows = 1`. Everything the platform wants next asks a different question: an RCA bundle
+wants the log lines around a finding (200), the anomaly producer wants a series (2 000), an error
+budget wants spans (100). Those are the reads `local_observe/store` runs today, and they arrive as
+`max_result_rows` = the kind's bound plus one, sent by the client itself.
+
+Which exposes the thing this file exists to fix. `lo-query`'s profile marks `max_result_rows`
+`changeable_in_readonly`, so a client that states a bigger number is not refused: the aggregate-only
+ceiling that sentence in `lo-query.xml` advertises has been a default, not a bound, ever since the
+facade started asking for pages. One credential cannot be both "the user that may read one row" and
+"the user that may read two thousand" without the profile meaning nothing, so the two shapes get two
+identities and each profile can then state a real number:
+
+  lo-query   the Sigma runner's aggregate path. One row. Its `changeable_in_readonly` entry for
+             `max_result_rows` is what lets the facade widen it, and tightening it (deleting that
+             one entry) is the reviewer's two-step item recorded in `CONTRACT.md` here: point the
+             facade at `lo-read` first, then narrow `lo-query`. Doing it the other way round turns
+             every facade read into a settings error that looks like a store outage.
+  lo-read    this file. The analysis path: the same seven bounds, a row ceiling stated at the size
+             the read model actually uses, and the same three SELECT grants. It adds no table, no
+             database and no write.
+
+WHAT THE USER MAY NOT DO, and which setting enforces it (the same three that `lo-query.xml` names,
+quoted from the same pages):
+  readonly = 1      "Only read data queries are allowed" plus "the user can't change readonly and
+                    allow_ddl settings in the current session"
+                    (docs/concepts/features/configuration/settings/permissions-for-queries).
+                    An INSERT, OPTIMIZE, CREATE, ALTER, DROP or TRUNCATE is refused.
+  allow_ddl = 0     allow_ddl is a separate setting with default 1, so readonly alone would still
+                    permit DDL. Both are set.
+  grants            SELECT on the three SigNoz signal databases only. No system tables, no other
+                    database, no column-level grant: "GRANT SELECT ON db.* ... allows john to
+                    execute the SELECT query over all the tables in db database"
+                    (docs/reference/statements/grant).
+
+THE ROW CEILING, stated where it can be checked. 2 000 is not a taste number: it is
+`local_observe/store/client.py:MAX_ROWS`, the transport's own bound, which is also what
+`SERIES_MAX_POINTS` and `sigma_runner`'s series reads already carry. The arithmetic is in
+`CONTRACT.md` and it is not flattering: the client states `bound + 1` per request (2 001 on the
+widest kind), this profile's number is what applies to a request that states nothing, and the entry
+below is therefore marked changeable_in_readonly like its sibling's, which means this line is a
+declared default and a reviewable number rather than an enforced maximum. A hard maximum would need
+a constraints max of 2 001 or higher, and setting one that is lower than what the client sends
+refuses the read outright. Both choices are recorded as open in `conformance.md`; neither is a
+worker's decision, because each changes what the profile guarantees.
+
+THE PASSWORD IS NOT IN THIS FILE, and it is not the one `lo-query` uses. It is substituted at config
+load from a second file, named by the `include_from` below and mounted from the operator's own
+private path:
+  "If an element has the attribute incl, its value will be replaced by the content of the referenced
+   file. The path to the file with substitutions is set by the include_from element in the server
+   config ... If a substitution specified in incl does not exist, it is recorded in the log."
+   (Same page `lo-query.xml` quotes, section "Substitution with file content".)
+Two files, not one: an unresolvable `incl` leaves the element empty, and an empty password element
+is a user with no password. Keeping the two users' values in two files means a file written for
+`lo-query` cannot silently boot an unpassworded `lo-read` beside it, which is the failure that would
+happen if both read the same substitution document and someone forgot the second element. The
+Compose delta that mounts this file makes that path a required variable, so the failure lands in
+front of the operator at `config` time instead.
+
+Status: reviewed shape, never executed, exactly like its sibling. There is no Docker host in this
+environment, so no command in `conformance.md` has been run and nothing here has been observed to
+work. It is additionally NOT WIRED: no example includes the delta that mounts it, because the file
+that would include it belongs to another item in this wave. Read `CONTRACT.md` ("The second user,
+and what it is not yet") before deploying anything that depends on this user existing.
+-->
+<clickhouse>
+    <include_from>/run/secrets/clickhouse-read-credentials</include_from>
+    <profiles>
+        <lo-analysis>
+            <readonly>1</readonly>
+            <allow_ddl>0</allow_ddl>
+            <!-- The same seven bounds as lo-readonly, at the same sizes, so the analysis path cannot
+                 cost the store more time, rows, bytes or memory per query than the Sigma path
+                 already costs it. max_memory_usage stays 128 MiB, an eighth of the store's own
+                 default profile, so two analysis reads and one Sigma window together still cost the
+                 server less than one unbounded UI query. -->
+            <max_execution_time>5</max_execution_time>
+            <max_rows_to_read>1000000</max_rows_to_read>
+            <max_bytes_to_read>67108864</max_bytes_to_read>
+            <max_memory_usage>134217728</max_memory_usage>
+            <max_result_rows>2000</max_result_rows>
+            <!-- The two settings that make truncation a fact rather than a hope: a query that would
+                 return more than max_result_rows, or read more than max_rows_to_read, fails instead
+                 of returning a short answer. A caller that cannot tell a cut-off page from a whole
+                 one is the reason this file is a config fragment and not a comment. -->
+            <result_overflow_mode>throw</result_overflow_mode>
+            <read_overflow_mode>throw</read_overflow_mode>
+            <constraints>
+                <max_execution_time><changeable_in_readonly/></max_execution_time>
+                <max_rows_to_read><changeable_in_readonly/></max_rows_to_read>
+                <max_bytes_to_read><changeable_in_readonly/></max_bytes_to_read>
+                <max_memory_usage><changeable_in_readonly/></max_memory_usage>
+                <max_result_rows><changeable_in_readonly/></max_result_rows>
+                <result_overflow_mode><changeable_in_readonly/></result_overflow_mode>
+                <read_overflow_mode><changeable_in_readonly/></read_overflow_mode>
+            </constraints>
+        </lo-analysis>
+    </profiles>
+    <users>
+        <lo-read>
+            <!-- Resolved from /clickhouse/lo_read_password inside the include_from file named above.
+                 A plaintext password element is what an X-ClickHouse-Key header over this project's
+                 plaintext HTTP network authenticates against, which is the same mechanism lo-query
+                 uses and the same reason its value must never appear in this file or in an
+                 environment value. -->
+            <password incl="lo_read_password"/>
+            <profile>lo-analysis</profile>
+            <quota>default</quota>
+            <!-- No address restriction, for the same reason lo-query has none: the reader is a
+                 container on the Compose network whose address is not stable, and the boundary is
+                 that network plus this password. Narrow the two entries to the project subnet if you
+                 can name it; lo-read's own existence is a reason to want to, because it can read
+                 more rows per query than lo-query was ever sized for. -->
+            <networks>
+                <ip>0.0.0.0/0</ip>
+                <ip>::/0</ip>
+            </networks>
+            <grants>
+                <grant>GRANT SELECT ON signoz_traces.*</grant>
+                <grant>GRANT SELECT ON signoz_metrics.*</grant>
+                <grant>GRANT SELECT ON signoz_logs.*</grant>
+            </grants>
+        </lo-read>
+    </users>
+</clickhouse>

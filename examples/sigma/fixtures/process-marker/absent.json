@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "case": "absent",
+  "rule": "process-marker.yaml",
+  "note": "The absent-sensor case from docs/COMPONENTS.md section 5: the window holds no rows at all. The runner must report the gap (sigma.<uuid>.coverage firing) and must never resolve a finding it could not evaluate, because silence here means \"nothing arrived\", not \"all clear\".",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 0,
+    "usable_count": 0,
+    "match_count": 0
+  },
+  "rows": []
+}

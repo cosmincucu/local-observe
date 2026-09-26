@@ -1,0 +1,68 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). This one does not build: see `unshipped:`.
+# Authoring contract: components/control/sigma/CONTRACT.md, "Writing a rule here".
+title: A firewall dropped a flow to a service it had never dropped before
+id: 43205633-a5b7-4c1b-814b-2ac9615da717
+status: experimental
+description: >-
+  A source reached a destination and service tuple that this firewall has never blocked reaching
+  before. A count of blocks is worthless on a host that drops thousands a day; the interesting fact
+  is novelty, and novelty is measured against the previous week of the same firewall's own records.
+author: local-observe
+derived_from: >-
+  v0.1 rule `detections/firewall-block-new-flow.yaml` (private estate source). Re-derived as Sigma;
+  no text, address, host name, port number or finding count copied. Its tuning story is quoted in
+  `why:` because it is the most useful thing in the source file.
+logsource:
+  product: firewall
+  category: filtered_traffic
+detection:
+  block:
+    action: BLOCK
+  condition: block
+level: medium
+enabled: false
+measured:
+  false_positives: null
+  because: >-
+    unmeasured. The number that matters for this rule is v0.1's — 20 findings on its first run, all
+    of them ephemeral UDP ports — and it is quoted below, not inherited: no firewall stream exists
+    in this repository to re-measure, and the match set here is one field value, which is a different
+    rule.
+  window: none
+  population: none
+  measured_on: null
+  source: none
+unshipped:
+  blocker: construct
+  refusal: Only the linux process_creation mapping is enabled
+  reason: >-
+    As with `dns-blocklist-spike.yaml`, the gate stops at the log source first and the real blocker
+    sits behind it: "never seen before" is a set difference against seven days of the same
+    firewall's history — `(src, dst, proto, service_port) NOT IN (earlier window)` — and a Sigma
+    rule has no such clause. What this file keeps is the matcher (`action: BLOCK`) and the one
+    collapse that made the rule usable, documented below so the next author does not rediscover it
+    with a full pager.
+why: |
+  THE DEFECT WORTH PORTING, QUOTED FROM v0.1 AND MEASURED THERE. The first version keyed novelty on
+  the raw destination port and produced 20 findings on its first run, all of them ephemeral UDP
+  ports. Those are multicast/discovery replies: the port is random per packet, so **every** flow is
+  "never seen before" and the rule fires forever while saying nothing. Its fix collapsed every port
+  at or above 32768 to one bucket, because the identifying thing there is the source/destination/
+  protocol triple and not the number. The sentence to keep, and the reason this section exists in
+  this file at all: *"a rule that always fires is the same defect as one that never does."*
+
+  WHY THAT IS A BUILD RULE HERE AND NOT A REVIEW COMMENT. The failure is invisible in the YAML — the
+  rule looked correct both before and after the collapse — so it cannot be caught by reading a diff.
+  What catches it in this repo is the pair the authoring contract requires and the runner reports:
+  a `measured:` block naming the window and population the false-positive count came from, and the
+  `unmeasured` count in the artifact that `local_observe.platform.sigma_runner.measurement_report`
+  prints. A rule with no measured count is not trusted, which is the only mechanism available to a
+  repository that cannot run anyone's firewall. The ephemeral-port collapse is
+  recorded in `components/control/sigma/CONTRACT.md`, "Writing a rule here", as the check an author
+  must answer before shipping any rule whose key space includes a number an ephemeral process
+  chooses.
+
+  WHERE THE COMPARISON BELONGS. Same answer as `dns-blocklist-spike.yaml`: novelty and baselines are
+  series judgements (`platform/conditions.py`, `platform/dynamic_bands.py`), and both need the
+  firewall to be a declared resource with a UUID before it can hold a finding.

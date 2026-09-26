@@ -1,0 +1,92 @@
+# requirements.lock for the MCP tool-surface image (linux/amd64, CPython 3.12).
+# Generated from requirements.in with, run from the repository root:
+#
+#   uv pip compile components/control/mcp/requirements.in #       --python-version 3.12 --python-platform x86_64-unknown-linux-gnu #       --only-binary :all: --generate-hashes #       --output-file components/control/mcp/requirements.lock
+#
+# uv, and not the `pip download` line docs/BUILD.md carries for the other locks: mcp 1.29.1 declares
+# `pywin32; sys_platform == "win32"`, and pip evaluates a requirement's marker against the interpreter
+# it is RUNNING on rather than the --platform it was given, so the command in BUILD.md cannot resolve
+# this closure on a Windows host (it asks PyPI for pywin32 and refuses). uv evaluates markers against
+# --python-platform, which is the target. The same tool generated components/control/sigma/compiler.lock.
+#
+# What was then trimmed, by hand and against the published metadata rather than by the resolver: every
+# hash belongs to a wheel a `python:3.12-slim` interpreter on linux/amd64 can select (cp312, or an
+# abi3 wheel whose stated minimum is at or below cp312, with a manylinux x86_64 or `any` platform tag).
+# Source distributions and every other architecture are out of the lock, so the `--require-hashes`
+# install in the Dockerfile can neither build a package from source nor accept a wheel the runtime
+# cannot load. Where a project ships several glibc levels (cryptography, cffi, pydantic-core, rpds-py,
+# PyYAML), each x86_64 linux wheel is listed, because pip picks one by tag priority and a single hash
+# that names the wrong variant fails the build rather than installing anything.
+#
+# Read on 2026-09-10: all 35 hashes below were recomputed by downloading each named file from
+# files.pythonhosted.org and hashing the bytes, and every one equalled PyPI's own declared sha256 for
+# that filename. No install was performed and no image built from this lock here; the check that
+# `pip install --require-hashes -r` succeeds on linux/amd64 is row 1 of conformance.md and is unrun.
+# The 10 packages this lock shares with components/control/platform/requirements.lock agree with it on
+# both version and digest, so the two images install identical copies of the interpreter's common set.
+# Do not hand-edit; see docs/BUILD.md.
+annotated-types==0.8.0 \
+    --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+anyio==4.15.1 \
+    --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+attrs==26.1.0 \
+    --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+cffi==2.1.1 \
+    --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+cryptography==50.0.1 \
+    --hash=sha256:ff838d62ec1bfce4f9ba7fa16f4a7b554cd8d0c299e6be37502161a660c84eef \
+    --hash=sha256:51593d180cf6d179bde5c5d065bed81386b1f381656ae7d042b7ffc87a9895ad \
+    --hash=sha256:51afcfceb15597cf2635068e4ac9a56b2abde622edde17f37d85fd7b5306497a \
+    --hash=sha256:e22dfed744bd4002e909464cb23d2f0b05c6f3113a79ef2e9864a53db737c733 \
+    --hash=sha256:407fe2b6db00939c05c0e945e9914238f2f0a430974839429dafc82b1ee6bee5 \
+    --hash=sha256:9dde0a357190eb3b1da1bb9ab750e9c85cba82ca5977aa0836cbb94e92611239
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+httpcore==1.0.9 \
+    --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+httpx==0.28.1 \
+    --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+httpx-sse==0.4.3 \
+    --hash=sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc
+idna==3.19 \
+    --hash=sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4
+jsonschema==4.26.0 \
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+jsonschema-specifications==2025.9.1 \
+    --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+mcp==1.29.1 \
+    --hash=sha256:b6310eeb59153300c4ab8b9aec4c52f4819a2d6a8e429eb43d908bed7c783648
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+pydantic==2.13.5 \
+    --hash=sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73
+pydantic-core==2.46.5 \
+    --hash=sha256:0fc5be0abd4a407e200d844b404e33639a554e7bd0d448e7b9ae181be4789ac2
+pydantic-settings==2.15.0 \
+    --hash=sha256:0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42
+pyjwt==2.13.0 \
+    --hash=sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728
+python-dotenv==1.2.3 \
+    --hash=sha256:904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9
+python-multipart==0.0.32 \
+    --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+pyyaml==6.0.3 \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+referencing==0.37.0 \
+    --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+rpds-py==2026.6.3 \
+    --hash=sha256:ecabd69db66de867690f9797f2f8fa27ba501bbc24540cbdbdc649cd15888ba6
+sse-starlette==3.4.11 \
+    --hash=sha256:c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453
+starlette==1.6.0 \
+    --hash=sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+typing-inspection==0.4.4 \
+    --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
+uvicorn==0.52.4 \
+    --hash=sha256:f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1

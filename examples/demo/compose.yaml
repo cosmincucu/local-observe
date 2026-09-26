@@ -1,0 +1,6 @@
+name: local-observe-demo
+
+include:
+  - ../../components/data/store-signoz/compose.yaml
+  - ../../components/data/front-door/compose.yaml
+  - ../../components/data/agent-linux/compose.yaml

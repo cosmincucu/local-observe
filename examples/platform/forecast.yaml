@@ -1,0 +1,75 @@
+# Forecast: trend and time-to-threshold predictions (LO_FORECAST_CONFIG).
+#
+# The producer is OFF unless the environment names this file. Unset or blank, `python -m
+# local_observe.forecast` logs one INFO line naming LO_FORECAST_CONFIG, opens no store, no cursor and
+# no socket, and exits 0. A file named here that cannot be read or parsed is NOT off: the process
+# exits 1, because a producer that survived a broken configuration would report a healthy capacity
+# position on the strength of nothing.
+#
+# Where the rest of its environment comes from (none of it added to examples/full/.env.example by
+# this card — the variable that names this file is documented in
+# local_observe/forecast/timetothreshold.py and reported on the card):
+#   LO_FORECAST_SOURCE      the producer identity, which must match its token
+#   LO_FORECAST_CURSOR      where this producer's cursor lives, unless `cursor` below names it
+#   LO_INDEX_PATH           the built inventory index every producer resolves resources against
+#   LO_CLICKHOUSE_URL/_USER/_PASSWORD_FILE, LO_PLATFORM_URL, LO_PRODUCER_TOKEN,
+#   LO_INTERNAL_ALLOW_HTTP  the same store-read and intake credentials the Sigma runner reads
+#
+# A prediction is filed as `kind: threshold` with `<rule id>.predicted` as its rule_id/condition, so
+# "will exceed" and "has exceeded" are two conditions and an operator can tell which page to believe.
+# Its severity is the crosswalk's answer for `severity_source`/`severity_tier` below — never a word
+# this file's reader can invent, and never a literal in the code.
+
+# The grid every rule's evaluation window aligns to, and the sleep between rounds: 5..3600 seconds.
+interval_seconds: 900
+
+# Absolute host-local path, inside a directory that already exists before the worker starts (it does
+# not mkdir its own state). A configured producer with no cursor refuses to start rather than deliver
+# verdicts it cannot re-send.
+cursor: /var/lib/local-observe-forecast/cursor.json
+
+rules:
+  # "This volume is filling up" — the classic capacity question, written as the *used* series rising
+  # toward the limit. Only rising crossings are ported (see time_to_threshold): a `free_bytes` series
+  # falling toward a floor is a falling crossing this producer refuses instead of quietly never firing.
+  - id: pool-disk-fill
+    series: filesystem_used_bytes
+    resource_id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1   # probe-1, the declared host in examples/inventory
+    source: lo-forecast
+    severity_source: core-events-v1   # v0.1's own ladder; the crosswalk gives its `warning`
+    severity_tier: warning            # `error` would resolve to the same rung, by decision
+    threshold: 90000000000            # 90 GB used: the same number the base threshold rule judges
+    model: linear                     # OLS: a volume's growth is a rate, and r2 travels in the note
+    horizon_seconds: 86400            # a crossing more than a day out is a planning note, not a page
+    min_points: 12                    # fewer than this is `insufficient`, said out loud, not a fit
+    evaluation_seconds: 900           # one event window, and the spacing of the re-judgements
+    history_seconds: 86400            # the read span: 7 days is the ceiling, and 1 day is enough here
+    max_age_seconds: 3600             # older than this the tick is `stale`: coverage, never a recovery
+    for_seconds: 3600                 # the prediction must hold an hour before it is a condition, so a
+                                      # single spiky sample cannot open one
+    # alpha/beta are used only by `model: holt`; they are shown because they are the knobs that decide
+    # how loudly a noisy series is allowed to project. Both must sit in (0, 1].
+    alpha: 0.5
+    beta: 0.3
+
+  # A rate that moves, judged by Holt: the level is what has been reached, the trend is per step, and
+  # `step_s` (the mean sample spacing) converts it into seconds. `resolve_seconds` is optional and
+  # defaults to `for_seconds` — the clear side is symmetric unless a rule says otherwise, which is what
+  # stops a value touching back through the line from closing the incident and re-opening it.
+  - id: queue-backlog-growth
+    series: queue_depth
+    resource_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2   # demo-api, the declared service
+    source: lo-forecast
+    severity_source: core-events-v1
+    severity_tier: error              # v0.1's `error` and this repo's `warning` are one statement
+    threshold: 5000
+    model: holt
+    horizon_seconds: 21600
+    min_points: 24
+    alpha: 0.4
+    beta: 0.2
+    evaluation_seconds: 300
+    history_seconds: 86400
+    max_age_seconds: 900
+    for_seconds: 1800
+    resolve_seconds: 900

@@ -1,0 +1,55 @@
+# query adapter: the bounded multi-row analysis user, as a Compose delta. Two things are true about this
+# file and both are load-bearing, so they are stated in its first lines rather than in prose below:
+#
+#   1. It is NOT a standalone Compose file. It is never passed to `docker compose -f` on its own; it
+#      is merged onto components/data/store-signoz/compose.yaml inside ONE `include` entry of
+#      examples/full/compose.yaml, which already does that for the sibling delta
+#      clickhouse-users.d/compose.yaml (the merge mechanics, quoted from compose-spec files
+#      13-merge.md and 14-include.md, are written out in that file's header and are not repeated
+#      here).
+#   2. NO EXAMPLE INCLUDES IT YET. Not because it is optional: because the file that would include
+#      it (examples/full/compose.yaml) and the file that would carry its required variable
+#      (examples/full/.env.example) belong to another item in this wave, and the tests in
+#      tests/test_foundation_checks.py require every required interpolation in a walked model to have exactly one
+#      line in that template. Landing the variable here without the template line would fail that
+#      check; landing the template line here would be editing another item's file.
+#
+# Why the two halves are one file and cannot be split further. ClickHouse's `incl` substitution
+# writes nothing to the log and starts the server when it cannot resolve a password: an unresolved
+# substitution leaves an EMPTY password element, which is a user that authenticates with no password
+# at all on the project network. So the bind that delivers lo-read.xml and the secret that supplies
+# its value must arrive in the same change, with the same review, or the fragment is a fail-open
+# hole drilled by a partial merge. `LO_CLICKHOUSE_READ_CREDENTIALS_FILE` is a required `:?` variable
+# for exactly that reason: no path, no render, no server, no anonymous analysis account. Never give
+# it a default and never add `optional="true"`.
+#
+# The reader's own half of the pair is NOT here. The client-side credential that
+# local_observe/platform/query.py presents as X-ClickHouse-Key is `LO_CLICKHOUSE_READ_PASSWORD_FILE`,
+# and it has to be mounted into the *reader's* container, not into `clickhouse`. Compose `include`
+# entries do not merge across entries, so a delta merged with the store manifest cannot reach the
+# `sigma` or `platform` service: that line belongs in components/control/sigma/compose.yaml, which
+# is outside this item's file list. Its exact delta is written up for the reviewer in the query adapter
+# worker report, and the fragment above stays unwired until it lands.
+services:
+  clickhouse:
+    secrets:
+      - clickhouse-read-credentials
+    volumes:
+    # The server merges this into its users config; the file's own header carries the doc quotes and
+    # the list of what the user may not do. `:ro` is what scripts/check_foundation.py requires of any
+    # "./" source, and here it is also the reason a running server cannot rewrite the privileges it
+    # booted with. The path resolves against the include entry's project_directory
+    # (components/data/store-signoz), which is why it is written from there and not from this
+    # directory, exactly like the lo-query line it sits beside.
+    - ./clickhouse-users.d/lo-read.xml:/etc/clickhouse-server/users.d/lo-read.xml:ro
+secrets:
+  clickhouse-read-credentials:
+    # The value lo-read authenticates with, in the one XML form ClickHouse's `incl` substitution
+    # reads: a file containing
+    #   <clickhouse><lo_read_password>the-value</lo_read_password></clickhouse>
+    # Its OWN file, and its own value: not the lo-query file with a second element added. A shared
+    # substitution document means an older or hand-edited file that carries only lo_query_password
+    # boots lo-read with no password, which is the one failure mode this directory's whole design
+    # exists to refuse. It is a mounted file and not an environment value for the secret files reason:
+    # `docker inspect` and /proc/<pid>/environ would otherwise show the analysis credential.
+    file: ${LO_CLICKHOUSE_READ_CREDENTIALS_FILE:?absolute path to the ClickHouse substitution file holding lo_read_password}

@@ -1,0 +1,7 @@
+name: local-observe-platform-stage
+
+include:
+  - path:
+      - ../../components/control/platform/compose.yaml
+      - ./staging.compose.yaml
+  - ../../components/control/synthetics/compose.yaml

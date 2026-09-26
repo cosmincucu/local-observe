@@ -1,0 +1,58 @@
+# Ruff lint configuration. CI runs `ruff check local_observe tests scripts components examples`
+# (see .gitea/workflows/ci.yml); the pin lives in requirements-dev.txt.
+#
+# Lint only. No formatter is wired up and this wave changes no product code: where a rule would
+# force an edit outside the CI/test files this card owns, the rule is switched off and the exact
+# violation count is written next to it, so the next reader sees the size of the debt instead of
+# a rule that silently passes. Every number below was measured on 2026-09-07 with ruff 0.16.6 over
+# local_observe/, tests/ and scripts/. Narrow these lists (or fix the code) as later waves sweep;
+# a rule must never be dropped from the list to make a new failure disappear.
+line-length = 120
+target-version = "py312"
+extend-exclude = [
+  "scratch",    # operator-owned scratch and throwaway venvs, gitignored
+  "build",
+  "dist",
+  "__pycache__",
+]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+# Repo-wide debt, all mechanical/whole-file in kind: fixing any of these means rewriting lines
+# across the product tree, which is a wave of its own with its own review.
+ignore = [
+  # E501 (line-too-long) is no longer ignored here: types (2026-09-08) wrapped the product tree to 0
+  # sites, so a long line can no longer enter local_observe/ unnoticed. tests/ and scripts/ keep
+  # their per-file entries below with their measured counts.
+  "I001",   # unsorted-imports — 197 sites; `ruff check --fix I001` is the whole job
+  "UP017",  # datetime-timezone-utc — 50 sites; `datetime.timezone.utc` -> `datetime.UTC`
+  "E701",   # multiple-statements-on-one-line-colon — 37 sites; a reformat, not a fix
+]
+
+[lint.per-file-ignores]
+# Counts in this block are per directory tree, so a new file in the same tree inherits the debt.
+# Deliberately NOT ignored anywhere: B008, B006, B904-with-logic, F821 and the whole W group —
+# those are defects, not style, and a new one must fail the job.
+
+# Product tree (5 F401 unused imports, 2 E731 lambda assignment, 1 B905 zip without strict=).
+# B023 (function-uses-loop-variable) was baselined here for one site: the SQLite backup progress
+# callback in local_observe/deployment/state_copy.py, which closed over the loop-bound `page_size` and
+# over `used` (`deadline`, which it also reads, is bound outside the loop and was never a B023 site).
+# state leftovers fixed it by binding those values as keyword defaults at definition time, so the rule is live
+# again for this tree: a new late-binding closure in product code must fail the job, and B023 must not
+# come back here.
+"local_observe/**" = ["F401", "E731", "B905"]
+
+# tests/ (7 F401, 7 UP031 printf-format, 7 B023, 3 E702 semicolon, 2 E402 import-after-code,
+# 2 B905, 61 E501 line-too-long — measured 2026-09-08 when types cleared the product tree).
+"tests/**" = ["F401", "UP031", "B023", "E702", "E402", "B905", "E501"]
+
+# scripts/ — the staging/conformance trees are hand-run tools, 19 F401, 21 E402 (imports after a
+# shebang/sys.path preamble), 4 B023, 3 B905, 2 B904 (raise-without-from in except),
+# 1 E731, 1 F841 unused-variable, 1 B007 unused-loop-control-variable, 225 E501 line-too-long
+# (measured 2026-09-08 when types cleared the product tree).
+"scripts/**" = ["F401", "E402", "B023", "B905", "B904", "E731", "F841", "B007", "E501"]
+
+[lint.isort]
+known-first-party = ["local_observe"]

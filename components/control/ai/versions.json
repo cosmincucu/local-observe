@@ -1,0 +1,66 @@
+{
+  "component": "ai",
+  "status": "experimental",
+  "verified_on": "2026-09-08",
+  "platform": "linux/amd64 (the upstream server image also publishes linux/arm64 and linux/s390x); never started here",
+  "schema_version": 1,
+  "serve": {
+    "upstream": "ggml-org/llama.cpp",
+    "release": "v0.4.0",
+    "release_published_at_utc": "2026-09-04T19:56:47Z",
+    "release_url": "https://github.com/ggml-org/llama.cpp/releases/tag/v0.4.0",
+    "image_reference": "ghcr.io/ggml-org/llama.cpp:server",
+    "image_digest": null,
+    "image_digest_note": "null is deliberate and load-bearing: the operator resolves the digest of the build they run and pins THAT. `server` is a moving tag, and a capability manifest measured against one build must not be pointed at another by a pull.",
+    "build_tag_for_this_release": "UNVERIFIED",
+    "build_tag_note": "read 2026-09-08 via the registry's anonymous pull token at https://ghcr.io/v2/ggml-org/llama.cpp/tags/list: the first 1000 tags include `server` and build tags `server-b4729` through `server-b5350`, and none of them names a release tag. Nothing in that list establishes which build carried v0.4.0, so this file records the release, the tag and no digest rather than implying the mapping is known.",
+    "facts_read_at_the_pinned_tag": {
+      "docs/docker.md": "https://github.com/ggml-org/llama.cpp/blob/v0.4.0/docs/docker.md line 12 (the server image only includes the llama-server executable); line 70 (the documented run line passes -m, --port, --host)",
+      "tools/server/README.md": "https://github.com/ggml-org/llama.cpp/blob/v0.4.0/tools/server/README.md lines 194-195 (--host default 127.0.0.1, --port default 8080), 215 (--api-key-file, one key per line), 472-483 (GET /health is public; 200 ok, 503 while loading), 1310 (POST /v1/chat/completions), 1425-1437 (usage prompt_tokens/completion_tokens), 191 and 1253 (--alias, else the model id is the -m path), 206 (--tools lists read_file/write_file/exec_shell_command, 'do not enable in untrusted environments'), 211/226 (--no-webui, --no-slots), 50/178 (-c ctx-size default 0 = from model, -np parallel default auto)",
+      ".devops/cpu.Dockerfile": "https://github.com/ggml-org/llama.cpp/blob/v0.4.0/.devops/cpu.Dockerfile lines 56-127 (ubuntu base, apt installs libgomp1/curl/ffmpeg, server stage sets ENV LLAMA_ARG_HOST=0.0.0.0, declares HEALTHCHECK CMD curl -f http://localhost:8080/health, ends ENTRYPOINT /app/llama-server, and has no USER line)"
+    },
+    "unverified": [
+      "which HTTP header the serve checks for a configured API key (the README documents the flag and shows Authorization: Bearer in its OpenAI examples, but does not state what it verifies)",
+      "that the pinned build answers this product's client at all: no request has ever been sent",
+      "the tag-to-release mapping above",
+      "whether /bin/sh exists in the server image (inferred from the Ubuntu base, used by one documented command in backup.md)"
+    ]
+  },
+  "model_weights": {
+    "shipped_by_this_repository": false,
+    "home": "operator directory ${LO_AI_MODEL_DIR}, mounted read-only with create_host_path: false",
+    "size_class": "not chosen by the product; CONTRACT.md states the RAM cost against the 16 GB reference floor and the example model capabilities framing named",
+    "min_ram_note": "a 30B-class MoE at 4-bit is roughly 18-20 GB of weights, above the 16 GB minimal floor, which is why the component is absent-by-default rather than small-by-default"
+  },
+  "capability_manifest": {
+    "file": "capability.example.json",
+    "fields_measured": 0,
+    "fields_unknown": 7,
+    "fields_fixed_by_deployment": 1,
+    "note": "seven fields are the literal string unknown and tools is false, which is a deployment fact rather than a measurement: compose.yaml never passes --tools and capability.validate refuses a manifest that claims it. No field is inherited from a model card."
+  },
+  "policy": {
+    "file": "policy.example.json",
+    "classes": [
+      "public",
+      "internal",
+      "restricted"
+    ],
+    "remote_allowed_by_example": false,
+    "note": "the example refuses restricted outright and keeps every class off-LAN; remote inference policy's opt-in is one boolean on a class that already carries a label and the no_free_text step"
+  },
+  "validation": {
+    "image_digests_resolved": false,
+    "runtime_conformance": "not-run",
+    "container_started": false,
+    "model_loaded": false,
+    "endpoint_called": false,
+    "component_in_an_example": false,
+    "component_in": "no shipped example composes this manifest; see CONTRACT.md section 8 and examples/full/README.md for the opt-in",
+    "static_gate": "scripts/check_foundation.py passes over the whole tree (privacy scan walks components/), and check_model/check_credential_files return no error for this manifest - asserted by tests/test_ai_component.py, because no example include line puts it inside check_example",
+    "upgrade_rehearsal": "not-run",
+    "backup_restore": "not-applicable-by-design (no state is written by this component); see backup.md",
+    "evidence": "none yet: no docs/evidence note exists for this component"
+  },
+  "distribution": "no image is published by this project; the reference names upstream's, and nothing here has been pulled, run, measured or signed"
+}

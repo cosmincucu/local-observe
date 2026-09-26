@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "case": "over-match",
+  "rule": "audit-trail-disable.yaml",
+  "note": "Documented over-match, NOT a claim that this is desirable. Every validated modifier here is a substring test, so \"stop auditd\" also matches a systemd unit whose name merely begins that way: the two systemctl rows match and the docker row does not, because the selection is a conjunction with the executable and that is the one part of the narrowness that is real. Recorded here so the next author cannot read the YAML and conclude the rule is exact. The fix is a word-boundary modifier in the mapping - a fixture task of its own - or a measured false-positive count that names this case; until one of them exists the rule is `unmeasured` and says so.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 3,
+    "usable_count": 3,
+    "match_count": 2
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000021",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/systemctl",
+        "process.command_line": "systemctl stop auditd.socket"
+      }
+    },
+    {
+      "timestamp_ns": 1788955171000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000022",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/docker",
+        "process.command_line": "docker stop auditd"
+      }
+    },
+    {
+      "timestamp_ns": 1788955172000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000023",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/usr/bin/systemctl",
+        "process.command_line": "systemctl stop auditd.service"
+      }
+    }
+  ]
+}

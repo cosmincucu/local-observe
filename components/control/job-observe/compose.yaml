@@ -1,0 +1,117 @@
+# Job observation, push side: one Healthchecks instance (job observation, the job orchestrator v1 path in docs/DECISIONS.md).
+#
+# What this service decides that nothing else can: a scheduled job that simply never ran. A timer
+# that does not fire produces no log line, no metric delta and no failed unit -- it produces
+# silence. Healthchecks owns the deadline and evaluates it independently of the job host, of Dagu
+# and of this repository's platform state, so restarting the scheduler cannot silence the coverage
+# (COMPONENTS.md "Missed job"). The pull side -- "the job ran and failed" -- is systemd_exporter on
+# each observed host, documented in components/data/agent-linux/CONTRACT.md; the two states are
+# distinct on purpose and this component ships no agent.
+#
+# Status: SELECTED, not validated. Every image value below is a digest resolved against the
+# registries on 2026-09-08 and recorded in versions.json, but no container in this directory has
+# been started, so nothing here is a runtime claim. See conformance.md for the checks that must
+# pass before this component may be called experimental.
+services:
+  healthchecks:
+    # Upstream image: healthchecks/healthchecks, tag v4.4 (release 2026-08-31), BSD-3-Clause.
+    # The digest is the linux/amd64 image, resolved from the multi-arch manifest list recorded in
+    # versions.json; `platform` is stated because the tag also carries arm/v7 and arm64.
+    image: ${LO_HEALTHCHECKS_IMAGE:?Digest-pinned Healthchecks image}
+    # Third-party image, so not `never` (that is for the two images this repository builds).
+    # `always` rather than a cached copy: the value is an immutable digest, so re-resolving it
+    # costs one registry round-trip and cannot silently boot an image someone retagged locally.
+    pull_policy: always
+    platform: linux/amd64
+    # No `user:` line on purpose. The image sets its own unprivileged account at build time
+    # (`RUN useradd --system hc` then `USER hc`, docker/Dockerfile at the pinned tag) and creates
+    # /data owned by it; overriding the uid here would break the ownership of that directory for a
+    # number no document in this repository pins.
+    #
+    # No `read_only: true` either, unlike the first-party manifests. uWSGI is told to serve static
+    # files from the image and to write a gzip cache beside them (docker/uwsgi.ini:
+    # `check-static = static-collected/` with `static-gzip-dir = static-collected/CACHE`), so a
+    # read-only root filesystem needs a mount whose needled path this repository has never run.
+    # Turning it on is a named check in conformance.md, not a claim here.
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=32m]
+    environment:
+      # SQLite mode: the image's own default (`DB` defaults to sqlite, and the Dockerfile makes
+      # /data owned by the service user), so this component ships ONE service and one volume. The
+      # database lives on a named volume, not in the application tree, because `DB_NAME` otherwise
+      # defaults to <project dir>/hc.sqlite -- inside the image, where a rebuild discards it.
+      # Postgres is a supported alternative (DB=postgres plus a second service); the reason to
+      # choose it, and the migration it forces on backup.md, are recorded in CONTRACT.md.
+      DB: sqlite
+      DB_NAME: /data/hc.sqlite
+      # Django's session-signing key. Upstream reads it through an `envsecret` helper that prefers
+      # `<NAME>_FILE` over `<NAME>` (hc/settings.py), so the secret files shape needs no wrapper: only the
+      # path of a mounted file is an environment value here. `SECRET_KEY` is deliberately absent --
+      # setting both would let an `docker inspect` reader see what the mount exists to hide.
+      SECRET_KEY_FILE: /run/secrets/healthchecks-secret
+      # The public base URL, and therefore the Host header pings and browser requests must carry.
+      # The default is the loopback publication below; an operator who fronts this with a
+      # TLS reverse proxy sets both the URL and the host list, and must then also set the
+      # X-Forwarded-Proto header or login POSTs fail with Django's 403 (see CONTRACT.md).
+      SITE_ROOT: ${LO_HEALTHCHECKS_SITE_ROOT:-http://127.0.0.1:18097}
+      ALLOWED_HOSTS: ${LO_HEALTHCHECKS_ALLOWED_HOSTS:-127.0.0.1,localhost}
+      # Where the ping URLs point. It defaults to SITE_ROOT + /ping/, which is right for a job on
+      # THIS host and wrong for a job on another one -- a cross-host dead-man needs a reachable
+      # endpoint, which this project's loopback-only publication rule forbids. CONTRACT.md states
+      # the limit; do not "fix" it by opening the port.
+      PING_ENDPOINT: ${LO_HEALTHCHECKS_PING_ENDPOINT:-http://127.0.0.1:18097/ping/}
+      # The Prometheus scrape endpoint is how `hc_check_up` reaches the store, which is how
+      # "the job did not run" becomes an ordinary metric alert (docs/DECISIONS.md job orchestrator v1).
+      PROMETHEUS_ENABLED: "True"
+      # No self-service accounts: the checks and their ping URLs are the credentials, so an open
+      # signup is a way to mint alarms nobody approved. Accounts come from `manage.py
+      # createsuperuser` (CONTRACT.md, "Accounts").
+      REGISTRATION_OPEN: "False"
+      # Upstream default kept explicit and False: an outbound notification channel that can be
+      # pointed at a private address is an SSRF wall with a hole in it. Pointing a webhook at a
+      # collector inside this project network needs the operator to set this to True deliberately.
+      INTEGRATIONS_ALLOW_PRIVATE_IPS: "False"
+      # No SMTP host is set, so no mail channel exists and this address is never used. It is set
+      # because Django expects a value, not because anything reads it; an operator who does turn on
+      # mail changes it here with the rest of their mail configuration.
+      DEFAULT_FROM_EMAIL: healthchecks@localhost
+      # Four uWSGI workers is the image default; two is the number that fits the memory cap above
+      # without an OOM kill arriving as an unexplained restart of the thing that watches restarts.
+      UWSGI_PROCESSES: "2"
+    secrets:
+      - healthchecks-secret
+    volumes:
+      - healthchecks-data:/data
+    # Loopback-only, like every published port in this product. The service name must appear in
+    # check_foundation.py's HOST_PUBLISHED_SERVICES or the gate refuses it: this is the operator's
+    # console for job deadlines, so it is reached from the host, and it authenticates -- it is not
+    # an internal collector.
+    ports: ["127.0.0.1:${LO_HEALTHCHECKS_PORT:-18097}:8000"]
+    healthcheck:
+      # The probe the image ships with, not one invented here: docker/fetchstatus.py is copied to
+      # /opt/healthchecks and is mode 100755 at the pinned tag, and it GETs /api/v3/status/, which
+      # upstream documents as the endpoint that "tests if the database connection is alive". So a
+      # green container here means the web tier answers AND the SQLite file is readable.
+      test: [CMD, /opt/healthchecks/fetchstatus.py]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # uWSGI runs `manage.py migrate` in a pre-app hook before it serves, and migrations on a
+      # first boot create the whole schema; 20 s (the image's own start period) is too tight here.
+      start_period: 90s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  healthchecks-data:
+secrets:
+  healthchecks-secret:
+    # One random value, no trailing newline (printf, not echo). It signs Django sessions; it is not
+    # a login credential and it is not the admin password -- there is no admin password in this
+    # manifest, and CONTRACT.md says why that is deliberate rather than missing.
+    file: ${LO_HEALTHCHECKS_SECRET_FILE:?absolute path to the Healthchecks session-signing key file}

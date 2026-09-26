@@ -1,0 +1,73 @@
+services:
+  sigma:
+    image: ${LO_PLATFORM_IMAGE:?Use a digest-pinned build containing sigma_runner}
+    pull_policy: never
+    platform: linux/amd64
+    command: [python, -m, local_observe.platform.sigma_runner]
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      LO_SIGMA_ARTIFACT: /config/rule.json
+      LO_SIGMA_CURSOR: /state/cursor.json
+      LO_INDEX_PATH: /inventory/inventory.db
+      LO_RESOURCE_ID: ${LO_RESOURCE_ID:?Declared target UUID}
+      LO_SIGMA_SOURCE: ${LO_SIGMA_SOURCE:?Bound producer identity}
+      LO_CLICKHOUSE_URL: ${LO_CLICKHOUSE_URL:?Explicit query endpoint}
+      # The only credential-adjacent value in this manifest with a default, and deliberately so:
+      # `lo-query` is not a secret but the name components/data/store-signoz/clickhouse-users.d/
+      # lo-query.xml creates, with readonly=1, allow_ddl=0 and SELECT on the three signal databases
+      # only. The password next to it stays a required file, so this default cannot boot a runner
+      # that silently authenticates as someone else -- an unset LO_CLICKHOUSE_PASSWORD_FILE still
+      # stops `config`. Override it only if you created a different name in your own store.
+      LO_CLICKHOUSE_USER: ${LO_CLICKHOUSE_USER:-lo-query}
+      # Both credentials arrive as mounted files, never as environment values: an env value is
+      # readable through `docker inspect` and /proc/<pid>/environ of every process in this
+      # container. The same variable names on the host hold the source paths (`secrets:` below).
+      LO_CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse-password
+      # query adapter: the analysis reader's credential. A path, never a value (secret files), and no fallback to
+      # LO_CLICKHOUSE_PASSWORD_FILE: lo-query's profile pins one row per query, and quietly
+      # authenticating a multi-row reader as that user is how a widened ceiling stops being visible.
+      LO_CLICKHOUSE_READ_PASSWORD_FILE: /run/secrets/clickhouse-read-password
+      LO_PLATFORM_URL: ${LO_PLATFORM_URL:?Platform intake}
+      LO_PRODUCER_TOKEN_FILE: /run/secrets/producer-token
+      # The platform and ClickHouse endpoints are plaintext HTTP on the isolated Compose network;
+      # the runner refuses http:// unless this is 1. Set 0 when both endpoints are HTTPS.
+      LO_INTERNAL_ALLOW_HTTP: ${LO_INTERNAL_ALLOW_HTTP:-1}
+    secrets:
+      - clickhouse-password
+      - clickhouse-read-password
+      - producer-token
+    volumes:
+      - sigma-state:/state
+      - ${LO_SIGMA_ARTIFACT_FILE:?Compiled artifact}:/config/rule.json:ro
+      - ${LO_INVENTORY_SNAPSHOT_DIR:?Immutable inventory directory}:/inventory:ro
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - >-
+        import os,sys,time; p=os.environ['LO_SIGMA_CURSOR'];
+        sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 300 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  sigma-state:
+secrets:
+  clickhouse-password:
+    file: ${LO_CLICKHOUSE_PASSWORD_FILE:?absolute path to the read-only ClickHouse query credential file}
+  clickhouse-read-password:
+    file: ${LO_CLICKHOUSE_READ_PASSWORD_FILE:?absolute path to the read-only ClickHouse analysis credential file}
+  producer-token:
+    file: ${LO_PRODUCER_TOKEN_FILE:?absolute path to the source-bound producer credential file}

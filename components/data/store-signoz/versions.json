@@ -1,0 +1,26 @@
+{
+  "status": "experimental",
+  "platform": "linux/amd64",
+  "images": {
+    "LO_CLICKHOUSE_IMAGE": "clickhouse/clickhouse-server:25.12.5",
+    "LO_ZOOKEEPER_IMAGE": "signoz/zookeeper:3.9.3",
+    "LO_SIGNOZ_IMAGE": "signoz/signoz:v0.138.0",
+    "LO_SIGNOZ_COLLECTOR_IMAGE": "signoz/signoz-otel-collector:v0.144.8",
+    "LO_OTEL_IMAGE": "otel/opentelemetry-collector-contrib:0.159.0"
+  },
+  "histogram_binary": {
+    "upstream_release": "histogram-quantile/v0.0.1",
+    "url": "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2Fv0.0.1/histogram-quantile_linux_amd64.tar.gz",
+    "sha256": "fc3168f98e9f3126506d96ef8d7e6057dd777fd72786cdc58e0e8c9de80dd997",
+    "archive_sha256": "33997073eb6d82b7be4f27f9fc8ec9e28a395e0f20674d5d54bb2fa28a75488d",
+    "publisher_checksum_verified": true,
+    "binary_executed": false
+  },
+  "validation": {
+    "image_digests_resolved": true,
+    "image_lock": "image-lock.json",
+    "runtime_conformance": "not-run"
+  },
+  "verified_on": null,
+  "distribution": "Build first-party images from reviewed source and verify them before recording deployment identities."
+}

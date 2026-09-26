@@ -1,0 +1,103 @@
+{
+  "component": "sigma",
+  "status": "experimental",
+  "verified_on": null,
+  "schema_version": 1,
+  "platform": "Runtime: linux/amd64 inside the platform image, the same image the platform service runs (built by components/control/platform/Dockerfile from the pinned Python 3.12 base recorded in components/control/platform/versions.json key python_base), so this component adds no image of its own and none to pin here. The compiler is a build-only CPython environment on the author's machine: it ships no service, holds no lock and runs in no container.",
+  "docs": "docs/COMPONENTS.md (the detections row); the interface contract is components/control/sigma/CONTRACT.md",
+  "why_this_file_exists": "Pins the build tool that produces compiled SQL. Runtime image and mapping identities are referenced by their owning files to avoid duplicate sources of truth.",
+  "status_meaning": "`experimental` is a word from docs/COMPONENTS.md section 2's validation vocabulary - implementation prepared without all conformance evidence - and it is the word CONTRACT.md's own first line uses. The runner, the compiler gate and the committed artifacts are in the tree and the base tier covers them; the component still lists four open gates in conformance.md (dedicated HTTP query-user permissions, continuous Sigma container restart, provider outage, sustained query pressure), nothing has been sent to a ClickHouse from this checkout, and no container has been started from this manifest, so `verified_on` stays null and no `validated` claim exists here.",
+  "compiler": {
+    "role": "Build-only. It turns a reviewed examples/sigma/<rule>.yaml into examples/sigma/compiled/<rule>.json; the runtime consumes that committed SQL and never a Sigma file or a generated query (CONTRACT.md), so a compiler version move is a reviewed rebuild of the artifacts, not a deploy step.",
+    "packages": {
+      "pysigma": {
+        "version": "1.5.0",
+        "pinned_at": "components/control/sigma/compiler.in, line 1"
+      },
+      "pysigma-backend-clickhouse": {
+        "version": "1.1.1",
+        "pinned_at": "components/control/sigma/compiler.in, line 2",
+        "upstream_status": "CONTRACT.md records the backend as testing upstream: this pin is a claim about the two compiled artifacts in this tree, never a claim of general Sigma compatibility"
+      }
+    },
+    "transitive_pins": "components/control/sigma/compiler.lock - 17 hash-locked packages (counted from that file on 2026-09-10); no hash is restated here",
+    "cpython": {
+      "version": "3.13.7",
+      "pinned_where": "prose, in the first paragraph of components/control/sigma/CONTRACT.md ('Build-only compiler: CPython 3.13.7 ...'). The lock pins packages, not the interpreter, so this is the one value in this file with no machine-readable upstream pin behind it - stated rather than hidden, because a rule that has never been rebuilt under a new interpreter has never been compiled by it.",
+      "why_not_312": "the pinned backend's own package metadata requires Python >= 3.13 (docs/testing-standards.md), which is why tests/compiler never runs in the 3.12 product tier and CI gives it its own job: python-version 3.13 with the job's dependencies installed from compiler.lock under --require-hashes (.gitea/workflows/ci.yml)",
+      "moving_it": "regenerate compiler.lock with the `uv pip compile ... --generate-hashes` command recorded in that file's own header, rebuild every enabled rule under the new environment (CONTRACT.md, 'Rebuilding one rule'), and move docs/testing-standards.md and the CI tier's python-version in the same PR"
+    },
+    "what_this_file_does_not_pin": "no image, no digest, no tag, no artifact checksum. The compiled artifacts are reviewed files under examples/sigma/compiled/ in this checkout, and their integrity is carried inside them - sigma_runner.artifact() recomputes the SQL's digest against the artifact's own `sql_sha256` and refuses a mismatch, and the event's rule version is a prefix of its `rule_sha256` - so a pin file copying either value would be a third thing to keep in step."
+  },
+  "runtime": {
+    "artifact": "local_observe/platform/sigma_runner.py, run as `python -m local_observe.platform.sigma_runner` in its own container (components/control/sigma/compose.yaml, line 6)",
+    "image": "${LO_PLATFORM_IMAGE:?...} - required with no default (compose.yaml line 3), `pull_policy: never` (line 4), `platform: linux/amd64` (line 5). The digest is the operator's to resolve and pin, exactly as components/control/rca/versions.json states for its own component; this repository builds the image and publishes no registry (docs/BUILD.md).",
+    "compose_model": true,
+    "included_by": "examples/full/compose.yaml line 29 - the only example that starts this service; examples/demo and examples/platform do not include it",
+    "new_python_dependencies": [],
+    "new_service": false,
+    "new_port": false,
+    "database_schema_change": false,
+    "one_rule_per_container": "LO_SIGMA_ARTIFACT names one compiled artifact (compose.yaml line 16, bind-mounted read-only from ${LO_SIGMA_ARTIFACT_FILE} at line 48) and LO_SIGMA_CURSOR names one cursor (line 17). One rule, one resource_id, one cursor, one 2-second poll loop per container: that is a detector process, not a scheduler.",
+    "liveness": "the compose healthcheck is the age of that one cursor file (compose.yaml line 50, stale past 300 s, interval 30s, timeout 5s, 3 retries, start_period 60s). `restart: unless-stopped` (line 9) is not a health signal: the runner never exits on a dependency failure.",
+    "fork": {
+      "status": "Unimplemented design option. The current component runs one rule per process.",
+      "question": "one rule pack with one cursor per rule, or one container per rule stated plainly in the row. Both are legitimate; the choice changes liveness and lock semantics, so it requires an explicit component design change.",
+      "pack_cost": "the healthcheck tests the mtime of the single path ${LO_SIGMA_CURSOR} names, so with N cursors the container reads healthy while any one of them is fresh and a starving rule is invisible to `docker ps`; fixing that means either reading N files in the check or gating on the worst one, which puts pack policy inside a healthcheck. `local_observe/platform/owner.py::exclusive_owner` derives its lock path from the cursor argument sigma_runner.main() passes, so N cursors become N locks held by one process or one new lock path with no precedent here, and exact-batch replay is bound per cursor.",
+      "per_container_cost": "zero code and no change to the healthcheck, the lock, the pending-batch replay or the read bounds - all already proven as they stand - paid in deployment instead: N containers at 256 MiB and 0.5 CPU each (lines 10-11) for N rules, N producer credentials, N cursor volumes, and a startup line per container whose `shipped` figure is 1, which is why the whole-tree number comes from the command in CONTRACT.md and never from `docker logs`."
+    },
+    "credentials": "mounted files only - LO_CLICKHOUSE_PASSWORD_FILE, LO_CLICKHOUSE_READ_PASSWORD_FILE, LO_PRODUCER_TOKEN_FILE; the environment carries paths and never a value, and LO_CLICKHOUSE_USER is a name and not a secret",
+    "reads": "signoz_logs.distributed_logs_v2 through the runner's own ClickHouse class, bounded as CONTRACT.md states (parameterised half-open UTC nanosecond windows, 5 s execution, one million rows, 64 MiB read, 128 MiB query memory, overflow throws), plus the immutable inventory snapshot; never the operational database and never a store client",
+    "writes": "one coverage event per window (firing when the window's source rows were absent, unmapped or the query failed, resolved when a complete read came back), plus a `kind='security'` finding event and the count evidence behind it when the read was complete, all through the platform's authenticated intake; and the cursor file on its own volume. The third leg - the analytical copy to the owned security_events store (security store) - is code-complete and runtime-off: no shipped writer user grants it, and the grant is a reviewer's decision recorded in that component's documents."
+  },
+  "references": {
+    "rule": "The same posture components/data/query-adapter/versions.json states for itself (`restates_no_digest_or_tag: true`): one pin lives in one file and moves with a reason and a rollback line, so the two identities a deployment is read against are named below by file and key and copied into no second file.",
+    "mapping_identity": {
+      "file": "components/data/query-adapter/versions.json",
+      "key": "mapping_identity.value",
+      "asserted_by": "local_observe/platform/sigma_runner.py::artifact(), which refuses a compiled artifact whose `mapping` field differs before its SQL is read or sent",
+      "also_pinned_by": "tests/test_sigma_runner.py, docs/CONTRACTS.md section 2, and the compiler's logsource/field gate in local_observe/platform/sigma_compile.py",
+      "changing_it": "the compiler and every artifact in the operator's tree, in one reviewed change; see components/control/sigma/upgrade.md",
+      "value_copied_here": false
+    },
+    "platform_image": {
+      "file": "components/data/query-adapter/versions.json",
+      "key": "compatible_tuple.platform_image",
+      "the_same_fact_in_this_manifest": "compose.yaml line 3 requires ${LO_PLATFORM_IMAGE}; the image is built from this repository (docs/BUILD.md) and its digest is recorded at serving start by local_observe/platform/source_pin.py, not in any pin file",
+      "value_copied_here": false
+    }
+  },
+  "measurement": {
+    "what": "The one claim a rule pack makes about itself, per notification budget: `shipped` / `measured` / `unmeasured`. sigma_runner.measurement_report() counts the compiled artifacts it was given and how many carry a false-positive count measured over a named window and population; a rule that has never been counted is `unmeasured`, which is never read as quiet.",
+    "static_facts_of_this_checkout": {
+      "committed_artifacts": 2,
+      "paths": [
+        "examples/sigma/compiled/audit-trail-disable.json",
+        "examples/sigma/compiled/process-marker.json"
+      ],
+      "headline": "2 rules shipped, 2 unmeasured",
+      "how_that_was_obtained": "computed on 2026-09-10 by running the command in CONTRACT.md ('What is shipped, in one line') over those two files in the Python 3.12 base environment - a property of the tree, not an observation of a running deployment",
+      "asserted_by_name_in": "tests/test_sigma_rules.py::MeasurementHonestyTests, and restated with its date in CONTRACT.md and conformance.md"
+    },
+    "operator_surface": "measurement_signal() is that report in the shape /v1/overview reads: platform/overview.py validates a complete triple whose parts sum to `shipped`, with a headline bounded to 120 characters, and serves sigma_shipped, sigma_measured, sigma_unmeasured plus a status and a provenance line. Reader and producer built (overview sigma producer, the Sigma overview signal): platform/overview_worker.py publishes the triple when its configuration names a `sigma_artifacts` directory (at most 64 compiled artifacts, any unreadable one withholds the key), and a deployment with no such key answers `unknown` with three nulls and never a healthy zero. No shipped configuration sets the key, so every deployment still reads `unknown` until an operator opts in.",
+    "not_a_health_signal": "Neither the startup line nor the overview signal opens, resolves or gates anything - state.py decides what is open (incident and action state) - and the container's healthcheck stays the age of its cursor."
+  },
+  "validation": {
+    "runtime_conformance": "not-run",
+    "container_started": false,
+    "query_sent_to_clickhouse": "not-run; execute the conformance recipe in an isolated installation.",
+    "compiler_tier": "Run tests/compiler with the locked compiler environment.",
+    "base_tier": "Run the deterministic base tier in tests/tiers.py.",
+    "static_gate": "Run python -B scripts/check_foundation.py.",
+    "what_was_measured": "the deterministic rules, artifact bounds and authoring refusals in the base tier; the honest counting of the shipped pack; and the producer-to-reader round trip over the two committed artifacts",
+    "what_was_not_measured": "any SQL executed by a ClickHouse server, any container start, any cursor surviving a real restart, and every gate still listed open in conformance.md"
+  },
+  "artefacts": {
+    "CONTRACT.md": "inputs, outputs, the authoring blocks a rule must carry, the anonymisation rule, and the shipping headline",
+    "backup.md": "which state a restore must bring back for this runner",
+    "upgrade.md": "what moving the compiler or the mapping identity costs, and how to back out",
+    "conformance.md": "Deterministic checks, runtime acceptance recipes and analytical-copy boundaries.",
+    "compose.yaml": "the one service: read-only rootfs, dropped capabilities, no published port, cursor-age healthcheck",
+    "compiler.in and compiler.lock": "the build tool's two direct pins and its hash-locked transitive set"
+  }
+}

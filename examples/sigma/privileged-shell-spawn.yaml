@@ -1,0 +1,110 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). This one is deliberately NOT built: see `unshipped:`.
+# Authoring contract: components/control/sigma/CONTRACT.md, "Writing a rule here".
+title: A privileged shell was opened on a declared Linux host
+id: 897c20d4-524c-4de0-8dfa-db08a596d8b0
+status: experimental
+description: >-
+  A privilege-escalation binary was invoked in the form that hands the caller an interactive shell
+  (`sudo su`, `sudo -i`, `sudo bash`, `su root`, `su -`). Matched on the command line only: the
+  reference field mapping has no session, tty or uid attribute, so this says "a root shell was
+  asked for", never "which terminal it was attached to".
+author: local-observe
+derived_from: >-
+  v0.1 rule `detections/root-shell-outside-window.yaml` (private estate source). Re-derived against
+  this repo's reference field mapping; no text, host name, account, window or count copied. The two
+  measurements quoted below are v0.1's own, quoted from its `why:` block, and were not reproduced.
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  sudo_shell:
+    Image|endswith: /sudo
+    CommandLine|contains:
+      - sudo su
+      - sudo -i
+      - sudo bash
+      - sudo zsh
+  su_shell:
+    Image|endswith: /su
+    CommandLine|contains:
+      - su -
+      - su root
+      - su -l
+  condition: sudo_shell or su_shell
+level: medium
+enabled: false
+measured:
+  false_positives: null
+  because: >-
+    unmeasured, and unmeasurable in this repository today: the only producer of
+    `linux.process_creation` here is the synthetic fixture, so there is no population to count
+    against. v0.1's nearest measurement is quoted in `why:` and is a warning, not a substitute.
+  window: none
+  population: none
+  measured_on: null
+  source: none
+unshipped:
+  blocker: policy
+  reason: >-
+    The rule is buildable — the pinned compiler accepts every field, modifier and condition in this
+    file, which is what tests/compiler/test_sigma_content_rules.py exists to keep true — and no SQL
+    is committed for it because the two things that decide whether this finding is a finding are not
+    in the file. The first is a maintenance-window policy nobody has ratified (v0.1 shipped the same
+    rule `enabled: false` for exactly that reason, and its own words were that arming a rule against
+    an unratified policy pages on whatever the agent who wrote the proposal guessed at). The second
+    is a measured false-positive rate: v0.1 measured about 24 interactive root shells a day across
+    five hosts with 148 of 167 weekly records being automation `BECOME` runs rather than hands on a
+    keyboard, and this repo's matcher is strictly broader than the one that produced those numbers
+    because it cannot see the tty field that separated them. Until the window policy is the
+    operator's and the rate is somebody's measurement, an artifact for this rule would be a pager
+    waiting to be mis-tuned.
+why: |
+  WHAT THIS ASSERTS. A shell opened through `sudo`/`su` in its interactive forms. v0.1's rule was
+  "outside a maintenance window"; the window is not here, deliberately — see the window section
+  below, which is the actual point of this file.
+
+  WHAT THE MAPPING TAKES AWAY, and it takes away the discriminator. v0.1 separated "a root shell"
+  from "the sudo a timer takes" on one attribute: sudo writes a `TTY=pts/N` field only for a session
+  attached to a terminal, and its query filtered on it. This repo's reference mapping exposes three
+  fields (`Body`, `Image`, `CommandLine`) and no session attribute, so the discriminator is
+  replaced by a narrower pattern set: the *interactive shell forms* of the command line. That is a
+  weaker substitute, not an equivalent one, and two consequences follow:
+
+    * Automation that runs `sudo <command>` is not matched, but automation that runs a login shell
+      (`sudo -i` in a provisioning script) is, and nothing here can tell the two apart.
+    * The backend compiles every match to `ILIKE`, which is **case-insensitive**, so `-S` (password
+      from stdin, the form configuration-management tools use) and `-s` (the shell flag) are the
+      same bytes to the matcher. That is why the set above keys on the shell *names* and on
+      `sudo -i`, and why nobody should "simplify" it by adding `sudo -s`-style bare flag patterns:
+      they would swallow the automation this rule is trying to exclude, and the swap would be
+      invisible in the YAML because the compiler lowercases nothing — the server does.
+
+  THE WINDOW IS A SUPPRESSION, NOT A TIMESTAMP (this is the port). v0.1 rendered a `windows:` table
+  into its SQL literal at load time, so the band was inside the query. Here a band cannot live in
+  Sigma without becoming a frozen timestamp range — and a range in a compiled artifact drifts from
+  the policy the moment anybody moves the band, which is the exact defect v0.1's renderer was built
+  to avoid. So the interaction is the platform's: `local_observe/platform/suppression.py`
+  `declare_window` holds a human's maintenance window as control state (role `human` only, bounded,
+  attested against its append-only audit row, expiring by its own end), and it names **one
+  `rule_id`** or one `resource_id`. The rule id of a compiled Sigma finding is
+  `sigma.<uuid-from-this-file>`, so declaring a window over that id silences the *send* for exactly
+  this rule while the window is live, and nothing else:
+
+    * the finding still lands — `Store.intake` files it, the incident still opens and resolves;
+    * the delivery is refused in the three places a refusal belongs (`outbox.status='dead'`, one
+      `notification_suppressions` row, one `notification.suppressed` audit line), and the operator
+      view prints why;
+    * when the window ends, the next tick pages again with no change to this file.
+
+  `tests/test_sigma_content.py` runs that pair — a declared window over a compiled rule's id, and the
+  finding that rule produces — and asserts both halves: the page is refused and named, the finding and
+  its incident survive. It also asserts the half that a timestamp-in-Sigma design would have got wrong:
+  the window does **not** cover the rule's coverage event.
+
+  WHAT THAT COSTS, said plainly: v0.1's semantics were **recurring** (a weekly maintenance window in a selected timezone) and a declared window here is **one bounded interval** of at most 24 hours, declared
+  in advance by a named human. A weekly band therefore means one declaration per band — a
+  deliberate, audited act each time, visible in the audit log — and not a line in a file that runs
+  forever. That is a real ergonomic loss, it is the price of "a window is a decision somebody made"
+  rather than a filter, and if it turns out to be the wrong trade the fix is a scheduling shape in
+  the suppression layer, not a timestamp baked into a Sigma rule.

@@ -1,0 +1,109 @@
+{
+  "crowdsec-decision-apply": {
+    "version": "1",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "enum": [
+            "Ip",
+            "Range"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 45,
+          "pattern": "^(?:0|[1-9][0-9]{0,2})(?:\\.(?:0|[1-9][0-9]{0,2})){3}(?:/(?:[0-9]|[12][0-9]|3[0-2]))?$|^[0-9a-f][0-9a-f:]{1,43}$",
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "^192\\.0\\.2\\."
+              },
+              {
+                "pattern": "^198\\.51\\.100\\."
+              },
+              {
+                "pattern": "^203\\.0\\.113\\."
+              }
+            ]
+          }
+        },
+        "type": {
+          "const": "ban"
+        },
+        "duration": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,4}(s|m|h)$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "scope",
+        "value",
+        "type",
+        "duration",
+        "reason"
+      ]
+    },
+    "protected_destinations": [
+      "192.0.2.0/24",
+      "198.51.100.0/24",
+      "203.0.113.0/24"
+    ]
+  },
+  "crowdsec-decision-remove": {
+    "version": "1",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "enum": [
+            "Ip",
+            "Range"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 45,
+          "pattern": "^(?:0|[1-9][0-9]{0,2})(?:\\.(?:0|[1-9][0-9]{0,2})){3}(?:/(?:[0-9]|[12][0-9]|3[0-2]))?$|^[0-9a-f][0-9a-f:]{1,43}$",
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "^192\\.0\\.2\\."
+              },
+              {
+                "pattern": "^198\\.51\\.100\\."
+              },
+              {
+                "pattern": "^203\\.0\\.113\\."
+              }
+            ]
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "scope",
+        "value",
+        "reason"
+      ]
+    },
+    "protected_destinations": [
+      "192.0.2.0/24",
+      "198.51.100.0/24",
+      "203.0.113.0/24"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+# Coverage measurement for the base (deterministic) tier. Driven by .gitea/workflows/ci.yml and
+# documented in docs/testing-standards.md, which also carries the measured baseline and what the
+# floor is allowed to move for. The floor itself is NOT set here: it is the explicit
+# `coverage report --fail-under=<N>` in the workflow, so one number exists in one place.
+[run]
+source = local_observe
+branch = True
+# Shipped browser assets are never executed by these tests.
+omit = */static/*
+# Store paths relative to the checkout, so a report measured on one OS stays readable elsewhere.
+relative_files = True
+
+[report]
+# coverage applies [run] omit while measuring and [report] omit while displaying; both are set so a
+# data file collected another way cannot smuggle the static assets back into the totals.
+omit = */static/*
+
+[xml]
+output = coverage.xml

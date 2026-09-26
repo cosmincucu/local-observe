@@ -1,0 +1,39 @@
+{
+  "status": "experimental",
+  "schema_version": 1,
+  "verified_on": "2026-09-08",
+  "note": "A pin candidate plus what has actually been started. Nothing here is a build this repository produced: the image is upstream's, pulled by digest. docs/INSTALLATION.md section 2 keeps the same rule as every other versions.json here - re-resolve the digest for the platform you run before setting LO_HOMEPAGE_IMAGE.",
+  "image": "ghcr.io/gethomepage/homepage:v1.13.2@sha256:a0b71c8e757298d02560186bab9fbe3fc2d375c523a62cc1019177b37e48aa28",
+  "index_digest": "sha256:a0b71c8e757298d02560186bab9fbe3fc2d375c523a62cc1019177b37e48aa28",
+  "index_media_type": "application/vnd.docker.distribution.manifest.list.v2+json",
+  "platform": "linux/amd64",
+  "linux_amd64_digest": "sha256:c881120b024d6a8e2f3c9664efc568984e4352e47df459d6b32e225374c71955",
+  "linux_arm64_digest": "sha256:7a916ce0641618777a3091d7836ba4831dd08b09b12dfd957d8066fa9479891b",
+  "digest_provenance": {
+    "registry_url": "https://ghcr.io/v2/gethomepage/homepage/manifests/v1.13.2",
+    "read_on": "2026-09-08",
+    "method": "anonymous pull token, then HEAD with the OCI index and Docker manifest-list Accept types; Docker-Content-Digest is the value recorded above. The per-platform digests came from the manifest list that same GET returns.",
+    "cross_checked_against": "Use the component contract and reviewed upstream pin; validate against your installation.",
+    "why_not_the_registry_tag_list": "GHCR caps /v2/<name>/tags/list at 100 entries and this repository's tags run past that, so absence from that page proves nothing; a tag is resolved by requesting its manifest by name and reading Docker-Content-Digest."
+  },
+  "actually_run": {
+    "statement": "v1.13.2 is the only version of this image anything in this repository has started and served. The reference example (examples/full/compose.yaml) has never started any version of it, so this pin is proven by the staging rehearsal and by the registry read above, not by a run against examples/full.",
+    "evidence": "components/control/homepage/conformance.md records which clauses of the acceptance scenario are named tests and which are not-run."
+  },
+  "candidate": {
+    "tag": "v2.2.0",
+    "index_digest": "sha256:753eeb0cc22ab7baad39ed47cbd1aae14e193dd1b264e965f193a9ea1d1e1bdd",
+    "linux_amd64_digest": "sha256:a53cc29a838858950ad3f2e93b2dbfebacbae1c1718cc7b78b1e598867f9dbc1",
+    "index_media_type": "application/vnd.oci.image.index.v1+json",
+    "upstream_release": "https://github.com/gethomepage/homepage/releases/tag/v2.2.0",
+    "read_on": "2026-09-08",
+    "state": "exists and resolves; not adopted. v1 to v2 is a major version and nothing in this repository has run it, so its config keys, its /api/revalidate behaviour and the HOMEPAGE_FILE_ substitution this manifest depends on are all unverified against it. Move by upgrade.md, never by editing this file alone.",
+    "not_adopted_because": "the row this component closes is about shipping a portal, not about a version upgrade, and the release schema pins the version itself: local_observe/deployment/release.py declares contracts.homepage as the JSON-Schema const '1.13.2', which tests/test_release.py asserts, so a v2 image is a release-contract change with its own PR, not a line in this file."
+  },
+  "depends_on": {
+    "readiness_bootstrap": "scripts/homepage_start.cjs, mounted at /bootstrap.cjs through LO_HOMEPAGE_BOOTSTRAP. Verified against v1.13.2 only: it spawns server.js, polls /api/revalidate for revalidated: true and writes /tmp/portal-ready, which is the healthcheck's only input. Whether v2.x keeps that endpoint is an open item in upgrade.md.",
+    "config_renderer": "local_observe/platform/homepage.py",
+    "credential_role": "summary (local_observe/platform/api.py restricts it to /v1/me and /v1/overview)"
+  },
+  "distribution": "upstream image pulled by digest; this repository builds nothing here, publishes no image and claims no signature"
+}

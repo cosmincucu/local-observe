@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "crowdsec-decisions",
+  "entry_version": 1,
+  "description": "CrowdSec's decided half (threat detection engine): one Local API container holding decisions, fed from files and journald rather than from this product's store, plus a bouncer that asks the platform before it blocks anything and may never block the VPN path, the LAN gateway or the ISP ranges without a human (auto-block authority). Its community blocklist needs a registered machine key, so it stays off until the operator opts in (community blocklist dependency).",
+  "decided_by": "D-103",
+  "capabilities": ["container-execution", "durable-storage", "secrets"],
+  "components": [
+    {
+      "path": "components/control/platform",
+      "state": "selected",
+      "relationship": "intake"
+    }
+  ],
+  "modules": [],
+  "if_disabled": "No decision from this feed arrives and nothing is blocked on one; Sigma detections, incidents and notifications are unaffected because nothing in the platform depended on it being present."
+}

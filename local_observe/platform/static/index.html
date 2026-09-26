@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>local-observe</title>
+    <link rel="stylesheet" href="/ui.css" />
+    <script defer src="/lucide.min.js"></script>
+    <script defer src="/ui.js"></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <i data-lucide="activity"></i><strong>local-observe</strong
+        ><span class="environment" id="environment">UNKNOWN</span>
+      </div>
+      <div class="session">
+        <span id="identity">Disconnected</span
+        ><button id="refresh" title="Refresh" aria-label="Refresh">
+          <i data-lucide="refresh-cw"></i></button
+        ><button id="logout" title="Sign out" aria-label="Sign out">
+          <i data-lucide="log-out"></i>
+        </button>
+      </div>
+    </header>
+    <div class="workspace">
+      <nav aria-label="Views">
+        <button data-view="incidents" class="active">
+          <i data-lucide="circle-alert"></i>Incidents</button
+        ><button data-view="actions">
+          <i data-lucide="shield-check"></i>Approvals</button
+        ><button data-view="executions">
+          <i data-lucide="workflow"></i>Executions</button
+        ><button data-view="outbox">
+          <i data-lucide="bell"></i>Notifications</button
+        ><button data-view="inventory">
+          <i data-lucide="server"></i>Inventory</button
+        ><button data-view="events">
+          <i data-lucide="list-filter"></i>Events</button
+        ><button data-view="audit"><i data-lucide="history"></i>Audit</button>
+      </nav>
+      <main>
+        <section class="summary" aria-label="Current totals">
+          <div>
+            <span>Open incidents</span><strong id="open-count">-</strong>
+          </div>
+          <div>
+            <span>Awaiting approval</span><strong id="approval-count">-</strong>
+          </div>
+          <div>
+            <span>Pending delivery</span><strong id="delivery-count">-</strong>
+          </div>
+        </section>
+        <div class="heading">
+          <h1 id="view-title">Incidents</h1>
+          <span id="updated"></span>
+        </div>
+        <div class="filters">
+          <label class="search"
+            ><i data-lucide="search"></i
+            ><input
+              id="search"
+              type="search"
+              placeholder="Search"
+              aria-label="Search records" /></label
+          ><select id="status-filter" aria-label="Status">
+            <option value="">All statuses</option>
+            <option>open</option>
+            <option>resolved</option>
+            <option>pending</option>
+            <option>approved</option>
+            <option>executing</option>
+            <option>succeeded</option>
+            <option>failed</option>
+            <option>unknown</option>
+            <option>sent</option>
+            <option>dead</option>
+          </select>
+        </div>
+        <p id="error" role="alert" hidden></p>
+        <div class="table-wrap">
+          <table>
+            <thead id="columns"></thead>
+            <tbody id="records"></tbody>
+          </table>
+          <p id="empty">Sign in to view records.</p>
+        </div>
+      </main>
+    </div>
+    <dialog id="login">
+      <form id="login-form">
+        <h2>local-observe</h2>
+        <div id="username-field" hidden><label>Username<input id="username" autocomplete="username" maxlength="64" disabled></label></div>
+        <div id="password-field" hidden><label>Password<input id="password" type="password" autocomplete="current-password" disabled></label></div>
+        <div id="token-field" hidden><label
+          >Access token<input
+            id="token"
+            type="password"
+            disabled
+            autocomplete="off"
+        /></label></div>
+        <p id="login-error" role="alert"></p>
+        <button id="login-submit" class="primary" type="submit" disabled>
+          <i data-lucide="log-in"></i>Sign in
+        </button>
+      </form>
+    </dialog>
+    <dialog id="detail">
+      <div class="detail-heading">
+        <h2 id="detail-title">Record</h2>
+        <button id="close-detail" title="Close" aria-label="Close">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <dl id="detail-fields"></dl>
+      <div id="evidence"></div>
+      <div id="commands"></div>
+      <!-- Read-only history, and only for an execution row: it starts hidden and empty, is filled by
+           one explicit click each, and says in words that a recorded verdict is not the incident's
+           current state. Nothing here is fetched until the operator asks for it. -->
+      <section
+        id="verification"
+        class="verification"
+        aria-labelledby="verification-title"
+        hidden
+      >
+        <div class="verification-heading">
+          <h3 id="verification-title">Verification history</h3>
+          <button id="verification-load" type="button">
+            Load verification history
+          </button>
+        </div>
+        <p
+          id="verification-state"
+          role="status"
+          aria-live="polite"
+          data-state="not-loaded"
+        >
+          Not loaded.
+        </p>
+        <ul id="verification-ids"></ul>
+        <p
+          id="verification-record-state"
+          role="status"
+          aria-live="polite"
+          data-state=""
+          hidden
+        ></p>
+        <div id="verification-result"></div>
+      </section>
+      <p id="detail-error" role="alert"></p>
+    </dialog>
+    <dialog id="confirm">
+      <form method="dialog">
+        <h2 id="confirm-title">Confirm decision</h2>
+        <p id="confirm-subject"></p>
+        <div class="confirmation">
+          <button value="cancel">Cancel</button
+          ><button class="primary" value="confirm">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

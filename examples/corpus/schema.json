@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Demo-derived detector evaluation corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "origin", "evaluation", "incidents", "quiet", "series"],
+  "properties": {
+    "schema_version": {"const": 1, "type": "integer"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "origin": {"enum": ["generated-demo", "anonymized-example"]},
+    "evaluation": {"$ref": "#/$defs/window"},
+    "incidents": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "resource_id", "window", "expected_class"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "resource_id": {"$ref": "#/$defs/uuid"},
+        "window": {"$ref": "#/$defs/window"},
+        "expected_class": {"enum": ["availability", "coverage", "threshold", "drift", "anomaly", "security"]}
+      }
+    }},
+    "quiet": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/window"}},
+    "series": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
+      "type": "object", "additionalProperties": false, "required": ["resource_id", "metric", "rows"],
+      "properties": {
+        "resource_id": {"$ref": "#/$defs/uuid"},
+        "metric": {"type": "string", "minLength": 1, "maxLength": 128},
+        "rows": {"type": "array", "minItems": 1, "maxItems": 2000, "items": {
+          "type": "object", "additionalProperties": false, "required": ["ts", "v"],
+          "properties": {"ts": {"type": "number", "minimum": 978307200, "maximum": 4102444800}, "v": {"type": "number"}}
+        }}
+      }
+    }}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "window": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": {"start": {"type": "string", "format": "date-time"}, "end": {"type": "string", "format": "date-time"}}
+    }
+  }
+}

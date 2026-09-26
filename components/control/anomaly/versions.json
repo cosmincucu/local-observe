@@ -1,0 +1,50 @@
+{
+  "component": "anomaly",
+  "status": "experimental",
+  "verified_on": null,
+  "platform": "linux/amd64; never started here",
+  "schema_version": 1,
+  "what_this_component_is": "A Compose manifest and its lifecycle documents for the producer that already lives in local_observe/platform/anomaly.py. It ships no image of its own and no new code: it is the deployment half of event kinds's module.",
+  "image": {
+    "variable": "${LO_PLATFORM_IMAGE}",
+    "shipped_by_this_component": false,
+    "builder": "components/control/platform/Dockerfile",
+    "pin_lives_in": "components/control/platform/versions.json",
+    "why_not_its_own_image": "The producer is a module of the platform package (it imports platform.sigma_runner for its bounded ClickHouse client and platform.detections.event for its only output), so a second image would build the same package twice and rot two locks instead of one. The same reuse the `rca` row documents for `lo-platform rca`.",
+    "rebuild_required": "Build the platform image from the reviewed source using docs/BUILD.md before enabling this producer.",
+    "rebuild_verified_on": null,
+    "rebuild_verified_note": "Record verified build identity in your deployment repository."
+  },
+  "module_source": {
+    "modules": [
+      "local_observe/platform/anomaly.py",
+      "local_observe/platform/anomaly_cursor.py"
+    ],
+    "revision": "Use the reviewed product release; record the build in deployment configuration."
+  },
+  "state": {
+    "kind": "one JSON cursor document on a named volume",
+    "volume": "anomaly-state mounted at /state",
+    "prepared_by": "The platform Dockerfile creates /state at mode 0700 owned by uid/gid 65532. Verify a fresh volume before enabling the producer.",
+    "inside_the_image": "The platform Dockerfile creates /state at mode 0700 owned by uid/gid 65532. Verify a fresh volume before enabling the producer.",
+    "dockerfile_fix_owed": "The platform Dockerfile creates /state at mode 0700 owned by uid/gid 65532. Verify a fresh volume before enabling the producer."
+  },
+  "credentials": {
+    "mounted_files": "Two, both read as `_FILE` paths: LO_CLICKHOUSE_PASSWORD_FILE and LO_ANOMALY_PRODUCER_TOKEN_FILE. The environment carries paths and never a value, and LO_CLICKHOUSE_USER is a name and not a secret. The container-side names are unchanged (`LO_CLICKHOUSE_PASSWORD_FILE`, `LO_PRODUCER_TOKEN_FILE` under /run/secrets/); what moved is the host file the producer-token secret reads.",
+    "producer_token_is_its_own": "Since 2026-09-10  this component's `anomaly-producer-token` reads `${LO_ANOMALY_PRODUCER_TOKEN_FILE}`, not the Sigma runner's `${LO_PRODUCER_TOKEN_FILE}`. One row of the platform's credentials file carries exactly one `identity`, and `local_observe/platform/state.py` answers 'Source identity differs from authenticated producer' to an event whose `source` is not that identity, so one token cannot authenticate two producers: anomaly component shipped the runner's file beside LO_ANOMALY_SOURCE=anomaly-example and the result was a container that started, judged every series and had every POST refused. The operator stages ONE new single-value file and ONE new `producer` row whose identity equals LO_ANOMALY_SOURCE -- the recipe is examples/full/README.md step 5, the reasoning is CONTRACT.md section 4. The ClickHouse password stays shared with Sigma on purpose: one store, one read-only query user, one file.",
+    "unverified": "Nothing here has rendered or started either credential: no `docker compose config`, no container, no platform request. The refusal sentence above is quoted from state.py's source, never observed from this manifest, and the staging commands above have never been run -- conformance row 2.12 is the check that turns this pair from a claim about files into a claim about a running producer"
+  },
+  "validation": {
+    "runtime_conformance": "not-run",
+    "container_started": false,
+    "compose_config_rendered": false,
+    "component_in_an_example": true,
+    "component_in": "examples/full/compose.yaml includes the component.",
+    "backup_restore": "not-run",
+    "upgrade_rehearsal": "not-run",
+    "volume_preparation_recipe": "not-run: verify the directory mode and ownership using conformance.md.",
+    "static_gate": "scripts/check_foundation.py and tests/test_anomaly_component.py check the shipped composition.",
+    "evidence": "Record runtime results in deployment-owned evidence."
+  },
+  "distribution": "no image is published by this project; this component names the platform's image variable and nothing else"
+}

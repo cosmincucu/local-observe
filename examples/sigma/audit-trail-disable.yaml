@@ -1,0 +1,94 @@
+# Rules are authored here and compiled by the pinned 3.13 environment; CI commits the SQL this
+# file builds to (docs/DECISIONS.md threat detection engine). The `enabled:`, `measured:` and `why:` blocks below are
+# this repository's rule-authoring contract — see components/control/sigma/CONTRACT.md, "Writing a
+# rule here". They are checksummed with the rule: editing `why:` or `measured:` moves `rule_sha256`,
+# which is the runner's `rule_version`, which an existing evaluation cursor refuses.
+title: The audit trail was switched off from a command line
+id: a4656bf4-aa37-4df1-af10-88edd5828360
+status: experimental
+description: >-
+  A process on a declared host disabled its own kernel audit producer or stopped the audit service —
+  `auditctl -e 0`, or a service control naming `stop auditd`. The finding is the presence of the
+  command, not the absence of a log: the absence half lives in the source-coverage event, and this
+  rule's `why:` says which half it cannot see.
+author: local-observe
+derived_from: >-
+  v0.1 rule `detections/auditd-stopped.yaml` (private estate source). Re-derived against this repo's
+  reference field mapping; no text, host name, address or count copied. Quoted v0.1 measurements are
+  labelled as quotations below and have not been reproduced here.
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  auditctl_disabled:
+    Image|endswith: /auditctl
+    CommandLine|contains: '-e 0'
+  auditd_stopped:
+    Image|endswith: /systemctl
+    CommandLine|contains: stop auditd
+  condition: auditctl_disabled or auditd_stopped
+level: critical
+enabled: true
+measured:
+  false_positives: null
+  because: >-
+    unmeasured on purpose, and no substitute number is offered. The matcher is narrow by
+    construction — the pattern set is two conjunctions, each requiring a specific binary at the end
+    of the executable path together with the flag or the words that mean "stop recording" — but
+    nothing in this repository has run it over a real log population, so there is no false-positive
+    count to report and a rule with no count is `unmeasured`, not `quiet`. Arm it against an
+    inventory of hosts that ship `linux.process_creation` and record the count in this block before
+    it is expected to page anyone.
+  window: none
+  population: none
+  measured_on: null
+  source: none
+why: |
+  WHAT THIS ASSERTS. Anyone covering their tracks switches the trail off before they walk on it, so
+  the binaries that switch it off are worth a finding on sight: `auditctl -e 0` disables kernel
+  auditing, and a service control naming `stop auditd` stops the daemon that consumes it. Each
+  selection is a conjunction — the executable path AND the words in its command line — so the rule
+  does not fire on `auditctl` used to *read* rules, and does not fire on `systemctl stop` of any
+  other unit. That conjunction is why this rule's match set is empty on a host doing nothing.
+
+  WHAT THIS CANNOT SEE — read before trusting a quiet run. It is a **presence** rule, and the thing
+  v0.1 actually shipped in its place was the opposite: an ABSENCE rule ("the auth stream went to
+  zero while the same host kept shipping thousands of other records"). Sigma cannot express that,
+  because a Sigma rule matches records and the finding is the missing ones. Two halves of the
+  original, therefore, live in two places here:
+
+    * the switched-off-by-a-command half is this rule;
+    * the went-silent-by-itself half is the **source-coverage** event every compiled rule already
+      emits (`sigma.<uuid>.coverage`, `query_type=sigma-source-coverage`): a window with zero rows,
+      or with rows whose mapped fields are missing, opens a coverage condition and — this is the
+      part that matters — never resolves the finding beside it. `local_observe/platform/sigma_runner.py`
+      `tick()`, and `tests/test_sigma_content.py` proves it against a fixture with no rows.
+
+  What NEITHER half can do is the thing v0.1's query did with an INNER JOIN against the host's own
+  history: tell "this producer died" apart from "this host is off". A host that ships nothing at all
+  produces no rows for this rule, so it is a coverage finding with no opinion about why. v0.1 solved
+  that by joining the silent stream against the host's *other* logs and its own 3-day baseline; this
+  repository has no equivalent join in the Sigma path, and a rule that needs one is not a Sigma rule
+  (see `dns-blocklist-spike.yaml`, which is refused for the same reason). Host silence belongs to
+  the availability plane (`platform/detections.py` through `conditions.py`), not here.
+
+  ONE OVER-MATCH, FIXED IN THE FIXTURE AND NOT IN THE PROSE. Every validated modifier here is a
+  substring test, so the second selection also matches a unit whose name merely *begins* the way the
+  daemon's does: `systemctl stop auditd.socket` fires. It does not match `docker stop auditd`, because
+  the executable is half of the conjunction. `examples/sigma/fixtures/audit-trail-disable/over-match.json`
+  commits exactly those three rows and records that two of them match — the case is named for what it
+  is, so nobody reads this YAML and concludes the matcher is exact. Removing it needs a word-boundary
+  modifier in the mapping (a fixture task of its own) or a measured count that names it.
+
+  QUOTED, NOT REPRODUCED. v0.1's `why:` measured 0 findings across roughly 3,100 closed 30-minute
+  buckets on five Linux hosts over 12 days for its absence rule, and recorded that its own rule
+  would NOT fire on the event in its title (`systemctl stop auditd` does not touch the auth log it
+  claims to watch). Neither number is re-measured here — no ClickHouse was queried for this port, and
+  this repository's only `linux.process_creation` producer is the synthetic fixture in
+  `scripts/sigma_fixture.py`. Quoted so the reasoning survives the copy; labelled so nobody reads it
+  as a measurement of this rule.
+
+  SEVERITY IS A LABEL, NOT A DELIVERY. `level: critical` is a Sigma field with no routing meaning
+  here. What decides whether a human is woken is `platform/state.py`'s incident and outbox, and above
+  it the send budget and the suppression layer (`platform/suppression.py`). A rule that ships with a
+  committed artifact is a rule a deployment *may* mount, not a rule that pages.

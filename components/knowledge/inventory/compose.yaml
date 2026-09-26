@@ -1,0 +1,41 @@
+services:
+  inventory:
+    image: ${LO_INVENTORY_IMAGE:?set the verified local image ID or registry digest}
+    pull_policy: never
+    platform: linux/amd64
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=67108864"]
+    environment:
+      LO_INDEX_PATH: /data/inventory.db
+      # The reader's bearer token arrives as a mounted file, never as an environment value: an env
+      # value is readable through `docker inspect` and /proc/<pid>/environ of every process in this
+      # container. The same variable name on the host holds the source path (see `secrets:` below).
+      LO_INVENTORY_TOKEN_FILE: /run/secrets/inventory-token
+    secrets:
+      - inventory-token
+    volumes:
+      - type: bind
+        source: ${LO_INVENTORY_SNAPSHOT_DIR:?absolute path to built inventory snapshot}
+        target: /data
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - 127.0.0.1:${LO_INVENTORY_PORT:-18082}:8001
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8001/inventory/resources.json',headers={'Authorization':'Bearer '+open(os.environ['LO_INVENTORY_TOKEN_FILE']).read().strip()}); urllib.request.urlopen(r,timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+secrets:
+  inventory-token:
+    file: ${LO_INVENTORY_TOKEN_FILE:?absolute path to the inventory reader bearer token file}

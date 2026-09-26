@@ -1,0 +1,10 @@
+{
+  "inspect-synthetic": {
+    "version": "1",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

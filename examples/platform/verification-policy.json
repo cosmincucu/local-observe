@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "verifiers": [
+    "verify-worker"
+  ],
+  "mappings": [
+    {
+      "source": "threshold-detector",
+      "rule_id": "inspect.cpu",
+      "rule_version": "3",
+      "condition": "inspect.cpu",
+      "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      "query_type": "metric-threshold",
+      "parameters": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        "rule_id": "inspect.cpu",
+        "artifact_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "metric_name": "lo_cpu",
+      "threshold": 90.0,
+      "comparison": "lt",
+      "window_seconds": 300,
+      "artifact_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

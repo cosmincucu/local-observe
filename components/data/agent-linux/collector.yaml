@@ -1,0 +1,100 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  file_storage:
+    directory: /var/lib/otelcol
+    create_directory: true
+
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    root_path: /hostfs
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.time:
+            attributes: [cpu, state]
+      load: {}
+      memory: {}
+      disk: {}
+      network: {}
+      filesystem:
+        include_mount_points:
+          mount_points: ['${env:LO_FILESYSTEM_MOUNT_PATTERN}']
+          match_type: regexp
+  filelog:
+    include: [/input/*.log]
+    start_at: beginning
+    storage: file_storage
+    include_file_path: true
+
+  # --- Opt-in job observation (job observation): deliberately NOT named in any pipeline below -----------------
+  # The collector builds only what a pipeline references, so an unreferenced receiver is inert: the
+  # agent starts exactly as it did before this block existed and scrapes nothing. Enabling it means
+  # TWO operator edits, and the second one is the reason this is not shipped switched on -- the target
+  # below is not reachable from inside this container, which shares no network namespace with the host
+  # it observes (components/data/agent-linux/compose.yaml sets no host network, and check_foundation.py
+  # refuses one):
+  #   1. replace the target with an address this container can route to the exporter on;
+  #   2. add prometheus/job-observe to service.pipelines.metrics.receivers at the foot of this file.
+  # What the exporter is, how to run it, which units it exports by default and which metrics are
+  # worth alerting on: see the "Job observation on this host" section of CONTRACT.md. The metric names
+  # are labelled UNSTABLE upstream, so treat a store-side rule on them as a pin.
+  prometheus/job-observe:
+    config:
+      scrape_configs:
+        - job_name: local-observe-systemd
+          scrape_interval: 60s
+          metrics_path: /metrics
+          static_configs:
+            # Not 127.0.0.1: that is THIS container's loopback, where nothing listens. Point it at
+            # the host's exporter (:9558 by default at v0.7.0) over an address this container routes.
+            - targets: ['host-gateway-unset.example:9558']
+          metric_relabel_configs:
+            # Only the units named for job observation, never every unit on the host: 5 series per
+            # unit for state alone is a cardinality decision, not a default to accept quietly.
+            - source_labels: [__name__]
+              regex: 'systemd_(unit_state|timer_last_trigger_seconds|unit_start_time_seconds)'
+              action: keep
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  resource/identity:
+    attributes:
+      - {key: host.name, value: '${env:LO_HOST_NAME}', action: upsert}
+      - {key: resource_id, value: '${env:LO_RESOURCE_ID}', action: upsert}
+      - {key: service.name, value: local-observe-agent, action: insert}
+
+exporters:
+  otlp_http:
+    endpoint: ${env:LO_INGEST_URL}
+    headers:
+      # Read from the mounted file, not the environment: this container runs on an observed
+      # host. The `file` provider returns the raw bytes, so the file holds the token and no
+      # trailing newline -- create it with `printf '%s' ...`, never `echo`.
+      Authorization: Bearer ${file:/run/secrets/agent-ingest-token}
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+
+service:
+  extensions: [health_check, file_storage]
+  pipelines:
+    metrics:
+      # Opt-in: append `prometheus/job-observe` here only after step 1 above -- see the block.
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resource/identity]
+      exporters: [otlp_http]
+    logs:
+      receivers: [filelog]
+      processors: [memory_limiter, resource/identity]
+      exporters: [otlp_http]

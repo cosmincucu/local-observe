@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "case": "scope",
+  "rule": "process-marker.yaml",
+  "note": "Query scoping: every row matches the matcher, but only one is in the window for the declared resource and the declared dataset. A rule is a claim about one resource on one dataset, and the resource_id and event.dataset filters in the compiled SQL are what make that true.",
+  "evaluate_at": "2026-09-09T12:00:00Z",
+  "window_seconds": 60,
+  "expect": {
+    "source_count": 1,
+    "usable_count": 1,
+    "match_count": 1
+  },
+  "rows": [
+    {
+      "timestamp_ns": 1788955170000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000012",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955171000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000013",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.process_creation",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    },
+    {
+      "timestamp_ns": 1788955172000000000,
+      "id": "0f0f0f0f-0000-4000-8000-000000000014",
+      "body": "synthetic log line",
+      "resources_string": {
+        "resource_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+      },
+      "attributes_string": {
+        "event.dataset": "linux.audit",
+        "process.executable": "/opt/lo-fixture",
+        "process.command_line": "--sigma-positive"
+      }
+    }
+  ]
+}

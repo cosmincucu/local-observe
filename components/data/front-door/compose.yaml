@@ -1,0 +1,41 @@
+services:
+  lo-front-door:
+    image: ${LO_OTEL_IMAGE:?set a digest-pinned collector image}
+    platform: linux/amd64
+    user: "0:0"
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 2
+    pids_limit: 512
+    environment:
+      # Both collector credentials arrive as mounted files. The confmap `file` provider is one of
+      # the providers this image resolves config references with, so collector.yaml reads the value
+      # itself and nothing secret is ever placed in the process environment (visible to
+      # `docker inspect` and /proc/<pid>/environ). The host paths come from the same-named
+      # variables, declared under `secrets:` at the foot of this file.
+      LO_INGEST_TOKEN_FILE: /run/secrets/front-door-ingest-token
+      LO_STORE_TOKEN_FILE: /run/secrets/front-door-store-token
+      LO_STORE_OTLP_ENDPOINT: ${LO_STORE_OTLP_ENDPOINT:-signoz-otel-collector:4317}
+    secrets:
+      # Named per service: examples/full includes this file next to the store and the
+      # agent, and one Compose project cannot declare the same secret name twice.
+      - front-door-ingest-token
+      - front-door-store-token
+    ports:
+      - "127.0.0.1:${LO_OTLP_GRPC_PORT:-14317}:4317"
+      - "127.0.0.1:${LO_OTLP_HTTP_PORT:-14318}:4318"
+      - "127.0.0.1:${LO_INGEST_HEALTH_PORT:-13133}:13133"
+    volumes:
+      - ./collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - front-door-queue:/var/lib/otelcol/file_storage
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  front-door-queue: {}
+secrets:
+  front-door-ingest-token:
+    file: ${LO_INGEST_TOKEN_FILE:?absolute path to the ingest bearer token file}
+  front-door-store-token:
+    file: ${LO_STORE_TOKEN_FILE:?absolute path to the store bearer token file}

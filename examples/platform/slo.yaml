@@ -1,0 +1,99 @@
+# SLO objectives — the error-budget producer's document (`LO_SLO_CONFIG`).
+#
+# What this file is: one entry per service-level objective, each binding a target and a rolling
+# compliance window to a good/bad classifier, plus the multi-window fast-burn pair that watches the
+# budget. Ported from v0.1's `slo` package, with the two problems the port plan named answered here
+# rather than in prose:
+#
+#   * **the signals are named, and only two exist.** `signal` is `availability` (the pass/fail outcome of
+#     a synthetic/Gatus check, present in the store as a numeric 0/1 series for one declared resource) or
+#     `latency` (any declared metric series whose samples are good up to `threshold_s`). Reads come
+#     through `local_observe/store/client.py`'s `metric-threshold` kind and nowhere else. **This product
+#     never writes the availability series**: a collector or an operator job is what turns a probe result
+#     into a sample, and where nothing writes one the read answers empty and the producer files a coverage
+#     event instead of an attainment.
+#   * **there is no real-user-monitoring feed to point this at.** dead code culled the v0.1 stretch tier and
+#     names RUM among what it culled; synthetic monitoring scope re-confirmed that. So nothing here measures latency from a
+#     browser, and `signal: latency` means "a declared metric with a goodness limit" — a synthetic probe,
+#     an inside-out timer, or a service's own duration metric. It does not mean RUM.
+#
+# **Off by default.** With `LO_SLO_CONFIG` unset or blank, `python -m local_observe.slo` logs one INFO
+# line naming the variable and exits 0: no store read, no event, no invented attainment. The two other
+# variables the worker needs are `LO_SLO_CURSOR` (an absolute path, required with a configuration named,
+# whose parent directory the operator creates) and `LO_SLO_SOURCE` (the producer identity, which must
+# match its intake token); the index is `LO_INDEX_PATH` and the read is the `LO_CLICKHOUSE_*` trio the
+# Sigma component already sets.
+#
+# The UUIDs below are the ones in `examples/inventory/declared.yaml`; a resource that does not resolve in
+# the built index refuses the whole round, so copy this file only after copying that one.
+#
+# `interval_seconds` is the grid every evaluation window is aligned to (5..3600). Per objective:
+#   window_days      the compliance window attainment and remaining budget are measured over. The field
+#                    accepts 1..7 (7 is the store facade's own ceiling), and the read span the objective
+#                    then needs — the compliance window plus the room the burn windows and the clear run
+#                    take — must still fit inside it, so with the 1-hour burn window below the largest
+#                    value that loads is 6. A 30-day SLO (v0.1's usual shape) needs an aggregate read kind
+#                    in the store's closed table, which is a decision upstream of this file, not a knob.
+#   long_window      seconds. The sustained half of the pair: proves the burn is real, so a blip cannot
+#                    page. Must exceed `short_window`.
+#   short_window     seconds. The recent half: proves it is still happening, so a burn that stopped an
+#                    hour ago cannot keep paging.
+#   burn_threshold   burn rate at or above which BOTH windows must sit to fire. 1.0 is the sustainable
+#                    pace (exactly spends the budget over `window_days`); the classic 14.4x is sized for
+#                    a 30-day budget, so on a 1-day window a smaller number is the equivalent urgency —
+#                    the value below is stated, not inherited.
+#   min_samples      the floor below which attainment is `insufficient_data` (attainment and burn reported
+#                    as nothing, and a coverage event filed) rather than a number from a thin window.
+#                    1 is v0.1's default and it means "one sample is a 100 % month"; raise it deliberately.
+#   metric           the store series the read narrows to. Required in practice: without it the denominator
+#                    silently becomes every series the resource has, which is an attainment of a different
+#                    question than the one asked here. It is a store selector, so it is one bounded name
+#                    (`[A-Za-z0-9_.:/-]`, no spaces) and it must match the metric name the collector writes.
+#                    It also sets the finest cadence this file can serve: the store returns at most 2 000
+#                    rows per read, so a 1-day window tolerates samples no finer than about 44 seconds
+#                    apart, and a series written every second cannot have its 1-day attainment measured
+#                    (that round reports the objective `truncated` and files a coverage event, because the
+#                    store keeps the oldest rows of a full page and the newest samples are not in it).
+#   threshold_s      required when `signal: latency`, refused otherwise. A sample at or under it is good.
+#   for_seconds      how long the both-windows rule must hold before the burn is filed (`resolve_seconds`
+#                    for the clear side, defaulting to the same number). 0 is v0.1's behaviour — the pair
+#                    already ANDs two windows, so a blip cannot pass it; anything above 0 buys hysteresis
+#                    at the cost of a slower page.
+#   severity_*       loudness as a config field: a source vocabulary name and one of that source's own
+#                    words, resolved through `platform/vocabulary.severity`. `core-events-v1` is the plane
+#                    v0.1's `slo.fast_burn` arrived on, and its `error` rung lands beside `warning` by that
+#                    table's own row — so the second objective below is deliberately quieter than the first.
+#                    An unmapped word refuses at load, and nothing here can ask for a fourth severity.
+interval_seconds: 300
+objectives:
+  # A synthetic probe's pass/fail series, on a 1-day budget. The series is 0/1: 1 means the check passed.
+  - objective_id: demo-api.availability
+    resource_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2
+    signal: availability
+    target: 0.995
+    window_days: 1
+    long_window: 3600
+    short_window: 300
+    burn_threshold: 6.0
+    min_samples: 100
+    metric: demo_api_availability
+    severity_source: core-events-v1
+    severity_tier: critical
+    evaluation_seconds: 300
+    for_seconds: 300
+    max_age_seconds: 900
+
+  # The same shape over a declared duration metric: "99 % of samples at or under 300 ms".
+  - objective_id: demo-api.latency
+    resource_id: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2
+    signal: latency
+    target: 0.99
+    window_days: 1
+    long_window: 3600
+    short_window: 300
+    burn_threshold: 6.0
+    min_samples: 100
+    metric: demo_api_request_duration_seconds
+    threshold_s: 0.3
+    severity_source: core-events-v1
+    severity_tier: error

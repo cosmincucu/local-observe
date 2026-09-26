@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rule_id": "a4656bf4-aa37-4df1-af10-88edd5828360",
+  "rule_sha256": "bdb73aa80641ed34c8edb90209c70958a75d6faba9817c507142da8ccac26750",
+  "compiler": {
+    "pysigma": "1.5.0",
+    "pysigma-backend-clickhouse": "1.1.1"
+  },
+  "mapping": "signoz-logs-v2-linux-process-v1",
+  "dataset": "linux.process_creation",
+  "required_fields": [
+    "CommandLine",
+    "Image"
+  ],
+  "measurement": {
+    "status": "unmeasured",
+    "reason": "unmeasured on purpose, and no substitute number is offered. The matcher is narrow by construction \u2014 the pattern set is two conjunctions, each requiring a specific binary at the end of the executable path together with the flag or the words that mean \"stop recording\" \u2014 but nothing in this repository has run it over a real log population, so there is no false-positive count to report and a rule with no count is `unmeasured`, not `quiet`. Arm it against an inventory of hosts that ship `linux.process_creation` and record the count in this block before it is expected to page anyone."
+  },
+  "parameters": {},
+  "sql": "WITH logs AS (SELECT if(mapContains(attributes_string, 'process.command_line'), attributes_string['process.command_line'], NULL) AS CommandLine, if(mapContains(attributes_string, 'process.executable'), attributes_string['process.executable'], NULL) AS Image FROM signoz_logs.distributed_logs_v2\nWHERE timestamp >= {start_ns:UInt64} AND timestamp < {end_ns:UInt64}\nAND resources_string['resource_id'] = {resource_id:String}\nAND attributes_string['event.dataset'] = {dataset:String})\nSELECT count() AS source_count, countIf(isNotNull(CommandLine) AND isNotNull(Image)) AS usable_count,\ncountIf(coalesce(((Image ILIKE '%/auditctl' AND CommandLine ILIKE '%-e 0%') OR (Image ILIKE '%/systemctl' AND CommandLine ILIKE '%stop auditd%')), false)) AS match_count FROM logs FORMAT JSON",
+  "sql_sha256": "5f873605c72be56dafdafb3d6ea16c215fd8ec630893a2be707aba5a3f7f630a"
+}

@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  deterministic-tests:
+    runs-on: ubuntu-latest
+    env:
+      RUNNER_TOOL_CACHE: /opt/lo-toolcache
+      AGENT_TOOLSDIRECTORY: /opt/lo-toolcache
+    container:
+      options: --tmpfs /tmp:rw,exec,mode=1777,size=2g
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Lint (ruff, pinned in requirements-dev.txt)
+        run: |
+          python -m venv /tmp/lo-lint
+          /tmp/lo-lint/bin/python -m pip install -r requirements-dev.txt
+          /tmp/lo-lint/bin/python -m ruff check local_observe tests scripts components examples
+      - name: Public source and foundation checks
+        run: |
+          /tmp/lo-lint/bin/python -B scripts/check_foundation.py
+          /tmp/lo-lint/bin/python -B scripts/check_public_tree.py
+      - name: Base dependencies only
+        timeout-minutes: 35
+        run: |
+          python -m venv /tmp/lo-base
+          /tmp/lo-base/bin/python -m pip install -r requirements-test-base.txt coverage==7.16.0
+          /tmp/lo-base/bin/python -c "import importlib.util; assert importlib.util.find_spec('mcp') is None"
+          /tmp/lo-base/bin/python -B -m coverage run tests/tiers.py --start-dir tests --json tier-report-base.json --verbose
+          /tmp/lo-base/bin/python -B -m coverage report --precision=2 --fail-under=76
+          /tmp/lo-base/bin/python -B -m coverage xml
+      - name: Evaluation gate report (tests already ran once in base)
+        timeout-minutes: 5
+        run: |
+          /tmp/lo-base/bin/python -B -m local_observe.evaluation --revision "$(git rev-parse HEAD)" --output evaluation-report.json
+      - name: Optional MCP protocol
+        timeout-minutes: 10
+        run: |
+          python -m venv /tmp/lo-mcp
+          /tmp/lo-mcp/bin/python -m pip install -r requirements-dev.txt
+          /tmp/lo-mcp/bin/python -c "import mcp"
+          /tmp/lo-mcp/bin/python -B tests/tiers.py --start-dir tests --only-tier mcp --json tier-report-mcp.json --verbose
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Locked Sigma compiler
+        timeout-minutes: 15
+        run: |
+          python -m venv /tmp/lo-compiler
+          /tmp/lo-compiler/bin/python -m pip install --require-hashes -r components/control/sigma/compiler.lock
+          /tmp/lo-compiler/bin/python -B tests/tiers.py --start-dir tests/compiler --json tier-report-compiler.json --verbose
+      - name: Tier union report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: tier-reports
+          path: |
+            tier-report-base.json
+            tier-report-mcp.json
+            tier-report-compiler.json
+            evaluation-report.json
+          if-no-files-found: warn
+      - name: Base tier coverage xml
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pinned full-history scan
+        env:
+          GL_VER: 8.30.1
+          GL_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb # gitleaks:allow
+        run: |
+          curl -sSLf -o /tmp/gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz"
+          echo "${GL_SHA256}  /tmp/gl.tgz" | sha256sum -c -
+          tar -xzf /tmp/gl.tgz -C /tmp gitleaks
+          /tmp/gitleaks detect --source "$PWD" --no-banner --redact

@@ -1,0 +1,126 @@
+{
+  "component": "mcp",
+  "status": "experimental",
+  "verified_on": null,
+  "schema_version": 1,
+  "runtime_state": "NOT RUN FROM THIS DIRECTORY. No image has been built from components/control/mcp/Dockerfile, so no image id exists to record and `image.identity` below is null rather than a guess. Nothing has been pulled from the lock by an installer, no `docker compose config` has rendered compose.yaml on a host, and no container has answered a single `tools/list`. What was read is the product source (local_observe/platform/{mcp.py,tools.py}), pyproject.toml's `mcp` extra, and PyPI's own file metadata for the 30 packages the lock names; what was written is a lock, a build recipe, a manifest and these documents. The row in docs/COMPONENTS.md \u00a73 can now point at a component directory and at a stranger-buildable image recipe; it still cannot point at a run, which is why docs/COMPONENTS.md keeps the row `partial` and this file keeps `verified_on: null`.",
+  "platform": "linux/amd64, CPython 3.12. The lock's hashes are the wheels that platform and interpreter can load; the base image is pinned by digest, and the build is two-stage exactly as the platform image's is.",
+  "docs": "docs/COMPONENTS.md row `mcp`; the contract beside this file is CONTRACT.md.",
+  "image": {
+    "identity": null,
+    "identity_why_null": "docs/BUILD.md asks for the local image config ID printed by `docker image inspect --format '{{.Id}}' <name>` only after the image has started and served a real request. Neither has happened, and an ID copied from a build nobody ran here would be the invented number this field exists to prevent. It also would not be a digest: it is local to the build host and changes with layer order, which is the sentence docs/BUILD.md attaches to every first-party image.",
+    "build_command": "docker build -f components/control/mcp/Dockerfile --build-arg LO_SOURCE_REVISION=\"$(git rev-parse HEAD)\" -t local-observe-mcp:dev .   (run from the repository root; the context needs local_observe/ and this directory's lock)",
+    "build_arguments": {
+      "LO_PYTHON_IMAGE": "the pinned interpreter base, overridden only to move `python_base` deliberately",
+      "LO_SOURCE_REVISION": "the git commit built from; always passed",
+      "LO_IMAGE_SOURCE": "empty by default, which records \"no claimed provenance\" rather than a wrong URL",
+      "OFFLINE_WHEELS": "set to 1 with this directory's wheels/ populated to install with --no-index and no PyPI"
+    },
+    "base_layers": "components/control/mcp/Dockerfile is derived from components/control/platform/Dockerfile (same base digest, same uid, same two-stage shape). It differs in one dependency set and in owning no writable path: no mkdir /data, no VOLUME, no state.",
+    "sdk_absent_from_the_platform_image": "components/control/platform/Dockerfile still says \"Optional extras (mcp, pySigma) are not installed and stay unimported here\", and tests/test_platform_tools.py::ExtraRefusalTests pins that as behaviour. This image is where the extra lives; folding it into the platform image would remove the visible absence that docs/testing-standards.md's optional-extra tier and integration validation both depend on."
+  },
+  "python_base": "library/python@sha256:9c47360a2a0355e2da18516d0b1c2126ec22c195d2185e97347c9d98398c5bef",
+  "python_base_note": "The identical value components/control/platform/versions.json records as `python_base`, and the identical digest the platform Dockerfile defaults to. One interpreter pin across the two images is deliberate: the two installs then differ only by the SDK closure, so a base-pin move is one change with two consumers and is written in DEPENDENCIES.md's MCP row.",
+  "sdk": {
+    "package": "mcp",
+    "version": "1.29.1",
+    "pinned_in": "components/control/mcp/requirements.in (and requirements.lock), matching [project.optional-dependencies] mcp in pyproject.toml. The two must move together: an image built against a different SDK than the extra names is a different protocol surface than the one CONTRACT.md describes, and tests/test_mcp_component.py refuses a drift.",
+    "upstream": "modelcontextprotocol/python-sdk \u2014 the `mcp.server.fastmcp` and `mcp.types` imports local_observe/platform/mcp.py makes. Its repository was NOT fetched for this commit: no release note, README, changelog or support window was read. What was read is PyPI's own published metadata for the pinned version (requires_dist, requires_python, the licence classifiers) on 2026-09-10, and every dependency claim in this file and in the lock's header comes from that read rather than from a guess.",
+    "licence": "MIT, per PyPI's metadata for 1.29.1 read on 2026-09-10 (`License :: OSI Approved :: MIT License` classifier and the `license` field). That is the extent of the read: the upstream LICENCE file was never opened. Nothing is redistributed, so NOTICE's generic \"Python runtime dependencies\" paragraph covers this package and no licence text enters the tree.",
+    "transport": "stateless Streamable HTTP with JSON responses, served by uvicorn under /mcp on container port 8003; read from the FastMCP construction in local_observe/platform/mcp.py::_serve, not from upstream documentation.",
+    "no_stdio_transport": "There is no stdio transport and no SSE resource stream: `create_server`/`create_agent_server` build one ASGI app. components/control/platform/conformance.md carries both as open gates and this file repeats them rather than implying the image closed them.",
+    "requires_dist_read": "PyPI names for 1.29.1: anyio>=4.5, httpx>=0.27.1,<1.0.0, httpx-sse>=0.4, jsonschema>=4.20.0, pydantic>=2.11.0,<3.0.0, pydantic-settings>=2.5.2, pyjwt[crypto]>=2.10.1, python-multipart>=0.0.9, sse-starlette>=1.6.1, starlette>=0.27, typing-extensions>=4.9.0, typing-inspection>=0.4.1, uvicorn>=0.31.1 (unless sys_platform == emscripten), and pywin32 behind `sys_platform == \"win32\"` \u2014 that last marker is why docs/BUILD.md's `pip download` command cannot resolve this closure on a Windows host and why the lock names uv as its resolver. The SDK's three extras (cli, rich, ws, which would pull typer, rich and websockets) are asked for by no line in requirements.in, and none of those three names appears in the lock."
+  },
+  "dependencies": {
+    "lock": "requirements.lock",
+    "lock_sha256": "6e9981ec87dd6319f8b28fc792b0f016f592bc8ec0569cb2db926d2d07622eae",
+    "requirements_in_sha256": "ffa122ee888c73ac516c3deba8b91aa24b14a0dfcf8c4bc4b7fd11514204832d",
+    "packages": 30,
+    "hashes": 35,
+    "resolved_by": "uv pip compile --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --only-binary :all: --generate-hashes, with every non-linux/amd64 and every source-distribution hash removed by hand against PyPI's published file metadata. The command and the removal rule are both in the lock's header.",
+    "hash_verification": "Measured 2026-09-10 from this checkout: each of the 35 named files was downloaded from files.pythonhosted.org and its sha256 recomputed from the bytes; every one equalled PyPI's declared digest for that filename. That verifies the digests and nothing else \u2014 it is not an install, not a resolution check by pip, and not a claim that `pip install --require-hashes` succeeds inside the image build (row 1 of conformance.md, unrun).",
+    "shared_with_the_platform_lock": [
+      "attrs",
+      "click",
+      "h11",
+      "jsonschema",
+      "jsonschema-specifications",
+      "pyyaml",
+      "referencing",
+      "rpds-py",
+      "typing-extensions",
+      "uvicorn"
+    ],
+    "shared_note": "All ten agree with components/control/platform/requirements.lock on version, and every platform digest is one of the hashes listed here for that package (compared programmatically on 2026-09-10). The 20 remaining names are the SDK's closure: pydantic/pydantic-core/pydantic-settings, httpx/httpx-sse/httpcore/certifi/idna, starlette/sse-starlette/anyio, cryptography/cffi/pycparser, pyjwt, python-dotenv, python-multipart, annotated-types and typing-inspection. `sniffio` and `trio` are absent, and that absence was read rather than assumed: anyio 4.15.1's own requires_dist names neither outside `extra == \"trio\"`, and no line here asks for that extra.",
+    "no_new_product_dependency": "pyproject.toml is unchanged: `mcp==1.29.1` was already the optional extra, so this image ships a dependency set the product already declares rather than widening what the base tier must install."
+  },
+  "surface": {
+    "read_from_code": "tools.reader_registry().names() and tools.agent_registry(reader=None, index_path=None).names(), run in a test process on 2026-09-10; pinned by tests/test_mcp_component.py rather than restated as prose.",
+    "tools_with_one_shared_token": [
+      "inventory",
+      "platform_overview",
+      "platform_status",
+      "records"
+    ],
+    "tools_with_a_per_agent_map": [
+      "component_boundary",
+      "evidence_window",
+      "execute_action",
+      "inventory",
+      "platform_overview",
+      "platform_status",
+      "propose_action",
+      "records"
+    ],
+    "tools_added_only_when_mounted": {
+      "signal_series": "present only when platform/query.py::open_reader() returns a reader (compose: LO_CLICKHOUSE_URL plus a read credential)",
+      "topology_neighbourhood": "present only when an inventory index is mounted (compose: LO_INDEX_PATH plus the /inventory bind)"
+    },
+    "maximum_tools": 10,
+    "action_pairs": 1,
+    "pair": "propose_action -> execute_action, and exactly that: `propose` and `execute` are each one tool in tools.CAPABILITIES, which registers more than one of either as a defect. `execute_action` refuses before any platform request because no trusted runner handoff exists , so this image can file a request for a human and cannot satisfy one.",
+    "count_note": "\"exactly one pair\" is a count here, not an adjective: 4 reads always, up to 6 reads with both optional capabilities mounted, 2 gated tools, 10 maximum."
+  },
+  "credentials": {
+    "source": "Exactly one per process, decided by local_observe/platform/tools.py::credential_source before anything is opened: LO_MCP_IDENTITIES (the per-agent map) or LO_MCP_TOKEN_FILE (the v0.1 shared token). Both set, or neither set, is a boot refusal, and the value form LO_MCP_TOKEN is refused on sight.",
+    "delivery": "Both are container paths inside the read-only /config bind of ${LO_PLATFORM_POLICY_DIR}, which is the directory actions.json already arrives from. The manifest declares no `secrets:` entry for either, because a Compose secret cannot be declared conditionally and a required one would stop the install that mounts no map at all \u2014 the same reasoning the platform manifest records for LO_NOTIFY_CHANNELS.",
+    "map_shape": "A JSON list of 1 to 32 rows; each row exactly four keys (identity, role, bearer_token, platform_token), at most 16 KiB in total, bearer tokens at least 24 characters and unique across rows, identity matching [a-zA-Z0-9_.:-]{1,128}, roles limited to reader/proposer/executor. The document is a LIST of rows, not the JSON object map an earlier draft of this brief assumed; tools.py:85 (IDENTITY_KEYS) is the authority and components/control/platform/CONTRACT.md \u00a7identity is the document.",
+    "not_checked_at_boot": "A map's platform_token values are not validated against LO_PLATFORM_CREDENTIALS: the map is validated on its own, so an unknown token answers 401 on the agent's first request rather than stopping the boot. That is stated in the platform contract and repeated here rather than quietly improved; catching it at boot means mounting the role file into this container, which is a decision and not an omission.",
+    "read_credential_conformance": "The shared-token shape reads its platform credential through local_observe/credentials.py::read_credential (LO_READER_TOKEN_FILE preferred over any value), which is the closure of the exemption notification and state leftovers recorded for this entry point: the bare Path.read_text() is gone from the product and no credential value is ever an environment key in this manifest.",
+    "what_the_tokens_are": "chat integration's own caveat, kept in the contract because it is the sentence a reader most wants to skip: these tokens identify requesters, not human approvers. Nothing in this image can make an agent into a human, and `human` is a refused role."
+  },
+  "publication": {
+    "host_port": "loopback only: 127.0.0.1:${LO_MCP_PORT:-18100} -> container 8003. 18100 is free in every shipped example (demo 18081/13133/14317/14318, full 18084+18091-18097+18099, platform stage 18083), and 18098 is deliberately not taken because components/*/backup.md and upgrade.md use it for a restore scratch project.",
+    "gate": "`mcp` is named in scripts/check_foundation.py's HOST_PUBLISHED_SERVICES, with the argument written in the comment above that tuple and repeated in compose.yaml at the ports line. It is the first name in the tuple that is not a page a human opens.",
+    "no_example_includes_this_file": "examples/{demo,full,platform}/compose.yaml name no mcp service, so `python -B scripts/check_foundation.py` never opens this manifest on its default run and no bring-up needs LO_MCP_IMAGE. That is why tests/test_mcp_component.py calls check_model on this file directly, exactly as tests/test_ai_component.py and tests/test_crowdsec_component.py do for the same reason, and why the port variable in examples/full/.env.example is commented: an active line there would be a template line no manifest reads, which tests/test_foundation_checks.py refuses.",
+    "beyond_loopback": "Not shipped and not implied: an MCP client on another machine reaches this port through the same TLS-and-authentication edge that the portal and the Healthchecks console document as a recipe this repository does not start."
+  },
+  "depends_on": {
+    "product_code": "local_observe/platform/mcp.py (the transport: bearer gate, per-request agent binding, 64 KiB request bound, the two-block answer) and local_observe/platform/tools.py (the registry, provenance, identity map, refusal table, result budget). Both are shipped and unit-tested already; this component packages them and changes neither.",
+    "platform_api": "${LO_PLATFORM_URL} \u2014 every read and every proposal is an HTTP call made with the calling agent's own platform credential. The surface has no database connection and no store write path.",
+    "optional_store_read": "local_observe/platform/query.py::open_reader (query adapter), which answers None when unconfigured; the series read is then absent from the advertised tool list rather than present and failing.",
+    "optional_topology_read": "local_observe/inventory/index.py over a mounted read-only snapshot at /inventory.",
+    "identity_document": "components/control/platform/CONTRACT.md \u00a7identity and its conformance recipe, which mcp tool surface wrote; this component is the packaging those words said was missing.",
+    "conformance_recipe": "The nine steps of components/control/platform/conformance.md \u00a7\"Agent tool surface and the private overlay (chat integration)\". Steps 1-9 were written for a source tree with `pip install -e '.[mcp]'`; this directory is what lets a reviewer run them against a container instead, which is the sentence that report names as MCP component's."
+  },
+  "validation": {
+    "runtime_conformance": "not-run",
+    "container_started": false,
+    "image_built": false,
+    "lock_installed": false,
+    "unit_suite": "tests/test_mcp_component.py (this component's structure, base tier), plus the existing MCP-tier evidence in tests/test_mcp_surface.py, tests/test_platform_tools.py and tests/test_operator.MCPTests. Those are code-path claims about the product modules; none of them starts a container, builds an image or installs this lock.",
+    "what_was_measured": "the 35 wheel hashes in the lock, recomputed from downloaded bytes and compared to PyPI's declared digests; the version/digest agreement between this lock and the platform's for the ten shared packages; the tool counts, read from the registry in a test process; and the manifest's shape, through the repository's own gate functions.",
+    "what_was_not_measured": "whether the image builds, whether uvicorn serves it, whether the healthcheck's expected 401 ever arrives, whether the SDK answers a tools/list without a prior initialize (the healthcheck deliberately does not ask it to), and every number in the resource limits, which are bounds copied from sibling components rather than measurements."
+  },
+  "unverified": [
+    "That `docker build -f components/control/mcp/Dockerfile` completes. The lock's hashes were each recomputed from the bytes PyPI serves, but no `pip install --require-hashes` was run for linux/amd64 here, and pip selects a wheel by tag priority among the hashes listed \u2014 the check that its choice is inside this lock is conformance.md row 1 and it has not been run.",
+    "The MCP Python SDK's support window and every upstream claim about it. PyPI's metadata was read on 2026-09-10 (licence classifiers, requires_dist, requires_python >=3.10) and that is the whole of the read: modelcontextprotocol/python-sdk itself was never fetched, so no release note, changelog or deprecation schedule stands behind the pin, and no upstream sentence is quoted in CONTRACT.md.",
+    "That read_only: true with cap_drop: [ALL] and uid 65532 is sufficient for this image. It is what the sibling platform image runs under and is asserted here on that basis; nobody has started this container.",
+    "The 256 MiB / 0.5 CPU / 64 PID limits. pydantic's import cost is real and unmeasured here; an OOM-kill during import would read as a crash loop, and upgrade.md names re-checking the ceiling as the first thing to do on a host.",
+    "That the healthcheck's expected 401 is what a live uvicorn returns for a bodyless GET to /mcp. The gate answers before the SDK sees the request (local_observe/platform/mcp.py::app), which is the reasoning behind the probe; the observation is row 3 of conformance.md.",
+    "Whether an operator's MCP client is satisfied by stateless Streamable HTTP with JSON responses and no SSE stream, and whether any client library other than the pinned SDK can drive this surface. No client has been pointed at it here.",
+    "Everything about behaviour under load, per-agent rate limits or concurrency: there are no per-agent bounds in the product (`api.py` has none to inherit), so a map of 32 agents is 32 requesters sharing one uvicorn process and one platform. No number is claimed anywhere in these five artefacts.",
+    "Whether the loopback publication is the right call at all. It is the reviewer's decision taken on 2026-09-10 (correction 6 of this brief), argued in compose.yaml; the alternative (mounting /mcp on the operator factory) was rejected there rather than left unmentioned, and no measurement supports either."
+  ],
+  "distribution": "No image is published, signed or pushed by this repository. The operator builds this image from their own checkout (docs/BUILD.md), records its local config ID beside the source revision it came from, and points LO_MCP_IMAGE at it; `pull_policy: never` is what makes an unreviewed value a start failure instead of a silent fetch."
+}

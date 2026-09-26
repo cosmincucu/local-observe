@@ -1,0 +1,31 @@
+local-observe
+Copyright 2026 local-observe contributors
+
+This product bundles third-party material that is not under the Apache License 2.0.
+The notices below must be preserved in any redistribution.
+
+Lucide icon library
+  File:  local_observe/platform/static/lucide.min.js
+  Version: v0.468.0
+  Licence: ISC
+  The licence text is carried unmodified next to the file, at
+  local_observe/platform/static/LUCIDE-LICENSE. Its copyright reads: "for portions of
+  Lucide ... Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright for
+  Lucide ... Lucide Contributors 2022."
+
+Python runtime dependencies
+  The images in components/ install the pinned packages listed in each component's
+  requirements.lock from PyPI at build time. Those packages stay under their own
+  licences, which are not redistributed in this repository; the lock records the exact
+  version and sha256 of every artifact that enters an image.
+
+CrowdSec (optional integration; nothing bundled)
+  This repository ships no CrowdSec source text, no copied documentation and no
+  build of it. It ships a pinned manifest that pulls the upstream image by digest
+  (components/control/crowdsec/versions.json) and adapters that speak the Local
+  API over HTTP. Consult the upstream project for its license and distribution terms.
+
+Documentation, examples and dashboards
+  docs/ is offered under CC-BY-4.0 and examples/ (including dashboards) under CC0-1.0;
+  neither licence is replaced by the Apache-2.0 licence in LICENSE. The licensing intent
+  is recorded in docs/ARCHITECTURE.md and the code license is Apache-2.0 as provided in LICENSE.

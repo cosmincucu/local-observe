@@ -1,0 +1,4 @@
+# Product dependencies plus the in-process ASGI test client; no optional services.
+PyYAML==6.0.3
+jsonschema==4.26.0
+httpx==0.28.1

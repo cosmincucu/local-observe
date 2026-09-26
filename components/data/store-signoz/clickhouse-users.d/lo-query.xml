@@ -1,0 +1,107 @@
+<!-- Read-only query user for the Sigma runner (full example gaps).
+
+ClickHouse loads this fragment because it is a file in the users config directory:
+  "The directory users.d is used by default, as users_config defaults to users.xml. User
+   configuration fragments are merged in lexicographical order by their full paths."
+  https://clickhouse.com/docs/concepts/features/configuration/server-config/configuration-files
+  (read 2026-09-08; the pinned image is clickhouse/clickhouse-server:25.12.5 per
+   components/data/store-signoz/versions.json, and this store already relies on users.d by
+   mounting clickhouse-query-mem.xml at /etc/clickhouse-server/users.d/query-mem.xml).
+
+What the user may NOT do, and which setting enforces it:
+  readonly = 1      "Only read data queries are allowed" plus "the user can't change readonly and
+                    allow_ddl settings in the current session"
+                    (docs/concepts/features/configuration/settings/permissions-for-queries).
+                    An INSERT, OPTIMIZE, CREATE, ALTER, DROP or TRUNCATE is refused.
+  allow_ddl = 0     The docs list allow_ddl separately from readonly with default 1, so readonly
+                    alone would still permit DDL. Both are set.
+  grants            SELECT on the three SigNoz signal databases only. Everything else, including
+                    system tables and any other database, is unreachable: "GRANT SELECT ON db.*
+                    ... allows john to execute the SELECT query over all the tables in db database"
+                    (docs/reference/statements/grant).
+
+The password is NOT in this file. It is substituted at config load from the file named by
+include_from, which is ClickHouse's documented way to keep a value out of a shipped config:
+  "If an element has the attribute incl, its value will be replaced by the content of the
+   referenced file. The path to the file with substitutions is set by the include_from element in
+   the server config ... The substitution values are specified in /clickhouse/substitution_name
+   elements in this file. If a substitution specified in incl does not exist, it is recorded in
+   the log."
+   Same page, section "Substitution with file content". Note that page's caveat: include_from is
+   read per configuration file, and the users config is loaded separately from the server config,
+   so include_from belongs HERE, in a users.d fragment, not in config.d.
+
+That missing-substitution sentence is the reason the credential is a REQUIRED Compose secret in
+the sibling compose.yaml and never a default: an unresolvable incl leaves
+the element empty, which in ClickHouse means a user with no password. Compose refuses to render
+when a required secret's file does not exist, so the failure happens at `config` time, in front of
+the operator, instead of as a silent anonymous read account on the project network.
+
+settings and constraints: the runner posts max_execution_time, max_rows_to_read,
+max_bytes_to_read, max_memory_usage, max_result_rows, result_overflow_mode, read_overflow_mode and
+query parameters (param_start_ns, param_end_ns, param_resource_id, param_dataset) with every query
+(local_observe/platform/sigma_runner.py, ClickHouse.query). Under readonly = 1 "settings cannot be
+changed unless changeable_in_readonly is set"
+(docs/concepts/features/configuration/settings/constraints-on-settings), so each of those bounds is
+declared here AND marked changeable_in_readonly: the profile is what binds the user, so the value
+holds even if a client sends nothing, and the exception exists only so the runner's own request is
+not refused. Nothing else may be changed by this user.
+
+Status: reviewed shape, never executed. There was no Docker host where full example gaps was drafted, and
+components/control/sigma/conformance.md still lists "dedicated HTTP query-user permissions" as an
+open gate. examples/full/README.md states the three commands that prove this file does what it
+claims before anything depends on it.
+-->
+<clickhouse>
+    <include_from>/run/secrets/clickhouse-query-credentials</include_from>
+    <profiles>
+        <lo-readonly>
+            <readonly>1</readonly>
+            <allow_ddl>0</allow_ddl>
+            <!-- The same bounds the runner asks for, held server side. max_memory_usage here is a
+                 tenth of the 1 GiB the store's default profile allows a query (query-mem.xml), so
+                 a runaway Sigma window costs this user less memory than it costs SigNoz's own UI
+                 queries. -->
+            <max_execution_time>5</max_execution_time>
+            <max_rows_to_read>1000000</max_rows_to_read>
+            <max_bytes_to_read>67108864</max_bytes_to_read>
+            <max_memory_usage>134217728</max_memory_usage>
+            <max_result_rows>1</max_result_rows>
+            <result_overflow_mode>throw</result_overflow_mode>
+            <read_overflow_mode>throw</read_overflow_mode>
+            <constraints>
+                <max_execution_time><changeable_in_readonly/></max_execution_time>
+                <max_rows_to_read><changeable_in_readonly/></max_rows_to_read>
+                <max_bytes_to_read><changeable_in_readonly/></max_bytes_to_read>
+                <max_memory_usage><changeable_in_readonly/></max_memory_usage>
+                <max_result_rows><changeable_in_readonly/></max_result_rows>
+                <result_overflow_mode><changeable_in_readonly/></result_overflow_mode>
+                <read_overflow_mode><changeable_in_readonly/></read_overflow_mode>
+            </constraints>
+        </lo-readonly>
+    </profiles>
+    <users>
+        <lo-query>
+            <!-- Resolved from /clickhouse/lo_query_password inside the include_from file. The file
+                 holds the same value as LO_CLICKHOUSE_PASSWORD_FILE, which the runner presents as
+                 its key, so ClickHouse must know it in the same form: a <password> element is the
+                 plaintext method, which is what an X-ClickHouse-Key header over the project network
+                 authenticates against. -->
+            <password incl="lo_query_password"/>
+            <profile>lo-readonly</profile>
+            <quota>default</quota>
+            <!-- No address restriction: the runner is a container on the Compose network whose
+                 address is not stable, and the store's own boundary is that network plus this
+                 password. Narrow these two entries to your project subnet if you can name it. -->
+            <networks>
+                <ip>0.0.0.0/0</ip>
+                <ip>::/0</ip>
+            </networks>
+            <grants>
+                <grant>GRANT SELECT ON signoz_traces.*</grant>
+                <grant>GRANT SELECT ON signoz_metrics.*</grant>
+                <grant>GRANT SELECT ON signoz_logs.*</grant>
+            </grants>
+        </lo-query>
+    </users>
+</clickhouse>

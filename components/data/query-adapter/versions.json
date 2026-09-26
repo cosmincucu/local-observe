@@ -1,0 +1,145 @@
+{
+  "status": "experimental",
+  "schema_version": 1,
+  "component": "query-adapter",
+  "verified_on": null,
+  "platform": "python 3.12 inside the platform image; no container of its own",
+  "why_there_is_no_compose_or_image_here": "The component is a library plus one config delta to components/data/store-signoz. It ships no compose.yaml on purpose: a second manifest naming the same `clickhouse` service could not be merged across Compose `include` entries, so an operator following this directory would get a duplicate service or a service with no image. CONTRACT.md states the ownership table; conformance.md states which static checks reach this directory anyway.",
+  "compatible_tuple": {
+    "note": "docs/CONTRACTS.md section 2 asks for one versioned tuple across ClickHouse, SigNoz, its collector/migrator, the front-door collector, the query adapter and the Sigma field mapping. The four image pins are referenced by file and key rather than copied, because a copy of a digest is a second source of truth and this repository has already been bitten by one: a pin lives in exactly one file and moves with a reason and a rollback line.",
+    "image_pins_authoritative_file": "components/data/store-signoz/versions.json",
+    "image_digest_file": "components/data/store-signoz/image-lock.json",
+    "image_pin_keys": [
+      "LO_CLICKHOUSE_IMAGE",
+      "LO_ZOOKEEPER_IMAGE",
+      "LO_SIGNOZ_IMAGE",
+      "LO_SIGNOZ_COLLECTOR_IMAGE",
+      "LO_OTEL_IMAGE"
+    ],
+    "platform_image": "built from this repository (docs/BUILD.md); its digest is recorded at serving start by local_observe/platform/source_pin.py, not here",
+    "restates_no_digest_or_tag": true
+  },
+  "mapping_identity": {
+    "value": "signoz-logs-v2-linux-process-v1",
+    "asserted_by": "local_observe/platform/sigma_runner.py:artifact() refuses any compiled artifact whose `mapping` field differs, before its SQL is read or sent",
+    "also_pinned_by": "tests/test_sigma_runner.py (a modified or foreign artifact is refused) and docs/CONTRACTS.md section 2 ('compiler/mapping identity')",
+    "changing_it": "components/control/sigma (the compiler) and every artifact in the operator's tree; see upgrade.md"
+  },
+  "tables_and_layouts": {
+    "note": "Every statement the platform can run, from QUERY_SQL in local_observe/store/backends/clickhouse.py. Column names below are copied from those statements, which makes them facts about this repository; the TYPES they assume are unverified against a live server, and the row mappers refuse an unexpected shape rather than coerce it. Nothing here has been compared with `system.columns` on a running store.",
+    "signoz_metrics.distributed_samples_v4": {
+      "columns_named": [
+        "unix_milli",
+        "fingerprint",
+        "metric_name",
+        "value"
+      ],
+      "read_by": [
+        "metric-threshold",
+        "describe-metrics"
+      ],
+      "window_binding": "unix_milli against {start_ms:Int64} / {end_ms:Int64}, half-open"
+    },
+    "signoz_metrics.distributed_time_series_v4": {
+      "columns_named": [
+        "fingerprint",
+        "labels",
+        "unix_milli"
+      ],
+      "read_by": [
+        "metric-threshold (joined, newest labels per fingerprint)"
+      ],
+      "window_binding": "unwindowed by design: it is joined to bound samples, argMax over labels; the row cap and max_bytes_to_read bound the join, not a timestamp filter"
+    },
+    "signoz_logs.distributed_logs_v2": {
+      "columns_named": [
+        "timestamp",
+        "body",
+        "severity_text",
+        "attributes_string",
+        "resources_string"
+      ],
+      "read_by": [
+        "source-heartbeat",
+        "log-records",
+        "describe-logs"
+      ],
+      "window_binding": "timestamp against {start_ns:UInt64} / {end_ns:UInt64}, half-open",
+      "attribute_layouts_assumed": [
+        "resources_string['resource_id']",
+        "attributes_string['event.dataset']"
+      ],
+      "deliberately_not_read": "signoz_logs.distributed_logs_v2_resource: the v0.1 adapter used it to list hosts; this platform queries by the declared resource_id stamped on the signal itself (CONTRACTS section 2), so a second table would be a second identity to keep in step"
+    },
+    "signoz_traces.distributed_signoz_index_v3": {
+      "columns_named": [
+        "timestamp",
+        "traceID",
+        "spanID",
+        "name",
+        "serviceName",
+        "durationNano",
+        "statusCode"
+      ],
+      "read_by": [
+        "trace-spans",
+        "describe-traces"
+      ],
+      "window_binding": "timestamp against fromUnixTimestamp64Nano({start_ns:UInt64}) / ...({end_ns:UInt64}), half-open"
+    }
+  },
+  "row_caps": {
+    "note": "One number per kind, from store/client.py QUERY_KINDS; MAX_ROWS is the transport bound every kind inherits and is the number lo-read's profile states. The client asks for `bound + 1` so a full page is detectable rather than plausible.",
+    "MAX_ROWS": 2000,
+    "metric-threshold": 2000,
+    "log-records": 200,
+    "trace-spans": 100,
+    "aggregates_max_rows_1": [
+      "source-heartbeat",
+      "describe-metrics",
+      "describe-logs",
+      "describe-traces"
+    ],
+    "pinned_against": "tests/test_query_adapter.py::AnalysisProfile (the profile's max_result_rows equals MAX_ROWS) and tests/test_store_facade.py (the bound travels with the query)"
+  },
+  "server_side_bounds": {
+    "sent_on_every_request": {
+      "readonly": "1",
+      "max_execution_time": "5",
+      "max_rows_to_read": "1000000",
+      "max_bytes_to_read": "67108864",
+      "max_memory_usage": "134217728",
+      "result_overflow_mode": "throw",
+      "read_overflow_mode": "throw"
+    },
+    "response_read_cap_bytes": 65537,
+    "socket_timeout_seconds": 10,
+    "no_proxy_and_no_redirect": true,
+    "profile_that_repeats_them": "lo-analysis in components/data/store-signoz/clickhouse-users.d/lo-read.xml, which adds max_result_rows 2000 over lo-readonly's 1"
+  },
+  "read_users": {
+    "lo-query": {
+      "file": "components/data/store-signoz/clickhouse-users.d/lo-query.xml",
+      "wired": true,
+      "used_by": "the Sigma runner's aggregate path today, and by the store facade's multi-row reads as well until lo-read is wired -- see clickhouse-users.d/CONTRACT.md, which records that max_result_rows=1 there is a default and not a ceiling because it is marked changeable_in_readonly"
+    },
+    "lo-read": {
+      "file": "components/data/store-signoz/clickhouse-users.d/lo-read.xml",
+      "wired": false,
+      "used_by": "local_observe/platform/query.py:open_reader(), which refuses to start without its credential rather than borrowing lo-query's",
+      "unwired_means": "no example includes clickhouse-users.d/lo-read.compose.yaml, and the reader-side mount (LO_CLICKHOUSE_READ_PASSWORD_FILE) belongs to components/control/sigma/compose.yaml"
+    }
+  },
+  "validation": {
+    "static_gate": "pass -- python -B scripts/check_foundation.py (lo-read.xml parses; lo-read.compose.yaml merges clean onto the store model, both asserted by name in tests/test_foundation_checks.py)",
+    "unit_tier": "pass -- tests/test_query_adapter.py against the in-memory backend (contract behaviour, no transport)",
+    "runtime_conformance": "not-run",
+    "read_only_privileges_proven_on_a_host": "not-run",
+    "multi_row_read_against_a_live_store": "not-run",
+    "truncation_and_overflow_against_a_live_store": "not-run",
+    "failure_to_recovery_scenario_components_section_5": "not-run -- recipe in conformance.md, all seven steps including the expired-evidence branch",
+    "backup_restore": "not-applicable-to-this-component; the checks a restore must run are in backup.md",
+    "compatible_upgrade": "not-run; recipe and the failure table are in upgrade.md",
+    "evidence_home_for_a_pass": "Store installation-specific runtime evidence outside the product repository."
+  }
+}

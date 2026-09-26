@@ -1,0 +1,5 @@
+name: inspect-synthetic
+description: Isolated no-side-effect execution conformance
+steps:
+  - name: inspect
+    run: printf 'local-observe approved synthetic inspection\n'
