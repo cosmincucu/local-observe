@@ -260,6 +260,14 @@ refused. The report must meet precision >=0.7, at most two findings/day, flip ra
 at least one novel correctly detected class. The separate human attestation must establish
 independent held-out labels; the report's origin label cannot establish that itself.
 
+The report must retain its complete normalized measurement corpus, canonical findings and
+aligned decisions for all three runs. Acceptance recomputes scores, novelty and flip rates,
+checks the summaries and verifies corpus, source and configuration hashes. Both observer
+and baseline settings must be operator-supplied. Every configured observer source and cycle
+window must be covered; a repeated cycle verdict is counted once, regardless of source count.
+Reports without this measurement envelope require a fresh evaluation. They contain telemetry
+and independent labels and must stay in protected storage.
+
 ```sh
 python -m local_observe.observer --state /private/observer quality-accept --config /private/observer.json --environment /private/observer-environment.json --channel /private/channel.json --report /private/evaluation/report.json --output /private/observer/accepted.json --expires-at 2026-02-01T00:00:00Z --attest-independent-held-out-labels
 python -m local_observe.observer --state /private/observer serve --config /private/observer.json --environment /private/observer-environment.json --channel /private/channel.json --acceptance /private/observer/accepted.json --report /private/evaluation/report.json
@@ -298,6 +306,15 @@ returns the session to shadow. The correctness calculation uses the latest indep
 human grade for delivered matching-provenance cycles; unknown and unsure are reported
 separately and excluded from the known denominator. No known grades means unknown
 precision, never measured success. A new process and reconciliation are needed after demotion.
+
+Missing or invalid optional channel/acceptance/report files at `run` or `serve` startup produce
+an explicit `delivery_startup_failed` shadow diagnostic while recording continues. A failure
+during delivery or polling, including a hard deadline or an unavailable report, also demotes
+the session and invalidates its send epoch. The subsequent observation cycles continue.
+Restoring the file or channel does not automatically arm the session; start a new process and
+reconcile again. Manual `quality-accept` and `deliver` commands still refuse invalid inputs.
+Intentional process interruption is preserved. A failure of the recording journal itself
+cannot be made safe by an optional-channel fallback.
 
 Call `deliver(cycle_id, now=utc_datetime)` after the cycle completes. It rechecks the gate,
 debits an observer-only maximum two-per-UTC-day budget, and commits `sending` before provider

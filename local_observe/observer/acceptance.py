@@ -3,14 +3,52 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import math
 import os
 from dataclasses import asdict
 from pathlib import Path
 
-from .contract import digest, encoded, fields, instant, require, strict_json, utc
+from .contract import Config, ObserverError, digest, encoded, fields, instant, require, strict_json, utc
 from .environment import protected_bytes
 from .provenance import build_provenance, is_digest, validate_provenance
+
+
+def _read_report(raw):
+    """Measurement maps have canonical JSON keys longer than observer message field names."""
+    require(len(raw) <= 4 * 1024 * 1024, 'quality_report_too_large')
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'quality_duplicate_key')
+            result[key] = value
+        return result
+
+    def constant(_value):
+        raise ObserverError('quality_nonfinite_number')
+
+    def bounded(value, depth=0):
+        require(depth <= 20, 'quality_structure_too_deep')
+        if isinstance(value, dict):
+            require(len(value) <= 8192 and all(len(key) <= 1024 for key in value), 'quality_object_too_large')
+            for item in value.values():
+                bounded(item, depth + 1)
+        elif isinstance(value, list):
+            require(len(value) <= 4096, 'quality_list_too_large')
+            for item in value:
+                bounded(item, depth + 1)
+        elif isinstance(value, str):
+            require(len(value) <= 8192, 'quality_text_too_large')
+        elif isinstance(value, float):
+            require(math.isfinite(value), 'quality_nonfinite_number')
+
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+        bounded(value)
+        return value
+    except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
+        raise ObserverError('quality_invalid_json') from exc
 
 
 def channel_identity(config) -> dict:
@@ -44,9 +82,126 @@ def _score(value, *, observer=False):
         require(expected is not None and expected >= .7 and rate <= 2, 'quality_floor_failed')
 
 
-def validate_report(report: dict, *, config_sha256: str, provenance: dict) -> dict:
+def _observer_decisions(corpus, findings, detail, config):
+    """Reconstruct one decision per configured cycle, including every configured source."""
+    from local_observe.inventory.validation import canonical, utc_text
+
+    require(detail.get('decision_unit') == 'cycle-window', 'quality_decision_unit_invalid')
+    sources = sorted(source.id for source in config.sources)
+    selected = [(source.resource_id, source.metric_name) for source in config.sources]
+    available = {(row['resource_id'], row['metric']) for row in corpus['series']}
+    require(all(source.query_type == 'metric-threshold' for source in config.sources)
+            and len(set(selected)) == len(selected) and set(selected) == available,
+            'quality_source_coverage_changed')
+    begin, end = (instant(corpus['evaluation'][key]) for key in ('start', 'end'))
+    duration = (end - begin).total_seconds()
+    require(duration >= config.window_seconds and begin.timestamp() % config.cadence_seconds == 0
+            and (duration - config.window_seconds) % config.cadence_seconds == 0,
+            'quality_cycle_windows_invalid')
+    expected = []
+    current = begin + dt.timedelta(seconds=config.window_seconds)
+    while current <= end:
+        expected.append({'start': utc_text(current - dt.timedelta(seconds=config.window_seconds)),
+                         'end': utc_text(current)})
+        current += dt.timedelta(seconds=config.cadence_seconds)
+    cycles = detail['cycles']
+    require([cycle.get('window') for cycle in cycles] == expected, 'quality_cycle_windows_invalid')
+    grouped = {canonical(window): set() for window in expected}
+    for event in findings:
+        key = canonical(event['window'])
+        require(key in grouped and event['resource_id'] in {source.resource_id for source in config.sources}
+                and event['source'] == 'eval-llm-rca' and event['status'] == 'firing'
+                and instant(event['window']['start']) <= instant(event['observed_at'])
+                < instant(event['window']['end']),
+                'quality_finding_cycle_invalid')
+        grouped[key].add((event['resource_id'], event['kind']))
+    decisions = {}
+    for cycle in cycles:
+        require(cycle.get('covered_sources') == sources and cycle.get('evaluation_complete') is True,
+                'quality_source_coverage_incomplete')
+        require(cycle.get('decision') in ('quiet', 'watch', 'tell'), 'quality_decision_unknown')
+        pairs = sorted(grouped[canonical(cycle['window'])])
+        require(cycle['decision'] != 'tell' or bool(pairs), 'quality_findings_missing')
+        require(cycle['decision'] != 'quiet' or not pairs, 'quality_quiet_has_findings')
+        decisions[canonical({'window': cycle['window']})] = canonical(
+            {'decision': cycle['decision'], 'findings': pairs})
+    return decisions
+
+
+def _recompute(report, config):
+    """The protected envelope supplies inputs; none of its passing summaries grant authority."""
+    from local_observe.evaluation.arms import NAMES
+    from local_observe.evaluation.baseline_config import validate_config
+    from local_observe.evaluation.decisions import baseline
+    from local_observe.evaluation.eval import flip_rate, score
+    from local_observe.evaluation.manifest import verify_manifest
+    from local_observe.evaluation.model import validate
+    from local_observe.evaluation.quality import DEFAULT_POLICY, assess
+
+    try:
+        measurement = report.get('measurement')
+        fields(measurement, {'schema_version', 'corpus', 'baseline_config', 'runs'})
+        require(type(measurement['schema_version']) is int and measurement['schema_version'] == 1,
+                'quality_measurement_version_invalid')
+        corpus = validate(measurement['corpus'])
+        require(encoded(corpus) == encoded(measurement['corpus']), 'quality_corpus_not_canonical')
+        baseline_config = validate_config(measurement['baseline_config'])
+        require(encoded(baseline_config) == encoded(measurement['baseline_config']),
+                'quality_baseline_not_canonical')
+        manifest = report['manifest']
+        require(manifest.get('baseline', {}).get('configuration_authority') == 'operator-supplied',
+                'quality_operator_baseline_required')
+        require(manifest['arms'] == list(NAMES), 'quality_arms_inconsistent')
+        verify_manifest(manifest, corpus, baseline_config=baseline_config)
+        require(isinstance(measurement['runs'], list) and len(measurement['runs']) == 3,
+                'quality_measurement_runs_invalid')
+        require(encoded(report.get('arms')) == encoded(report['runs'][0]), 'quality_arms_inconsistent')
+        signatures, recomputed = [], []
+        context = {key: corpus[key] for key in ('series', 'evaluation')}
+        for inputs, run in zip(measurement['runs'], report['runs']):
+            fields(inputs, set(NAMES))
+            fields(run, set(NAMES))
+            signatures.append({})
+            recomputed.append({})
+            for name in NAMES:
+                data, arm = inputs[name], run[name]
+                fields(data, {'findings', 'decisions'})
+                fields(arm, {'execution', 'score', 'detail'})
+                require(arm['execution'] in ('measured', 'unjudgeable', 'partial', 'failed', 'unwired')
+                        and isinstance(arm['detail'], dict), 'quality_arm_invalid')
+                scored = score(corpus, data['findings'])
+                if arm['execution'] == 'unwired':
+                    require(data['findings'] == [], 'quality_unwired_findings')
+                    scored = None
+                require(encoded(scored) == encoded(arm['score']), 'quality_score_mismatch')
+                if name == 'llm-rca':
+                    decisions = _observer_decisions(corpus, data['findings'], arm['detail'], config)
+                else:
+                    decisions = baseline(context, {'findings': data['findings'], 'status': arm['execution']})
+                require(encoded(decisions) == encoded(data['decisions']), 'quality_decisions_mismatch')
+                signatures[-1][name] = decisions
+                recomputed[-1][name] = {**arm, 'score': scored}
+        flips = flip_rate(signatures)
+        for name, item in flips['measurements'].items():
+            item['unit'] = 'cycle-window' if name == 'llm-rca' else 'resource-window'
+        require(encoded(flips) == encoded(report['flip_rate']), 'quality_flip_mismatch')
+        quality = assess(corpus, recomputed, observer_flip_rate=flips['per_arm']['llm-rca'])
+        require(encoded(quality) == encoded(report['quality']), 'quality_summary_mismatch')
+        require(quality['verdict'] == 'measured-pass', 'quality_floor_failed')
+        policy = {**DEFAULT_POLICY, 'requires_human_acceptance': True,
+                  'findings_per_day_is_rate_not_send_limit': True}
+        require(encoded(policy) == encoded(report.get('policy')), 'quality_policy_mismatch')
+    except ObserverError:
+        raise
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError) as exc:
+        raise ObserverError('quality_measurements_invalid') from exc
+
+
+def validate_report(report: dict, *, config_sha256: str, provenance: dict, config: Config | None = None) -> dict:
     """Validate measured inputs as well as the verdict; missing measurements are not zero."""
     validate_provenance(provenance, require_complete=True)
+    require(isinstance(config, Config) and digest(asdict(config)) == config_sha256,
+            'quality_configuration_required')
     require(isinstance(report, dict) and type(report.get('schema_version')) is int
             and report['schema_version'] == 2, 'unsupported_quality_report')
     quality, manifest, runs = report.get('quality'), report.get('manifest'), report.get('runs')
@@ -129,6 +284,7 @@ def validate_report(report: dict, *, config_sha256: str, provenance: dict) -> di
                             and call.get('response_model') == provenance['response_model'], 'quality_model_unmeasured')
                     require(validate_provenance(call.get('provenance'), require_complete=True) == provenance,
                             'quality_provenance_changed')
+    _recompute(report, config)
     return report
 
 
@@ -147,7 +303,7 @@ def accept_quality(journal, *, report_path, config, model, channel, output, expi
     expiry = instant(expires_at)
     require(now < expiry <= now + dt.timedelta(days=30), 'invalid_acceptance_expiry')
     raw = protected_bytes(report_path, 4 * 1024 * 1024)
-    report = strict_json(raw, 4 * 1024 * 1024, max_depth=20)
+    report = _read_report(raw)
     # This location is fixed by the report integration contract; malformed input yields a bounded refusal.
     try:
         observed = report['runs'][0]['llm-rca']['detail']['cycles'][0]['provenance']
@@ -156,7 +312,7 @@ def accept_quality(journal, *, report_path, config, model, channel, output, expi
         raise ObserverError('quality_provenance_missing') from exc
     validate_provenance(observed, require_complete=True)
     expected = build_provenance(config, model, response_model=observed['response_model'])
-    validate_report(report, config_sha256=digest(asdict(config)), provenance=expected)
+    validate_report(report, config_sha256=digest(asdict(config)), provenance=expected, config=config)
     receipt = {'schema_version': 1, 'report_sha256': hashlib.sha256(raw).hexdigest(),
                'config_sha256': digest(asdict(config)), 'provenance': expected,
                'actor': f'os-uid:{os.getuid()}', 'accepted_at': utc(now), 'expires_at': utc(expiry),
@@ -197,8 +353,8 @@ class AcceptedQuality:
         require(expected == observed, 'acceptance_provenance_changed')
         raw = protected_bytes(self.report_path, 4 * 1024 * 1024)
         require(hashlib.sha256(raw).hexdigest() == receipt['report_sha256'], 'accepted_report_changed')
-        validate_report(strict_json(raw, 4 * 1024 * 1024, max_depth=20),
-                        config_sha256=receipt['config_sha256'], provenance=expected)
+        validate_report(_read_report(raw),
+                        config_sha256=receipt['config_sha256'], provenance=expected, config=self.config)
         return receipt
 
     def revoke(self, *, now):

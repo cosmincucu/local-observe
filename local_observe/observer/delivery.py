@@ -11,6 +11,7 @@ from typing import Protocol
 from .acceptance import AcceptedQuality, channel_identity
 from .contract import ObserverError, digest, encoded, fields, instant, require, strict_json, utc
 from .environment import protected_json
+from .runtime import CycleDeadline
 from .telegram import Telegram, TelegramConfig
 
 
@@ -88,6 +89,29 @@ def disarm(journal, *, now) -> dict:
     return current
 
 
+class UnavailableDelivery:
+    """A failed optional startup is visible and durable, and never retries or arms itself."""
+
+    def __init__(self, journal, *, now):
+        _sessions(journal)
+        self.result = {'schema_version': 1, 'session_id': secrets.token_hex(24), 'state': 'shadow',
+                       'created_at': utc(now), 'error': 'delivery_startup_failed'}
+        with journal.lock() as acquired:
+            require(acquired, 'observer_busy')
+            with journal.db:
+                if journal.db.execute("SELECT 1 FROM sqlite_master WHERE name='observer_delivery_control'").fetchone():
+                    journal.db.execute('UPDATE observer_delivery_control SET epoch=? WHERE singleton=1',
+                                        ('disarmed-' + self.result['session_id'],))
+                journal.db.execute('INSERT INTO observer_delivery_sessions VALUES(?,?,?)',
+                                    (self.result['session_id'], utc(now), encoded(self.result)))
+
+    def status(self, now):
+        return dict(self.result)
+
+    def tick(self, *, cycle=None, now, poll=True):
+        return dict(self.result)
+
+
 class DeliverySession:
     """An acceptance file can authorize quality, but cannot re-arm a restarted process."""
 
@@ -129,6 +153,8 @@ class DeliverySession:
             require(current['acceptance_sha256'] == receipt['sha256'], 'acceptance_changed')
             if not self.armed:
                 if current['state'] != 'authorized':
+                    if current['state'] == 'shadow':
+                        return {'state': 'shadow', 'error': current['error'], 'session_id': self.session_id}
                     return {'state': 'disarmed', 'session_id': self.session_id}
                 require(now < instant(current['expires_at']), 'reconciliation_expired')
                 self.channel.arm_after_reconciliation(current['epoch'], now=now,
@@ -141,6 +167,11 @@ class DeliverySession:
             result = {'state': 'armed'}
             if cycle is not None and cycle['decision'] == 'tell' and cycle['coverage'] == 'complete':
                 result['delivery'] = self.channel.deliver(cycle['cycle_id'], now=now)
+                if result['delivery']['status'] == 'uncertain':
+                    self.armed = False
+                    result.update(state='shadow', error='delivery_uncertain')
+                    self._record(result)
+                    return result
             if poll:
                 result['feedback'] = self.channel.poll_feedback(now=now)
             result['reviewed_precision'] = self.quality.reviewed_precision(receipt)
@@ -150,14 +181,18 @@ class DeliverySession:
                 result.update(state='shadow', error='reviewed_precision_below_floor')
             self._record(result)
             return result
-        except ObserverError as exc:
+        except (CycleDeadline, Exception) as exc:
+            # Deadlines bypass transport Exception handlers, but end only the optional
+            # channel attempt. Intentional process interruption still propagates.
+            code = ('delivery_deadline' if isinstance(exc, CycleDeadline) else
+                    str(exc) if isinstance(exc, ObserverError) else 'delivery_unavailable')
             deferred = ('reconciled_day_budget_unknown', 'model_delivery_budget', 'pre_reconciliation_cycle_refused',
                         'cycle_not_deliverable', 'delivery_cycle_stale', 'restricted_delivery_refused',
                         'phone_review_context_required')
-            if self.armed and str(exc) in deferred:
-                return {'state': 'armed', 'delivery': {'status': 'deferred', 'error': str(exc)}}
+            if self.armed and code in deferred:
+                return {'state': 'armed', 'delivery': {'status': 'deferred', 'error': code}}
             self.armed = False
-            result = {'state': 'shadow', 'error': str(exc)}
+            result = {'state': 'shadow', 'error': code}
             if 'reviewed' in locals():
                 result['reviewed_precision'] = reviewed
             self._record(result)
@@ -170,3 +205,8 @@ class DeliverySession:
             with self.journal.db:
                 self.journal.db.execute('UPDATE observer_delivery_sessions SET document=? WHERE session_id=?',
                                         (encoded(current), self.session_id))
+                if result.get('state') == 'shadow':
+                    # Revoke even the channel object's in-memory epoch. Preserve all
+                    # delivery rows and reservations, including uncertain attempts.
+                    self.journal.db.execute('UPDATE observer_delivery_control SET epoch=? WHERE singleton=1',
+                                            ('disarmed-' + self.session_id,))

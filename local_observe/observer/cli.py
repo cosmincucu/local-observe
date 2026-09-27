@@ -10,7 +10,7 @@ import sys
 from .contract import Config, ObserverError, encoded, instant, require, strict_json
 from .environment import load_environment
 from .journal import Journal
-from .runtime import Observer
+from .runtime import CycleDeadline, Observer
 
 
 def read_json(path: str, limit: int = 65536):
@@ -97,9 +97,15 @@ def main(argv: list[str] | None = None) -> int:
             environment = load_environment(args.environment)
             fixed = instant(args.now) if args.command == 'run' and args.now else None
             observer = Observer(config, journal, clock=(lambda: fixed) if fixed else None, environ=environment)
-            channel = delivery_session(args, journal, config, observer.model)
-            if channel is not None:
-                print(encoded(channel.status(now_utc())), flush=True)
+            try:
+                channel = delivery_session(args, journal, config, observer.model)
+                status = channel.status(now_utc()) if channel is not None else None
+            except (CycleDeadline, Exception):
+                from .delivery import UnavailableDelivery
+                channel = UnavailableDelivery(journal, now=now_utc())
+                status = channel.status(now_utc())
+            if status is not None:
+                print(encoded(status), flush=True)
             if args.command == 'serve':
                 observer.serve(delivery=channel, on_delivery=lambda result: print(encoded(result), flush=True))
                 return 0

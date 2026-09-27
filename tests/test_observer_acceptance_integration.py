@@ -11,8 +11,10 @@ from local_observe.evaluation.report import evaluate
 from local_observe.inventory.validation import utc_text
 from local_observe.observer.acceptance import AcceptedQuality, accept_quality, validate_report
 from local_observe.observer.contract import Config, ObserverError, Source, digest, encoded
+from local_observe.observer.delivery import DeliverySession, reconcile
 from local_observe.observer.journal import Journal
 from local_observe.observer.provenance import build_provenance
+from local_observe.observer.runtime import Observer
 from local_observe.observer.telegram import TelegramConfig
 
 
@@ -63,11 +65,14 @@ class ProducerAcceptanceTests(unittest.TestCase):
         FixtureModel.calls = []
         model = FixtureModel()
         corpus = fixture_corpus()
+        baseline_config = {'schema_version': 1, 'thresholds': [
+            {'resource_id': RESOURCE, 'metric': 'filesystem_used_bytes', 'threshold': 30e9}]}
         provenance = build_provenance(config, model, response_model='fixture-backend-v1')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             report = evaluate(corpus, revision='a' * 40, observer_directory=root / 'evaluation',
-                              observer_model_factory=FixtureModel, observer_config=config)
+                              observer_model_factory=FixtureModel, observer_config=config,
+                              baseline_config=baseline_config)
             self.assertEqual(len(FixtureModel.calls), 72)
             self.assertNotIn('independent-truth-marker', encoded(FixtureModel.calls))
             self.assertNotIn('expected_class', encoded(FixtureModel.calls))
@@ -76,12 +81,13 @@ class ProducerAcceptanceTests(unittest.TestCase):
             self.assertEqual(report['manifest']['observer']['provenance'], provenance)
             self.assertFalse(report['quality']['authorizes_delivery'])
             with self.assertRaisesRegex(ObserverError, 'independent_corpus_required'):
-                validate_report(report, config_sha256=digest(asdict(config)), provenance=provenance)
+                validate_report(report, config_sha256=digest(asdict(config)), provenance=provenance, config=config)
             # Contract-only attested-origin fixture. This edit is NOT measured independent model quality.
             corpus['origin'] = 'anonymized-example'
             measured = evaluate(corpus, revision='a' * 40, observer_directory=root / 'attested-fixture',
-                                observer_model_factory=FixtureModel, observer_config=config)
-            validate_report(measured, config_sha256=digest(asdict(config)), provenance=provenance)
+                                observer_model_factory=FixtureModel, observer_config=config,
+                                baseline_config=baseline_config)
+            validate_report(measured, config_sha256=digest(asdict(config)), provenance=provenance, config=config)
             report_path = root / 'report.json'
             report_path.write_text(encoded(measured), encoding='utf-8')
             report_path.chmod(0o600)
@@ -96,6 +102,27 @@ class ProducerAcceptanceTests(unittest.TestCase):
             verifier = AcceptedQuality(acceptance, report_path, journal=journal, config=config,
                                        model=model, channel=channel)
             self.assertEqual(verifier.verify(now), receipt)
+            class Sources:
+                def read(self, source, window, at):
+                    return {'schema_version': 1, 'source': source.id, 'query_type': source.query_type,
+                            'resource_id': source.resource_id, 'window': window, 'observed_at': utc_text(at),
+                            'rows': [{'timestamp': utc_text(at - dt.timedelta(minutes=1)),
+                                      'value': 21e9, 'labels': {}}]}
+            class Transport:
+                calls = []
+                def request(self, method, payload):
+                    self.calls.append(method)
+                    return [] if method == 'getUpdates' else {'message_id': 9, 'chat': {'id': 42}}
+            transport = Transport()
+            session = DeliverySession(journal, config, model, channel, acceptance_path=acceptance,
+                                      report_path=report_path, now=now, transport=transport)
+            self.assertEqual(session.tick(now=now, poll=False)['state'], 'disarmed')
+            reconcile(journal, session_id=session.session_id, epoch='10000000-0000-4000-8000-000000000001',
+                      attested=True, now=now, used_today_floor=0)
+            self.assertEqual(session.tick(now=now, poll=False)['state'], 'armed')
+            cycle = Observer(config, journal, model=model, sources=Sources(), clock=lambda: now).run('fresh')
+            self.assertEqual(session.tick(cycle=cycle, now=now)['delivery']['status'], 'sent')
+            self.assertEqual(transport.calls, ['sendMessage', 'getUpdates'])
             report_path.write_text(encoded(measured) + '\n', encoding='utf-8')
             with self.assertRaisesRegex(ObserverError, 'accepted_report_changed'):
                 verifier.verify(now)

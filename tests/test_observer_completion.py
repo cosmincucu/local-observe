@@ -12,6 +12,7 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import asdict, replace
 from unittest.mock import patch
@@ -25,6 +26,7 @@ from local_observe.observer.delivery import DeliverySession, disarm, reconcile, 
 from local_observe.observer.environment import load_environment, protected_json
 from local_observe.observer.provenance import build_provenance, provenance_digest, validate_provenance
 from local_observe.observer.telegram import TelegramConfig
+from local_observe.observer.runtime import deadline
 
 NOW = dt.datetime(2026, 1, 2, 12, tzinfo=dt.timezone.utc)
 RESOURCE = '00000000-0000-4000-8000-000000000001'
@@ -69,32 +71,70 @@ class ModelFixture:
 
 def measured_report(config, provenance):
     """Explicitly synthetic schema fixture, never an actual quality measurement."""
-    score = {'true_positives': 1, 'false_positives': 0, 'false_negatives': 0, 'duplicates': 0,
-             'non_firing': 0, 'findings': 1, 'unlabelled_findings': 0, 'total_findings': 1,
-             'precision': 1.0, 'recall': 1.0, 'findings_per_day': 1.0, 'matched': ['incident-a'], 'verdict': 'measured'}
-    baseline = {**score, 'true_positives': 0, 'false_negatives': 1, 'findings': 0, 'total_findings': 0,
-                'precision': None, 'recall': 0.0, 'findings_per_day': 0.0, 'matched': []}
+    from local_observe.evaluation.arms import NAMES, finding
+    from local_observe.evaluation.decisions import baseline
+    from local_observe.evaluation.eval import flip_rate, score
+    from local_observe.evaluation.manifest import build_manifest
+    from local_observe.evaluation.model import validate
+    from local_observe.evaluation.quality import DEFAULT_POLICY, assess
+    from local_observe.inventory.validation import canonical, utc_text
+
+    begin = NOW - dt.timedelta(days=1)
+    window = {'start': utc(begin), 'end': utc(NOW)}
+    first = {'start': utc_text(begin), 'end': utc_text(begin + dt.timedelta(seconds=config.window_seconds))}
+    corpus = validate({'schema_version': 1, 'id': 'synthetic-contract', 'origin': 'anonymized-example',
+        'evaluation': window, 'incidents': [{'id': 'incident-a', 'resource_id': RESOURCE,
+                                            'expected_class': 'threshold', 'window': first}],
+        'quiet': [], 'labelled': [{'resource_id': RESOURCE, 'window': window}],
+        'series': [{'resource_id': source.resource_id, 'metric': source.metric_name,
+                    'rows': [{'ts': (begin + dt.timedelta(hours=hour, minutes=59)).timestamp(), 'v': .95}
+                             for hour in range(24)]} for source in config.sources]})
+    baseline_config = {'schema_version': 1, 'thresholds': [
+        {'resource_id': source.resource_id, 'metric': source.metric_name, 'threshold': 100.0}
+        for source in config.sources]}
     config_sha = digest(asdict(config))
-    cycle = {'cycle_id': 'evaluation-1', 'status': 'completed', 'coverage': 'complete', 'error': None,
-             'decision': 'tell', 'structured_findings': True, 'config_sha256': config_sha, 'provenance': provenance,
+    template = {'status': 'completed', 'coverage': 'complete', 'error': None,
+             'structured_findings': True, 'config_sha256': config_sha, 'provenance': provenance,
+             'evaluation_complete': True, 'covered_sources': sorted(source.id for source in config.sources),
              'model_calls': [{'status': 'completed', 'model': 'model-alias', 'response_model': 'backend-v1',
                               'provenance': provenance}]}
+    cycles, decisions = [], {}
+    current = begin + dt.timedelta(seconds=config.window_seconds)
+    while current <= NOW:
+        window = {'start': utc_text(current - dt.timedelta(seconds=config.window_seconds)), 'end': utc_text(current)}
+        tell = not cycles
+        cycle = {**copy.deepcopy(template), 'cycle_id': 'evaluation-' + str(int(current.timestamp())),
+                 'window': window, 'decision': 'tell' if tell else 'quiet'}
+        cycles.append(cycle)
+        decisions[canonical({'window': window})] = canonical(
+            {'decision': cycle['decision'], 'findings': [[RESOURCE, 'threshold']] if tell else []})
+        current += dt.timedelta(seconds=config.cadence_seconds)
+    findings = [finding(RESOURCE, 'threshold', (begin + dt.timedelta(minutes=59)).timestamp(),
+                        arm='llm-rca', window=first)]
     details = {'coverage_complete': True, 'config_sha256': config_sha,
-               'configuration_authority': 'operator-supplied', 'provenance': provenance, 'cycles': [cycle]}
-    runs = [{'llm-rca': {'execution': 'measured', 'score': copy.deepcopy(score), 'detail': copy.deepcopy(details)},
-             **{name: {'execution': 'measured', 'score': copy.deepcopy(baseline),
+               'configuration_authority': 'operator-supplied', 'provenance': provenance, 'cycles': cycles,
+               'decision_unit': 'cycle-window'}
+    runs = [{'llm-rca': {'execution': 'measured', 'score': score(corpus, findings), 'detail': copy.deepcopy(details)},
+             **{name: {'execution': 'measured', 'score': score(corpus, []),
                        'detail': {'coverage_complete': True, 'unjudgeable_points': 0, 'unconfigured_series': 0}}
-                for name in ('static-threshold', 'seasonal', 'shaping')}} for _ in range(3)]
-    return {'schema_version': 2, 'runs': runs, 'quality': {'schema_version': 2, 'verdict': 'measured-pass',
-            'authorizes_delivery': False, 'reasons': [], 'truth_incidents': 1, 'novel_classes': ['threshold'],
-            'observer_flip_rate': 0.0, 'corpus_origin': 'anonymized-example'},
-            'manifest': {'schema_version': 2, 'origin': 'anonymized-example', 'corpus_sha256': digest({'fixture': True}),
-                         'observer': {'schema_version': 1, 'config_sha256': config_sha,
-                                      'configuration_authority': 'operator-supplied', 'provenance': provenance}},
-            'flip_rate': {'runs': 3, 'per_arm': {name: 0.0 for name in ('static-threshold', 'seasonal', 'llm-rca')},
-                'measurements': {name: {'status': 'measured', 'units': 1, 'missing_decisions': 0,
-                                        'disagreements': 0, 'comparisons': 3}
-                                 for name in ('static-threshold', 'seasonal', 'llm-rca')}}}
+                for name in NAMES if name != 'llm-rca'}} for _ in range(3)]
+    baseline_decisions = baseline({key: corpus[key] for key in ('series', 'evaluation')},
+                                  {'findings': [], 'status': 'measured'})
+    inputs = [{name: {'findings': copy.deepcopy(findings) if name == 'llm-rca' else [],
+                     'decisions': copy.deepcopy(decisions if name == 'llm-rca' else baseline_decisions)}
+               for name in NAMES} for _ in range(3)]
+    flips = flip_rate([{name: arm['decisions'] for name, arm in run.items()} for run in inputs])
+    for name, item in flips['measurements'].items():
+        item['unit'] = 'cycle-window' if name == 'llm-rca' else 'resource-window'
+    return {'schema_version': 2, 'runs': runs, 'arms': copy.deepcopy(runs[0]),
+            'quality': assess(corpus, runs, observer_flip_rate=0.0), 'flip_rate': flips,
+            'policy': {**DEFAULT_POLICY, 'requires_human_acceptance': True,
+                       'findings_per_day_is_rate_not_send_limit': True},
+            'measurement': {'schema_version': 1, 'corpus': corpus, 'baseline_config': baseline_config, 'runs': inputs},
+            'manifest': build_manifest(corpus, revision='a' * 40, arms=NAMES, exclusions=[],
+                observer={'schema_version': 1, 'config_sha256': config_sha,
+                          'configuration_authority': 'operator-supplied', 'provenance': provenance},
+                baseline_config=baseline_config)}
 
 
 class TransportFixture:
@@ -312,7 +352,8 @@ class CompletionTests(unittest.TestCase):
                 report = copy.deepcopy(self.report)
                 change(report)
                 with self.assertRaises(ObserverError):
-                    validate_report(report, config_sha256=digest(asdict(self.config)), provenance=self.provenance)
+                    validate_report(report, config_sha256=digest(asdict(self.config)), provenance=self.provenance,
+                                    config=self.config)
 
     def test_fresh_process_challenge_reconcile_send_grade_and_precision_demotion(self):
         self.accept()
@@ -336,6 +377,71 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(session.tick(cycle=self.cycle('next'), now=NOW)['state'], 'shadow')
         self.assertEqual(len(self.transport.calls), calls)
         self.assertEqual(session_status(self.journal)['state'], 'shadow')
+
+    def test_measurement_counterexamples_refuse_before_acceptance_or_send(self):
+        from local_observe.evaluation.decisions import baseline
+        from local_observe.evaluation.eval import score
+        from local_observe.inventory.validation import canonical
+
+        cases = {'no_novel_class': 'quality_summary_mismatch', 'hidden_flips': 'quality_flip_mismatch',
+                 'missing_measurement': 'invalid_fields', 'source_hash': 'quality_measurements_invalid',
+                 'corpus_hash': 'quality_measurements_invalid', 'baseline_hash': 'quality_measurements_invalid',
+                 'score_count': 'quality_score_mismatch', 'missing_source': 'quality_source_coverage_incomplete',
+                 'missing_window': 'quality_cycle_windows_invalid', 'missing_decision': 'quality_decisions_mismatch',
+                 'summary_policy': 'quality_summary_mismatch', 'quiet_with_findings': 'quality_quiet_has_findings'}
+        for case, refusal in cases.items():
+            with self.subTest(case=case):
+                report = copy.deepcopy(self.report)
+                measurement = report['measurement']
+                corpus = measurement['corpus']
+                if case == 'no_novel_class':
+                    for inputs, run in zip(measurement['runs'], report['runs']):
+                        for arm in ('static-threshold', 'seasonal'):
+                            findings = copy.deepcopy(inputs['llm-rca']['findings'])
+                            inputs[arm] = {'findings': findings, 'decisions': baseline(
+                                {key: corpus[key] for key in ('series', 'evaluation')},
+                                {'findings': findings, 'status': 'measured'})}
+                            run[arm]['score'] = score(corpus, findings)
+                    self.assertEqual(report['runs'][0]['llm-rca']['score']['matched'],
+                                     report['runs'][0]['seasonal']['score']['matched'])
+                elif case == 'hidden_flips':
+                    cycles = report['runs'][1]['llm-rca']['detail']['cycles']
+                    for cycle in cycles:
+                        cycle['decision'] = 'watch'
+                    decisions = measurement['runs'][1]['llm-rca']['decisions']
+                    for key, value in decisions.items():
+                        decisions[key] = canonical({**json.loads(value), 'decision': 'watch'})
+                    # Every cycle disagrees in one of three runs: 24/72, not the claimed zero.
+                    self.assertEqual(len(cycles), 24)
+                elif case == 'missing_measurement':
+                    report.pop('measurement')
+                elif case == 'source_hash':
+                    report['manifest']['implementation_sha256']['local_observe/observer/runtime.py'] = 'f' * 64
+                elif case == 'corpus_hash':
+                    corpus['series'][0]['rows'][0]['v'] = 999.0
+                elif case == 'baseline_hash':
+                    measurement['baseline_config']['thresholds'][0]['threshold'] = 999.0
+                elif case == 'score_count':
+                    report['runs'][0]['llm-rca']['score']['duplicates'] = 1
+                elif case == 'missing_source':
+                    report['runs'][0]['llm-rca']['detail']['cycles'][0]['covered_sources'] = []
+                elif case == 'missing_window':
+                    report['runs'][0]['llm-rca']['detail']['cycles'].pop()
+                elif case == 'missing_decision':
+                    measurement['runs'][0]['llm-rca']['decisions'].popitem()
+                elif case == 'quiet_with_findings':
+                    for inputs, run in zip(measurement['runs'], report['runs']):
+                        run['llm-rca']['detail']['cycles'][0]['decision'] = 'quiet'
+                        for key, value in inputs['llm-rca']['decisions'].items():
+                            inputs['llm-rca']['decisions'][key] = canonical({**json.loads(value), 'decision': 'quiet'})
+                else:
+                    report['quality']['policy']['minimum_precision'] = .1
+                report['arms'] = copy.deepcopy(report['runs'][0])
+                self.report_path.write_text(encoded(report), encoding='utf-8')
+                with self.assertRaisesRegex(ObserverError, '^' + refusal + '$'):
+                    self.accept()
+                self.assertFalse(self.acceptance.exists())
+                self.assertEqual(self.transport.calls, [])
 
     def test_restart_and_old_restore_cannot_reuse_authorized_challenge(self):
         self.accept()
@@ -453,6 +559,210 @@ class CompletionTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(args), 0)
         self.assertEqual([method for method, _ in self.transport.calls], ['sendMessage', 'getUpdates'])
+
+    def _armed_session(self):
+        self.accept()
+        session = self.session()
+        reconcile(self.journal, session_id=session.session_id, epoch=EPOCH, attested=True,
+                  now=NOW, used_today_floor=0)
+        session.tick(now=NOW, poll=False)
+        return session
+
+    def _three_recording_cycles(self, session):
+        moments = [NOW]
+        class ThreeCycles(threading.Event):
+            waits = 0
+            def wait(stop, timeout=None):
+                stop.waits += 1
+                moments[0] += dt.timedelta(seconds=self.config.cadence_seconds)
+                if stop.waits == 3:
+                    stop.set()
+                return stop.is_set()
+        results = []
+        Observer(self.config, self.journal, sources=SourceFixture(), model=self.model,
+                 clock=lambda: moments[0]).serve(stop=ThreeCycles(), delivery=session,
+                                                 on_delivery=results.append)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(row['state'] == 'shadow' for row in results))
+        rows = self.journal.db.execute('SELECT document FROM cycles').fetchall()
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(json.loads(row[0])['status'] == 'completed' for row in rows))
+        self.assertEqual(session_status(self.journal)['state'], 'shadow')
+        self.assertFalse(session.armed)
+        return results
+
+    def test_send_deadline_demotes_and_records_subsequent_cycles_without_retry(self):
+        session = self._armed_session()
+        request = self.transport.request
+        def slow(method, payload):
+            result = request(method, payload)
+            if method == 'sendMessage':
+                time.sleep(1)
+            return result
+        with patch.object(self.transport, 'request', side_effect=slow), \
+                patch('local_observe.observer.telegram.deadline', side_effect=lambda _seconds: deadline(.02)):
+            results = self._three_recording_cycles(session)
+        self.assertEqual(results[0]['error'], 'delivery_deadline')
+        self.assertEqual([method for method, _ in self.transport.calls], ['sendMessage'])
+        rows = self.journal.db.execute('SELECT status FROM observer_deliveries').fetchall()
+        self.assertEqual([row[0] for row in rows], ['uncertain'])
+        with self.assertRaisesRegex(ObserverError, 'delivery_not_armed'):
+            session.channel.poll_feedback(now=NOW)
+
+    def test_poll_deadline_demotes_and_records_subsequent_cycles(self):
+        session = self._armed_session()
+        request = self.transport.request
+        def slow(method, payload):
+            result = request(method, payload)
+            if method == 'getUpdates':
+                time.sleep(1)
+            return result
+        with patch.object(self.transport, 'request', side_effect=slow), \
+                patch('local_observe.observer.telegram.deadline', side_effect=lambda _seconds: deadline(.02)):
+            results = self._three_recording_cycles(session)
+        self.assertEqual(results[0]['error'], 'delivery_deadline')
+        self.assertEqual([method for method, _ in self.transport.calls], ['sendMessage', 'getUpdates'])
+        self.assertEqual([row[0] for row in self.journal.db.execute('SELECT status FROM observer_deliveries')], ['sent'])
+
+    def test_unavailable_report_continues_recording_without_disclosing_path(self):
+        session = self._armed_session()
+        self.report_path.rename(self.root / 'retained-report.json')
+        results = self._three_recording_cycles(session)
+        self.assertEqual(results[0]['error'], 'delivery_unavailable')
+        self.assertNotIn(str(self.root), encoded(results))
+        self.assertEqual(self.transport.calls, [])
+
+    def test_corrupt_report_continues_recording(self):
+        session = self._armed_session()
+        self.report_path.write_text('{"private-fixture-payload":', encoding='utf-8')
+        results = self._three_recording_cycles(session)
+        self.assertEqual(results[0]['error'], 'accepted_report_changed')
+        self.assertNotIn('private-fixture-payload', encoded(results))
+        self.assertEqual(self.transport.calls, [])
+
+    def test_optional_transport_error_is_fixed_code_and_uncertain_send_is_not_retried(self):
+        session = self._armed_session()
+        request = self.transport.request
+        def fail(method, payload):
+            request(method, payload)
+            raise OSError('synthetic-private-transport-error')
+        with patch.object(self.transport, 'request', side_effect=fail):
+            results = self._three_recording_cycles(session)
+        self.assertEqual(results[0]['error'], 'delivery_uncertain')
+        self.assertNotIn('synthetic-private-transport-error', encoded(results))
+        self.assertEqual([method for method, _ in self.transport.calls], ['sendMessage'])
+        self.assertEqual([row[0] for row in self.journal.db.execute('SELECT status FROM observer_deliveries')],
+                         ['uncertain'])
+
+    def test_poll_transport_error_is_fixed_code_and_does_not_stop_observation(self):
+        session = self._armed_session()
+        request = self.transport.request
+        def fail(method, payload):
+            result = request(method, payload)
+            if method == 'getUpdates':
+                raise OSError('synthetic-private-transport-error')
+            return result
+        with patch.object(self.transport, 'request', side_effect=fail):
+            results = self._three_recording_cycles(session)
+        self.assertEqual(results[0]['error'], 'delivery_unavailable')
+        self.assertNotIn('synthetic-private-transport-error', encoded(results))
+        self.assertEqual([method for method, _ in self.transport.calls], ['sendMessage', 'getUpdates'])
+
+    def test_report_decoder_keeps_duplicate_nonfinite_depth_and_size_refusals(self):
+        from local_observe.observer.acceptance import _read_report
+        for raw in ('{"schema_version":2,"schema_version":2}', '{"value":NaN}',
+                    '{"value":1e999}', '[' * 21 + '0' + ']' * 21, '{"value":"' + 'x' * 8193 + '"}',
+                    ' ' * (4 * 1024 * 1024 + 1)):
+            with self.subTest(length=len(raw)), self.assertRaises(ObserverError):
+                _read_report(raw)
+
+    def test_intentional_interruptions_propagate_and_keep_uncertain_debit(self):
+        for exception in (KeyboardInterrupt, SystemExit):
+            with self.subTest(exception=exception.__name__):
+                # Each process session requires a fresh challenge/epoch; use its own fixture journal.
+                with tempfile.TemporaryDirectory() as directory:
+                    with contextlib.closing(Journal(Path(directory) / 'runtime')) as journal:
+                        from local_observe.observer.telegram import Telegram
+                        channel = Telegram(journal, self.channel, verifier=lambda *args: True,
+                                           config_digest=digest(asdict(self.config)), transport=self.transport)
+                        channel.arm_after_reconciliation(EPOCH, now=NOW, used_today_floor=0)
+                        cycle = Observer(self.config, journal, sources=SourceFixture(), model=self.model,
+                                         clock=lambda: NOW).run('interrupted')
+                        with patch.object(self.transport, 'request', side_effect=exception):
+                            with self.assertRaises(exception):
+                                channel.deliver(cycle['cycle_id'], now=NOW)
+                        self.assertEqual(channel.outcome(cycle['cycle_id'])['status'], 'uncertain')
+
+    def test_run_and_serve_startup_channel_failures_remain_explicit_shadow(self):
+        self.accept()
+        config = self.write('startup-config.json', asdict(self.config))
+        environment = self.write('startup-environment.json', {})
+        channel = self.write('startup-channel.json', {'schema_version': 1, 'mode': 'telegram', **asdict(self.channel)})
+        corrupt = self.root / 'corrupt-private.json'
+        corrupt.write_text('{"synthetic-private-content":', encoding='utf-8')
+        corrupt.chmod(0o600)
+        real_serve = Observer.serve
+        class OneCycle(threading.Event):
+            def wait(stop, timeout=None):
+                stop.set()
+                return True
+        def serve(observer, *, delivery, on_delivery):
+            observer.clock = lambda: NOW
+            real_serve(observer, stop=OneCycle(), delivery=delivery, on_delivery=on_delivery)
+        for command in ('run', 'serve'):
+            for artifact in ('report', 'acceptance', 'channel', 'corrupt-acceptance', 'omitted-report'):
+                with self.subTest(command=command, artifact=artifact):
+                    state = self.root / f'{command}-{artifact}'
+                    paths = {'report': self.report_path, 'acceptance': self.acceptance, 'channel': channel}
+                    if artifact == 'corrupt-acceptance':
+                        paths['acceptance'] = corrupt
+                    elif artifact == 'omitted-report':
+                        paths.pop('report')
+                    else:
+                        paths[artifact] = self.root / 'nonexistent-private-artifact'
+                    args = ['--state', str(state), command, '--config', str(config),
+                            '--environment', str(environment)]
+                    for key, path in paths.items():
+                        args.extend(['--' + key, str(path)])
+                    with patch('local_observe.observer.runtime.Model', return_value=self.model), \
+                            patch('local_observe.observer.runtime.Sources', return_value=SourceFixture()), \
+                            patch('local_observe.observer.cli.now_utc', return_value=NOW), \
+                            patch.object(Observer, 'serve', new=serve), \
+                            contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(main(args), 0)
+                    records = [json.loads(line) for line in output.getvalue().splitlines()]
+                    self.assertEqual(records[0]['state'], 'shadow')
+                    self.assertEqual(records[0]['error'], 'delivery_startup_failed')
+                    self.assertNotIn('synthetic-private-content', output.getvalue())
+                    self.assertNotIn(str(self.root), output.getvalue())
+                    with contextlib.closing(Journal(state)) as journal:
+                        self.assertEqual(journal.db.execute('SELECT count(*) FROM cycles').fetchone()[0], 1)
+                        self.assertEqual(session_status(journal)['state'], 'shadow')
+                        with self.assertRaisesRegex(ObserverError, 'fresh_process_challenge_required'):
+                            reconcile(journal, session_id=session_status(journal)['session_id'], epoch=EPOCH,
+                                      attested=True, now=NOW, used_today_floor=0)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_manual_commands_still_refuse_missing_acceptance_artifacts(self):
+        config = self.write('manual-config.json', asdict(self.config))
+        environment = self.write('manual-environment.json', {})
+        channel = self.write('manual-channel.json', {'schema_version': 1, 'mode': 'telegram', **asdict(self.channel)})
+        common = ['--config', str(config), '--environment', str(environment), '--channel', str(channel),
+                  '--report', str(self.root / 'missing-report')]
+        for command in ('quality-accept', 'deliver'):
+            args = ['--state', str(self.journal.directory), command, *common]
+            if command == 'quality-accept':
+                args += ['--output', str(self.acceptance), '--expires-at', utc(NOW + dt.timedelta(hours=1)),
+                         '--attest-independent-held-out-labels']
+            else:
+                args += ['not-run', '--acceptance', str(self.root / 'missing-acceptance')]
+            with patch('local_observe.observer.adapters.Model', return_value=self.model), \
+                    patch('local_observe.observer.cli.now_utc', return_value=NOW), \
+                    contextlib.redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(main(args), 2)
+            self.assertEqual(json.loads(error.getvalue())['error'], 'observer_command_failed')
+        self.assertFalse(self.acceptance.exists())
+        self.assertEqual(self.journal.db.execute('SELECT count(*) FROM cycles').fetchone()[0], 0)
 
 
 if __name__ == '__main__':
