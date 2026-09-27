@@ -270,8 +270,10 @@ class RegistryDeclarationTests(PlatformTestCase):
             tools.ToolHints('read', ('human',))
         with self.assertRaisesRegex(tools.ToolRefusal, 'read-only'):
             tools.ToolHints('propose', ('proposer',), read_only=True)
-        with self.assertRaisesRegex(tools.ToolRefusal, 'is destructive'):
-            tools.ToolHints('execute', ('executor',), read_only=False, destructive=True)
+        with self.assertRaisesRegex(tools.ToolRefusal, 'potential destructive effects'):
+            tools.ToolHints('execute', ('executor',), read_only=False, destructive=False)
+        with self.assertRaisesRegex(tools.ToolRefusal, 'reads and proposals must not'):
+            tools.ToolHints('propose', ('proposer',), read_only=False, destructive=True)
         with self.assertRaisesRegex(tools.ToolRefusal, 'must describe itself'):
             tools.Tool('three', '', hints, lambda agent: None)
         with self.assertRaisesRegex(tools.ToolRefusal, 'declares an argument twice'):

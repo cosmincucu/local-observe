@@ -345,9 +345,11 @@ class SurfaceCountTests(unittest.TestCase):
             with self.subTest(tool=item['name']):
                 self.assertEqual(item['capability'] == 'read', item['annotations']['readOnlyHint'],
                                  'a read must announce itself read-only and a gated tool must not')
-                self.assertFalse(item['annotations']['destructiveHint'],
-                                 'ToolHints refuses a destructive propose/execute tool; nothing here may '
-                                 'reach for the hint it was refused')
+                self.assertEqual(item['name'] == 'execute_action',
+                                 item['annotations']['destructiveHint'],
+                                 'Execution can cause approved external changes through the runner')
+                self.assertEqual(item['name'] == 'execute_action',
+                                 item['annotations']['openWorldHint'])
 
 
 class OptionalByConstructionTests(unittest.TestCase):

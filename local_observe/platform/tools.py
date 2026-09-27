@@ -131,7 +131,8 @@ COMPONENT_BOUNDARY: dict[str, dict[str, str]] = {
     },
     'job-execution': {
         'owner': 'the adopted job engine (Dagu), reached as an executor',
-        'this_surface': '`execute_action` refuses until a trusted runner handoff exists; no claim is made',
+        'this_surface': '`execute_action` queues an approved request for a configured trusted runner; '
+                        'no claim token is returned',
         'declines': 'dispatching, retrying or cancelling a job. Dagu is an executor, not a second '
                     'source of remediation approval (CONTRACTS §5)',
     },
@@ -298,9 +299,9 @@ class ToolHints:
             raise ToolRefusal(f'Tool roles must be a non-empty subset of {", ".join(AGENT_ROLES)}')
         if (self.capability == 'read') != self.read_only:
             raise ToolRefusal('Only a read tool may announce itself as read-only, and every read must')
-        if self.capability in CAPABILITIES[1:] and self.destructive:
-            raise ToolRefusal('Neither tool of the action pair is destructive: one files a request and '
-                              'the other refuses until a trusted runner handoff exists')
+        if self.destructive != (self.capability == 'execute'):
+            raise ToolRefusal('Execution must announce potential destructive effects; '
+                              'reads and proposals must not')
 
     def as_annotations(self) -> dict[str, bool]:
         """Return the four MCP annotation fields, spelled the way the protocol spells them."""
@@ -881,7 +882,8 @@ def agent_registry(*, reader: Any = None, index_path: Any = None) -> ToolRegistr
                                           'is filed against', maximum_items=20),
                                  Argument('expires_at', 'timestamp', 'When this approval offer lapses')))
     registry.register('execute_action', execute_tool,
-                      ToolHints(capability='execute', roles=('executor',), read_only=False),
+                      ToolHints(capability='execute', roles=('executor',), read_only=False,
+                                destructive=True, open_world=True),
                       description='Request durable handoff of an already approved action to a configured '
                                   'trusted runner. Refuses when no runner is configured. '
                                   'The runner owns claim and dispatch; no credential is returned here.',

@@ -27,6 +27,8 @@ Live model quality, fit on a 16 GB VRAM device and human feedback burden across 
 sizes require measured acceptance. No training run or fine-tuned model is shipped. Telegram is
 an optional first channel behind the observer's replaceable delivery interface. The observer
 starts in recording mode; urgent rule alerts keep their independent delivery path.
+Use the [workload report](docs/units/feedback-measurement.md) to measure feedback coverage
+and optional human-reported effort before choosing a review cadence.
 
 Before promoting an installation, verify its full composition, credential boundaries, telemetry
 freshness, actual notification delivery, restart behavior and restore procedure. Optional services

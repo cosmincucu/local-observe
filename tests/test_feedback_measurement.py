@@ -40,3 +40,23 @@ class FeedbackMeasurementTests(unittest.TestCase):
                            json.dumps({'correctness': 'correct', 'recorded_at': '2026-01-02T00:02:00Z'})))
         report = summarize(journal, since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:00Z')
         self.assertEqual(report['known_correctness_cycles'], 0)
+
+    def test_duration_is_optional_and_corrections_add_effort_without_relabelling_other_cycles(self):
+        journal = self.fixture(8)
+        for seconds in (30, 10):
+            journal.db.execute('INSERT INTO feedback VALUES(?,?,?)', ('cycle-0', '2026-01-01T00:03:00Z',
+                json.dumps({'correctness': 'correct', 'recorded_at': '2026-01-01T00:03:00Z',
+                            'review_seconds': seconds})))
+        report = summarize(journal, since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:00Z')
+        self.assertEqual(report['self_reported_review_seconds'], 40)
+        self.assertEqual(report['feedback_versions_with_duration'], 2)
+        self.assertEqual(report['feedback_versions_without_duration'], 1)
+        self.assertIsNone(report['active_human_review_seconds'])
+        self.assertEqual(report['unknown_correctness_cycles'], 3)
+
+    def test_reviewing_one_quiet_cycle_does_not_shift_the_other_sample_positions(self):
+        journal = self.fixture(1)
+        journal.db.execute('INSERT INTO feedback VALUES(?,?,?)', ('cycle-1', '2026-01-01T01:02:00Z',
+            json.dumps({'correctness': 'correct', 'recorded_at': '2026-01-01T01:02:00Z'})))
+        report = summarize(journal, since='2026-01-01T00:00:00Z', until='2026-01-02T00:00:00Z', quiet_every=2)
+        self.assertEqual([row['cycle_id'] for row in report['review_queue']], ['cycle-3'])

@@ -125,12 +125,13 @@ is returned to the assistant. Without a configured handoff, execution remains un
 The independent runner journals its own capability before claiming, then dispatches or
 reconciles an uncertain execution. See [trusted handoff](../../../docs/units/guided-setup.md).
 
-**The annotations, and the one the registry refuses.** Both gated tools announce
-`readOnlyHint: false`; `propose_action` is `idempotentHint: true`, `execute_action` is not; both are
-`destructiveHint: false`, and `ToolHints.__post_init__` **refuses to register** a propose or execute tool
-that claims otherwise ("Neither tool of the action pair is destructive: one files a request and the other
-requests an approved, policy-bound trusted handoff"). The tool itself never runs a job;
-the independently authenticated runner owns the eventual external effect.
+**Annotations describe possible effects.** Both gated tools announce `readOnlyHint: false`.
+`propose_action` is additive and idempotent. `execute_action` announces `destructiveHint: true`
+and `openWorldHint: true`: queueing an approved action can lead the trusted runner to change
+external systems. The registry refuses an execution declaration that hides that possibility.
+Annotations do not grant authority; platform policy, human approval and the separately
+authenticated runner still enforce execution. See the
+[MCP annotation guidance](https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/).
 
 **No `store_query` exists**, and none is planned: the registry *is* the surface
 (`tests/test_mcp_surface.py` compares the bytes a client receives against `descriptors()` in both
