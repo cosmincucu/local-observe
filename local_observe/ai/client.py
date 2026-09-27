@@ -288,7 +288,7 @@ class AiClient:
                    plan=plan, counts=counts, began=began, instruction=instruction, usage=usage,
                    response_model=response_model, content=content)
         return {'status': 'ok', 'call_id': uuid.uuid4().hex, 'model': model,
-                'response_model': response_model or model, 'slot': slot, 'content': content,
+                'response_model': response_model, 'slot': slot, 'content': content,
                 'display_text': f'{label}\n{content}' if label else content, 'label': label,
                 'out_of_lan': self.out_of_lan, 'data_class': decision['data_class'],
                 'finish_reason': finish, 'usage': usage, 'evidence_count': len(plan['items']),

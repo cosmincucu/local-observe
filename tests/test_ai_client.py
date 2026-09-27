@@ -348,6 +348,14 @@ class ResponseTests(unittest.TestCase):
                                                     evidence=[reference()], now=NOW)
         self.assertEqual(result['usage'], {'input_tokens': None, 'output_tokens': None})
         self.assertEqual(client.token_count('12'), None)
+
+    def test_missing_provider_model_is_unknown_not_the_requested_model(self):
+        transport = FakeTransport(reply={'choices': [
+            {'message': {'content': 'ok'}, 'finish_reason': 'stop'}]})
+        result = build(transport=transport).complete(instruction='why?', data_class='internal',
+                                                     evidence=[reference()], now=NOW)
+        self.assertEqual(result['model'], 'qwen3-30b')
+        self.assertIsNone(result['response_model'])
         self.assertEqual(client.token_count(True), None)
         self.assertEqual(client.token_count(7), 7)
 

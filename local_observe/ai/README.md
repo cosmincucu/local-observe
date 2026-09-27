@@ -15,6 +15,12 @@ what was measured against upstream and what was not — is
 [`components/control/ai/CONTRACT.md`](../../components/control/ai/CONTRACT.md). This file is the code
 map only, so the two do not drift.
 
+Results distinguish the requested `model` from the provider's `response_model`. If the
+provider omits its model identifier, `response_model` is null. The requested name is not
+proof of which model answered; consumers requiring complete provenance must refuse to
+certify that result. A returned identifier that differs from the configured model is
+still refused by the client.
+
 ## The two rules that hold the package together
 
 1. **A consumer may not use a capability the manifest marks `unknown` or `false`** — stated once, in
