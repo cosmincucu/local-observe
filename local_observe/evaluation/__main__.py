@@ -35,10 +35,11 @@ def main(argv=None):
                 raise ValueError('Observer output requires an absolute private path')
             if not args.output or args.output.parent != args.observer_directory:
                 raise ValueError('Observer report must be inside its protected output directory')
-        private_output = args.observer_directory is not None or args.baseline_config is not None
+        private_output = any(value is not None for value in
+                             (args.corpus, args.observer_directory, args.baseline_config))
         if private_output:
             if not args.output or not args.output.is_absolute():
-                raise ValueError('Operator comparison requires an absolute protected report output')
+                raise ValueError('Supplied inputs require an absolute protected report output')
             from local_observe.observer.journal import private_directory, private_file
             import os
         report = evaluate(load(args.corpus) if args.corpus else synthetic(), revision=args.revision,

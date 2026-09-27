@@ -46,8 +46,10 @@ learns thresholds from truth or telemetry. Static detection still uses the actua
 Without explicit settings, offline demo runs use shipped example inventory and thresholds and identify
 their baseline authority as `demo-default`. Arbitrary resources require operator settings.
 
-For a baseline-only operator comparison, `--output` must be an absolute filename inside an existing
-owned 0700 directory outside Git. Reports are created exclusively with mode 0600 and symlinks refused.
+For every supplied `--corpus` or operator baseline configuration, `--output` must be an absolute filename
+inside an existing owned 0700 directory outside Git, even when demo baselines are selected. Reports are
+created exclusively with mode 0600 and symlinks refused. Only default generated runs without supplied
+corpus/operator inputs can print the full report to stdout or use ordinary CI output files.
 Observer comparisons still require a fresh `--observer-directory` and report output inside it.
 
 ## Data and scoring

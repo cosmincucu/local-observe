@@ -1,6 +1,6 @@
 """Acceptance counterexamples and real producer/baseline paths with synthetic adapters."""
 import copy
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict
 import datetime as dt
 import io
@@ -235,3 +235,38 @@ class FinalEvaluatorTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()), patch('local_observe.evaluation.observer.CurrentModel') as factory:
                 self.assertEqual(main(args), 2)
                 factory.assert_not_called()
+
+    def test_supplied_corpus_requires_private_output_but_default_generated_stdout_remains_usable(self):
+        from local_observe.evaluation.fault_inject import synthetic
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'corpus.json'
+            source.write_text(json.dumps(synthetic()), encoding='utf-8')
+            args = ['--revision', 'a' * 40, '--corpus', str(source)]
+            for extra in ([], ['--output', 'relative.json']):
+                with self.subTest(extra=extra), redirect_stderr(io.StringIO()), \
+                        patch('local_observe.evaluation.__main__.evaluate') as evaluate_mock:
+                    self.assertEqual(main([*args, *extra]), 2)
+                    evaluate_mock.assert_not_called()
+            unsafe = root / 'unsafe'
+            unsafe.mkdir(mode=0o755)
+            repository = root / 'repository'
+            repository.mkdir(mode=0o700)
+            (repository / '.git').mkdir()
+            for parent in (unsafe, repository):
+                output = parent / 'report.json'
+                with self.subTest(parent=parent), redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()) as printed:
+                    self.assertEqual(main([*args, '--output', str(output)]), 2)
+                    self.assertEqual(printed.getvalue(), '')
+                self.assertFalse(output.exists())
+            output = root / 'private-report.json'
+            self.assertEqual(main([*args, '--output', str(output)]), 0)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(output.read_text(encoding='utf-8'))['measurement']['corpus'], synthetic())
+            before = output.read_bytes()
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(main([*args, '--output', str(output)]), 2)
+            self.assertEqual(output.read_bytes(), before)
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(main(['--revision', 'a' * 40]), 0)
+        self.assertEqual(json.loads(printed.getvalue())['measurement']['corpus']['origin'], 'generated-demo')
