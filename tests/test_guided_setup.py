@@ -3,7 +3,6 @@ import asyncio
 import copy
 import datetime as dt
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,16 +18,6 @@ from local_observe.deployment import guided, guided_files
 from local_observe.platform.state import Actor, StateError, Store
 from test_platform_tools import ApiBridge, HOST, HUMAN_TOKEN, Platform
 from test_runner_handoff import configured
-
-# Optional read-only package overlay for independently developed observer integration.
-# This is test-process configuration, never a production import or setup profile field.
-if os.environ.get('LO_TEST_OBSERVER_PACKAGE'):
-    import local_observe
-    package = Path(os.environ['LO_TEST_OBSERVER_PACKAGE']).resolve(strict=True)
-    if not (package / 'observer' / 'contract.py').is_file():
-        raise ValueError('Expected an observer package for integration acceptance')
-    local_observe.__path__.append(str(package))
-
 
 def example_profile():
     return {'schema_version': 1, 'name': 'example', 'interval_seconds': 3600,
@@ -111,8 +100,6 @@ class GuidedTests(unittest.TestCase):
             AiClient.from_environment(environment)
             self.assertIsNotNone(open_reader(environ=environment))
 
-    @unittest.skipUnless(importlib.util.find_spec('local_observe.observer') is not None,
-                         'observer contract is an integration check after package assembly')
     def test_generated_config_validates_with_observer_contract(self):
         from local_observe.observer.contract import Config
         Config.from_dict(guided.observer_inputs(self.profile))
