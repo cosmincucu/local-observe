@@ -74,6 +74,24 @@ jobs:
           path: coverage.xml
           if-no-files-found: warn
 
+  approval-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Authenticated approval workflow in desktop and mobile Chromium
+        run: |
+          python -X utf8 -m venv /tmp/lo-browser
+          /tmp/lo-browser/bin/python -X utf8 -m pip install -r requirements-test-base.txt -r scripts/requirements-browser.txt
+          /tmp/lo-browser/bin/python -X utf8 -m playwright install --with-deps chromium
+          /tmp/lo-browser/bin/python -B -X utf8 scripts/check_approval_browser.py
+
   secret-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 5

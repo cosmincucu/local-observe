@@ -29,8 +29,14 @@ python -B tests/tiers.py --start-dir tests/compiler --json tier-report-compiler.
 
 The CI configuration runs the base tier once under coverage, the optional MCP subgroup and the
 compiler tier. Tier reports distinguish failures, collection errors and platform or dependency
-skips. A skip is not acceptance. Empty collection fails. Component conformance and browser checks
-are separate from unit tests and require their documented environment.
+skips. A skip is not acceptance. Empty collection fails. A separate browser job requires the
+authenticated action approval workflow to pass in desktop and mobile Chromium. Its requests are
+handled by the actual platform API in process; it contacts no deployed service. To run it locally,
+install the base test requirements and `scripts/requirements-browser.txt` in an isolated environment,
+run `python -m playwright install --with-deps chromium`, then
+`python -B scripts/check_approval_browser.py`. `LO_TEST_BROWSER` can explicitly select an existing
+Chromium executable. The dedicated check fails if the browser test skips. Other component
+conformance and browser checks still require their documented environment.
 
 Privacy review covers every tracked path, including documentation, dotfiles and fixtures. Run
 `scripts/check_public_tree.py --policy /path/outside/checkout/policy.json` with a private identifier
