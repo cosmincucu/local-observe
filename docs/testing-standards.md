@@ -42,3 +42,10 @@ Privacy review covers every tracked path, including documentation, dotfiles and 
 `scripts/check_public_tree.py --policy /path/outside/checkout/policy.json` with a private identifier
 inventory when preparing a public tree. Keep that policy and its findings outside the repository.
 Source scans do not clear Git history, remote URLs, author identities or publication accounts.
+
+GitHub CI scans reachable product history for secrets. Downstream Gitea staging CI scans
+the entire committed snapshot and every commit introduced since the PR base or push's
+previous commit; without a usable comparison base it scans full history. This permits
+staging to retain separately reviewed private history without copying its historical
+scan exceptions into public source. Audit that retained history with its approved
+policy before the first promotion. Staging CI does not certify it for publication.
