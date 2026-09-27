@@ -250,8 +250,8 @@ class UnchangedWorkflowTest(unittest.TestCase):
             self.assertIn('always()', str(step.get('if')), f'{name} no longer uploads on a red job')
             self.assertEqual('warn', (step.get('with') or {}).get('if-no-files-found'), name)
 
-    def test_the_secret_scan_job_is_untouched(self) -> None:
-        """Pinned tool and digest, verified download, full history, redaction."""
+    def test_the_secret_scan_covers_snapshot_and_incoming_history(self) -> None:
+        """Verify the tool, scan all current files and every introduced commit, with redaction."""
         steps = job(SCAN_JOB)['steps']
         pinned = [s.get('env') for s in steps if 'GL_SHA256' in str(s.get('env'))][0]
         checkout = [s for s in steps if 'checkout' in str(s.get('uses', ''))][0]
@@ -259,5 +259,11 @@ class UnchangedWorkflowTest(unittest.TestCase):
         self.assertRegex(str(pinned['GL_VER']), r'^\d+\.\d+\.\d+$', 'gitleaks is unpinned')
         self.assertRegex(str(pinned['GL_SHA256']), r'^[0-9a-f]{64}$', 'that is not a digest')
         self.assertEqual(0, (checkout.get('with') or {}).get('fetch-depth'), 'the scan lost its history')
-        for needle in ('sha256sum -c -', 'gitleaks detect', '--redact'):
+        for needle in ('sha256sum -c -', 'git archive --format=tar',
+                       'gitleaks dir /tmp/lo-snapshot',
+                       'git cat-file -e ${LO_STAGING_BASE}^{commit}',
+                       'gitleaks git --log-opts=${LO_STAGING_BASE}..HEAD',
+                       'else /tmp/gitleaks git --no-banner --redact', '--redact'):
             self.assertIn(needle, scan)
+        self.assertEqual('${{ gitea.event.pull_request.base.sha || gitea.event.before }}',
+                         pinned['LO_STAGING_BASE'])
