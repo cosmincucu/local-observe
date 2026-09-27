@@ -132,6 +132,17 @@ the proposal. A changed binding invalidates review and approval. An approval fro
 before handoff configuration cannot be reused: create and review a new proposal.
 Denial/withdrawal uses the existing two-field decision request.
 
+In the operator UI, **Approve** fetches this review and opens a confirmation showing
+the exact action, version, target inventory IDs, immutable DAG name, specification
+SHA-256, binding SHA-256, request SHA-256, runner identity and approval expiry. The
+confirmation submits that reviewed binding hash. Cancelling submits nothing. A
+missing, malformed or mismatched review leaves a visible error and sends no decision;
+there is no automatic legacy approval fallback. Existing deployments without a trusted
+runner can still deliberately use their existing human decision API, but the UI's
+Approve button requires configured review. **Deny** and **Withdraw approval** send
+`denied`; withdrawal is available while the action is approved and the server refuses
+it after claim. Another decision cannot run while review or confirmation is pending.
+
 The existing MCP `execute_action` tool now posts `/v1/actions/execute` with only the
 action ID. It returns a queue receipt, never an execution credential or a claim of
 success. Missing runner configuration remains a non-consuming refusal. With a
@@ -152,6 +163,81 @@ alternate specification source or writable alias.** A read-only bind mount over 
 separately writable source does not establish that property. Do not enable the runner
 until that mapping is proven. Another GET/hash check alone cannot close the race
 between reading a specification and starting a DAG by name.
+
+## Trusted runner command
+
+Run the trusted runner as its own POSIX process, with its platform executor credential
+and engine credential in separate protected files. The command works directly from
+an installed package:
+
+```sh
+python -m local_observe.platform.runner_cli --config /etc/local-observe/runner.json --once
+python -m local_observe.platform.runner_cli --config /etc/local-observe/runner.json --poll
+```
+
+The config is strict JSON with no duplicate or unknown fields:
+
+```json
+{
+  "schema_version": 1,
+  "identity": "trusted-runner",
+  "platform": {
+    "url": "https://platform.example.test",
+    "credential_file": "/run/secrets/runner-platform"
+  },
+  "engine": {
+    "url": "https://engine.example.test",
+    "credential_file": "/run/secrets/runner-engine",
+    "scheme": "Basic"
+  },
+  "journal_root": "/var/lib/local-observe/runner",
+  "immutable_dag_root": "/opt/local-observe/dags",
+  "poll_seconds": 10,
+  "timeout_seconds": 10,
+  "bindings": [{
+    "action": "inspect",
+    "version": "1",
+    "targets": ["11111111-1111-4111-8111-111111111111"],
+    "dag": "inspect-0000000000000000",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }]
+}
+```
+
+Replace the example target and zero hash with the reviewed inventory ID and SHA-256 of
+the exact DAG file. Configure the identical binding in the platform's trusted runner
+map. The DAG file is `<dag>.yaml` under the immutable root. A name without the hash
+suffix, a writable filesystem, a missing file or different file hash refuses startup
+before reading credentials or contacting either service. The deployment requirement
+to prove that Dagu uses the same immutable release source still applies.
+
+Configuration and credential files must be owned regular files with mode 0400 or
+0600, without symlinks or hardlinks. Paths must be absolute and contain no `..`
+components. Create the journal root with mode 0700, owned by the runner account.
+Credentials contain one ASCII token of at least 24 characters with an optional final
+newline; for Basic authentication, the engine file holds the base64 encoding of
+`username:password`. Both credentials must differ. `engine.scheme` defaults to
+`Bearer`; the platform uses Bearer. There is no credential-value argument or environment
+fallback. URLs must be HTTPS origins; redirects and proxy inheritance are disabled by
+the shared HTTP client. Restart the process after changing configuration or credentials.
+
+The runner verifies its authenticated identity and executor role, then validates an
+entire queue snapshot against its exact binding allowlist before dispatch. A pass
+handles at most 20 requests, once each, with no inline retry. The optional polling
+interval is 1–300 seconds; the HTTP socket timeout is 1–20 seconds; both default to 10.
+The timeout bounds each socket operation, not a hard deadline for the whole pass.
+One OS-held lock covers the process's journal root across passes; a second runner
+using that root refuses to start. Each pass rechecks the storage and immutable files.
+
+Each pass prints a JSON receipt containing only runner identity, action/execution IDs
+and status. `processed` means the pass ran; inspect each result for `executing` or a
+terminal outcome. Normal passes exit 0 in once mode. Refusal, failure or unknown
+outcome exits 2 and stops polling for inspection; interruption exits 130. Intent and
+execution journals remain available for recovery. Never delete or regenerate them to
+retry an uncertain execution. Independent runner replicas must not use different
+journal roots for the same identity; this local process lock is not a distributed lock.
+
+## Recovery and migration
 
 Queue identity is the action ID; its execution remains single-use. Request retries
 cannot produce another queue entry. A lost claim response can recover only with the

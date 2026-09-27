@@ -6,7 +6,9 @@ let token = "",
   view = "incidents",
   rows = [],
   names = {},
-  generation = 0;
+  generation = 0,
+  detailGeneration = 0,
+  pendingCommand = null;
 const titles = {
   incidents: "Incidents",
   actions: "Approvals",
@@ -69,6 +71,7 @@ async function loadMode() {
 }
 function signout() {
   generation++;
+  detailGeneration++;
   token = "";
   for (const id of ["token", "username", "password"]) $(id).value = "";
   role = "";
@@ -85,6 +88,7 @@ function signout() {
   for (const id of ["open-count", "approval-count", "delivery-count"])
     $(id).textContent = "-";
   $("detail").close();
+  if ($("confirm").open) $("confirm").close("cancel");
   if (!$("login").open) $("login").showModal();
 }
 function button(label, icon, handler) {
@@ -188,7 +192,17 @@ async function refresh() {
 }
 async function confirmDecision(label, id) {
   $("confirm-title").textContent = label;
-  $("confirm-subject").textContent = id;
+  $("confirm-subject").replaceChildren();
+  if (Array.isArray(id)) {
+    const fields = document.createElement("dl");
+    for (const [name, text] of id) {
+      const term = document.createElement("dt"), description = document.createElement("dd");
+      term.textContent = name;
+      description.textContent = text;
+      fields.append(term, description);
+    }
+    $("confirm-subject").append(fields);
+  } else $("confirm-subject").textContent = id;
   return new Promise((resolve) => {
     $("confirm").addEventListener(
       "close",
@@ -199,28 +213,71 @@ async function confirmDecision(label, id) {
     $("confirm").showModal();
   });
 }
-function command(label, icon, path, body) {
+function command(label, icon, path, body, prepare = null) {
   const b = button(label, icon, async () => {
-    if (
-      !(await confirmDecision(
-        label,
-        $("detail-title").textContent,
-      ))
-    )
-      return;
-    b.disabled = true;
+    if (b.disabled || pendingCommand === detailGeneration) return;
+    const mine = generation, detail = detailGeneration;
+    const current = () => mine === generation && detail === detailGeneration && $("detail").open;
+    pendingCommand = detail;
+    for (const button of $("commands").children) button.disabled = true;
+    $("detail-error").textContent = "";
     try {
-      await api(path, body);
+      const reviewed = prepare ? await prepare() : { body, subject: $("detail-title").textContent };
+      if (!current()) return;
+      if (!(await confirmDecision(label, reviewed.subject)) || !current()) return;
+      await api(path, reviewed.body);
+      if (!current()) return;
       $("detail").close();
       await refresh();
     } catch (error) {
-      $("detail-error").textContent = error.message;
+      if (current()) $("detail-error").textContent = error.message;
     } finally {
-      b.disabled = false;
+      if (pendingCommand === detail) pendingCommand = null;
+      if (detail === detailGeneration)
+        for (const button of $("commands").children) button.disabled = false;
     }
   });
   b.append(document.createTextNode(label));
   return b;
+}
+
+async function approvalReview(row) {
+  const refused = () => new Error("Approval review is unavailable or does not match this action. " +
+    "No decision was sent. Refresh and check the trusted runner configuration before retrying.");
+  if (!isIdentifier(row.id)) throw refused();
+  let review;
+  try {
+    review = await api("/v1/actions/review?action_id=" + encodeURIComponent(row.id));
+  } catch {
+    throw refused();
+  }
+  const object = (value) => value && typeof value === "object" && !Array.isArray(value);
+  const exact = (value, keys) => object(value) && Object.keys(value).sort().join() === keys.sort().join();
+  const label = (text) => typeof text === "string" && text.length <= 128 && LABEL_TEXT.test(text)
+    && !/[\r\n]/.test(text);
+  const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const request = review?.request, binding = review?.binding, shown = payload(row);
+  if (!exact(review, ["action_id", "request", "request_sha256", "runner", "binding", "binding_sha256"])
+      || review.action_id !== row.id || !isDigest(review.binding_sha256)
+      || !isDigest(review.request_sha256) || !label(review.runner)
+      || !exact(binding, ["action", "version", "targets", "dag", "sha256"])
+      || !object(request) || !label(binding.action) || !label(binding.version)
+      || typeof binding.dag !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(binding.dag)
+      || /[\r\n]/.test(binding.dag) || !isDigest(binding.sha256)
+      || !Array.isArray(binding.targets) || !binding.targets.length || binding.targets.length > 20
+      || !binding.targets.every(isIdentifier) || new Set(binding.targets).size !== binding.targets.length
+      || !exact(request.parameters, []) || !exact(shown.parameters, [])
+      || !["action", "version", "targets"].every((key) =>
+        same(binding[key], request[key]) && same(request[key], shown[key]))
+      || typeof request.expires_at !== "string" || !Number.isFinite(Date.parse(request.expires_at))) throw refused();
+  return {
+    body: { action_id: row.id, decision: "approved", binding_sha256: review.binding_sha256 },
+    subject: [["Action ID", row.id], ["Action", binding.action], ["Version", binding.version],
+      ["Targets (exact inventory IDs)", binding.targets.join("\n")], ["DAG", binding.dag],
+      ["DAG SHA-256", binding.sha256], ["Binding SHA-256", review.binding_sha256],
+      ["Request SHA-256", review.request_sha256], ["Trusted runner", review.runner],
+      ["Approval expiry", request.expires_at]],
+  };
 }
 // --- Stored verification history -------------------------------------------------------------
 // Read-only, and only inside an execution's detail. One click asks the platform for the ids that
@@ -551,6 +608,7 @@ async function historySelect(id) {
 }
 
 function details(row) {
+  detailGeneration++;
   $("detail-title").textContent = row.display?.description || titles[view].replace(/s$/, "") + " record";
   $("detail-fields").replaceChildren();
   $("commands").replaceChildren();
@@ -588,16 +646,14 @@ function details(row) {
     $("evidence").append(b);
   }
   if (role === "human" && view === "actions" && row.status === "pending") {
-    for (const decision of ["approved", "rejected"])
-      $("commands").append(
-        command(
-          decision === "approved" ? "Approve" : "Reject",
-          decision === "approved" ? "check" : "x",
-          "/v1/actions/decision",
-          { action_id: row.id, decision },
-        ),
-      );
+    $("commands").append(
+      command("Approve", "check", "/v1/actions/decision", null, () => approvalReview(row)),
+      command("Deny", "x", "/v1/actions/decision", { action_id: row.id, decision: "denied" }),
+    );
   }
+  if (role === "human" && view === "actions" && row.status === "approved")
+    $("commands").append(command("Withdraw approval", "x", "/v1/actions/decision",
+      { action_id: row.id, decision: "denied" }));
   if (role === "human" && view === "executions" && row.status === "unknown") {
     for (const outcome of ["succeeded", "failed"])
       $("commands").append(
@@ -698,7 +754,11 @@ $("verification-load").onclick = historyLoad;
 // paths (button, script, Escape) end with. `open` is re-tested here so the `close()` that follows a
 // command cannot clear a detail dialog that was already reopened for another record.
 $("detail").addEventListener("close", () => {
-  if (!$("detail").open) historyClear();
+  if (!$("detail").open) {
+    detailGeneration++;
+    if ($("confirm").open) $("confirm").close("cancel");
+    historyClear();
+  }
 });
 icons();
 signout();
