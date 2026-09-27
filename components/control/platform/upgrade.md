@@ -1,75 +1,54 @@
 # Platform upgrades
 
-Current schema: **10**. The explicit migration adds `runner_approvals`, `runner_requests`
-and `setup_plans` without rewriting existing tables. Verify the pre-migration copy, then
-rehearse role separation, approval binding, queued requests, interrupted claims and repeat
-apply on an isolated restored copy. The observer journal and approved configuration need
-their own consistent backups. Old binaries cannot open schema 10; restore the compatible
-backup and reconcile external effects before dispatch. Earlier migration notes below retain
-their historical scope. See [guided setup](../../../docs/units/guided-setup.md).
+The current platform state schema is **10**. Existing databases require explicit
+migration; opening an older database does not silently upgrade it. Schema 10 adds
+`runner_approvals`, `runner_requests` and `setup_plans`. Existing incidents, events,
+actions, audit records and verification history remain in the database.
 
-Pin the source revision, Python base digest, local image ID and complete
-dependency lock before testing. The build installs this component's own lock
-(requirements.in is the intent, requirements.lock the resolved closure: PyYAML,
-jsonschema, uvicorn plus their transitive dependencies, each with a sha256) and no
-longer reuses the inventory lock, so Datasette and the packages around it never enter
-this image. Build recipe and lock regeneration: docs/BUILD.md.
+Pin the source revision, Python base digest, component dependency lock and built image
+identity. Follow the [build guide](../../../docs/BUILD.md). The platform image contains
+the observer; the optional MCP SDK is packaged separately.
 
-2026-09-07 (remediation installability): the Dockerfile became a two-stage build runnable from a
-checkout — it defaults LO_PYTHON_IMAGE to the python_base digest in versions.json, installs with
---require-hashes --no-cache-dir --prefix=/install, and keeps no wheel directory in the
-final image. The image IDs recorded in versions.json predate that change (they were built
-from the inventory lock) and have not been rebuilt since; no image has been rebuilt,
-published, signed or promoted as part of that change, and the new recipe has not yet been
-run on a container host.
+## Rehearse and apply
 
-2026-09-10 (remediation anomaly deployment support, the dedicated anomaly credential): the same `RUN` line grew a second command — `install -d -m
-0700 -o 65532 -g 65532 /state` — so the image carries the directory the anomaly producer's cursor lives
-in, at the mode `anomaly_cursor.private_parent` demands, instead of leaving a fresh named volume to
-arrive root-owned 0755 (the recipe and the refusal are `components/control/anomaly/CONTRACT.md` §5; the
-Sigma runner writes its cursor into the same `/state`). Nothing else in the image moved: no dependency,
-no base digest, no lock entry, no user, no port. What that means for an operator: the `image_id` and
-`earlier_compatible_image_id` above were both built before this line, so neither image has a `/state`,
-and until someone rebuilds, `components/control/anomaly/CONTRACT.md`'s four-step volume recipe is still
-the path that works. No state format, no schema and no API moved, so an upgrade across this line is the
-same backup-and-rehearse procedure as any image change — and no image has been rebuilt, published,
-signed or promoted for it, because nothing here builds one.
+1. Pause execution and notification dispatch. Save and verify a consistent
+   [platform backup](backup.md), configuration, inventory revision, detector cursors
+   and trusted runner journals. Save observer state separately.
+2. Restore the standalone database backup to a new isolated destination. Keep live
+   receiver, runner and notification credentials unavailable to the rehearsal.
+3. Run the candidate's migration against that restored copy:
 
-Stop new dispatch, save a consistent operational backup and detector cursor, then
-test the candidate against an isolated restored copy. Check event retry semantics,
-incident history, approval expiry/identity, unknown executions, delivery leases,
-evidence retrieval and unsupported-schema refusal. Keep receivers/executors disabled
-until restored external effects have been reconciled.
+   ```sh
+   lo-platform --database /approved/private/rehearsal/platform.db migrate
+   lo-platform --database /approved/private/rehearsal/platform.db status
+   ```
 
-2026-09-08 : this build's `state.VERSION` is 4, and migration 4
-creates two tables — `verification_bindings` (one proposal-time binding per action) and
-`verification_records` (submitted observations plus the verdict this build derived) — each guarded by
-`BEFORE UPDATE`/`BEFORE DELETE` triggers. The operator-facing door is the one the mechanism already has: a
-v3 file under this build does not open and names `lo-platform migrate`, which writes and integrity-checks
-`platform.db.pre-v3-<utc stamp>.db` first, applies the step in its own audited `BEGIN IMMEDIATE`, and
-commits one `schema.migrated` row. Migrating stays a separate action taken *before* a release whose state
-pin names 4, because `deployment.release.transition()` refuses a candidate whose pin differs from what is
-live.
+   The migrator creates and integrity-checks a pre-migration copy, then applies and
+   audits schema steps. Repeating migration at schema 10 reports the current schema.
+4. Verify retained records, role separation, approval expiry and withdrawal, exact
+   runner bindings, interrupted claims, duplicate event retries and repeat setup
+   application. Check append-only verification records and their triggers. Rehearse
+   backup and restore of the migrated copy.
+5. After acceptance and deployment approval, take a fresh verified operational backup,
+   stop writers, migrate the operational database and start the pinned candidate.
+   Reconcile external actions and delivery receipts before enabling dispatch.
 
-What a rehearsal of this step owes, on an isolated restored copy with executors, producers and notification
-dispatch disabled — none of it run for this change, so nothing here is a result: every pre-existing row
-readable and unchanged; both tables present with their triggers; both append-only boundaries enforced (an
-`UPDATE` or `DELETE` refused with the `append-only verification …` message); a default-off reopen that
-proposes an action without querying either table; one bind/submit/read round; then a backup and a restore of
-the migrated copy. There is no back-fill, so an action proposed before the migration reads
-`unbound`/`not-captured` and that is the expected answer, not a failed migration. No verification record
-moves an action, an execution or an incident, on upgrade or afterwards.
+Guided setup requires a protected configuration root and independent executor identity;
+see [guided setup](../../../docs/units/guided-setup.md). The trusted action runner also
+requires proof that it and Dagu use the same immutable specification source. A successful
+state migration establishes neither condition.
 
-Rollback is old image plus a compatible fresh copy of a verified checkpoint, not
-old code opening a migrated live database. No Gatus version upgrade has been
-rehearsed yet — and as of synthetics component that sentence no longer has to live here: the engine's pin, the
-upgrade recipe and the four things an in-flight window can do across a version change moved to
-[components/control/synthetics/upgrade.md](../synthetics/upgrade.md), which states plainly that it too
-has run nothing. What stays true in this file is the platform's half of that move: the detector cursor
-is this component's state, so a Gatus version change is rehearsed against a copy of `platform.db`
-*and* of `cursor.json` together, never one without the other (that file's
-[backup.md](../synthetics/backup.md) §2 says what a cursor restored backwards or forwards costs).
-No image has been published, signed or promoted to production. None of that changed for
-schema v4 either: nothing was rebuilt, migrated against operational state, rehearsed, published, signed or
-promoted for it, and an older binary refuses a v4 file outright, so rollback from v4 is the pre-migration
-copy and no downgrade path exists.
+## Rollback
+
+Older binaries cannot open schema 10. Restore a verified compatible pre-migration
+backup into a new destination with its matching previous image, configuration and
+cursor/journal recovery points. An image rollback alone is insufficient.
+
+Keep executors and receivers disabled while reconciling actions or notifications
+after the checkpoint. A restored approval is historical data, not permission to repeat
+an external action. Preserve displaced state; do not overwrite live databases or prune
+volumes as part of rollback.
+
+The [synthetics procedure](../synthetics/upgrade.md) covers the Gatus engine separately.
+Model quality, live phone delivery and hardware fit require their own acceptance;
+schema and fixture tests do not establish them.
