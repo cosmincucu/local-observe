@@ -277,11 +277,13 @@ class AiClient:
             # weight path unless --alias names it (tools/server/README.md:191,1253 at v0.4.0), so this
             # is what a lost --alias looks like: a name nobody pinned. Refusing here is cheaper than an
             # explanation attributed to the wrong model.
+            # Rejected metadata is untrusted payload too. A provider can place an
+            # echoed credential or prompt in this field despite capture being off.
             self._emit(data_class=decision['data_class'], model=model, slot=slot, status='refused',
                        code='model_mismatch', plan=plan, counts=counts, began=began,
-                       instruction=instruction, response_model=response_model)
-            raise AiError(f'the endpoint answered as {response_model!r}, not the configured model; '
-                          f'an explanation attributed to the wrong model is not evidence',
+                       instruction=instruction)
+            raise AiError('the endpoint reported a different model; '
+                          'an explanation attributed to the wrong model is not evidence',
                           code='model_mismatch')
         label = decision['label'] if self.out_of_lan else None
         self._emit(data_class=decision['data_class'], model=model, slot=slot, status='ok', code=None,

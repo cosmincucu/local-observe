@@ -349,6 +349,18 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(result['usage'], {'input_tokens': None, 'output_tokens': None})
         self.assertEqual(client.token_count('12'), None)
 
+    def test_rejected_provider_identity_cannot_smuggle_payload_into_errors_or_telemetry(self):
+        transport = FakeTransport(reply={'model': CANARY, 'choices': [
+            {'message': {'content': 'ok'}, 'finish_reason': 'stop'}]})
+        with self.assertLogs('local_observe.ai.telemetry', 'INFO') as logs:
+            with self.assertRaises(AiError) as caught:
+                build(transport=transport).complete(instruction='why?', data_class='internal',
+                                                     evidence=[reference()], now=NOW)
+        self.assertEqual(caught.exception.code, 'model_mismatch')
+        self.assertNotIn(CANARY, str(caught.exception))
+        formatter = JsonLinesFormatter()
+        self.assertNotIn(CANARY, ''.join(formatter.format(record) for record in logs.records))
+
     def test_missing_provider_model_is_unknown_not_the_requested_model(self):
         transport = FakeTransport(reply={'choices': [
             {'message': {'content': 'ok'}, 'finish_reason': 'stop'}]})

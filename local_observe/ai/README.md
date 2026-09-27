@@ -20,6 +20,8 @@ provider omits its model identifier, `response_model` is null. The requested nam
 proof of which model answered; consumers requiring complete provenance must refuse to
 certify that result. A returned identifier that differs from the configured model is
 still refused by the client.
+Rejected provider identifiers are omitted from errors and telemetry: an untrusted
+metadata field must not bypass the payload capture policy.
 
 ## The two rules that hold the package together
 
