@@ -27,6 +27,29 @@ sources refuse. Corpus data replaces source reads without changing the Config, i
 cadence or observation window. Without this option, the manifest identifies the generated Config
 as `demo-default`; it cannot establish quality for another runtime configuration.
 
+Operator resources also require explicit detector settings: pass `--baseline-config baseline.json`
+(Python: `baseline_config=...`). This strict JSON object lists exactly every corpus resource/metric:
+
+```json
+{
+  "schema_version": 1,
+  "thresholds": [
+    {"resource_id": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "metric": "queue_depth", "threshold": 100}
+  ]
+}
+```
+
+Supply canonical inventory UUIDs and operator-chosen finite numeric thresholds. Missing, extra or
+duplicate source mappings, unknown fields and nonfinite/boolean thresholds refuse. The evaluator builds
+an ephemeral detector index from those explicit resources; it never writes an installation inventory or
+learns thresholds from truth or telemetry. Static detection still uses the actual platform detector.
+Without explicit settings, offline demo runs use shipped example inventory and thresholds and identify
+their baseline authority as `demo-default`. Arbitrary resources require operator settings.
+
+For a baseline-only operator comparison, `--output` must be an absolute filename inside an existing
+owned 0700 directory outside Git. Reports are created exclusively with mode 0600 and symlinks refused.
+Observer comparisons still require a fresh `--observer-directory` and report output inside it.
+
 ## Data and scoring
 
 `fault_inject.py` seeds actual `MetricSample` records into `InMemoryStore`, checks the resources
@@ -67,16 +90,21 @@ credited incident still cost precision.
   unstructured actionable output make the comparison incomplete. Without opt-in it stays
   unconfigured with no score. Retained journals are separate for each of the three runs.
 
-Baseline wrappers file at most once per resource and class per fixed hour, before truth is consulted.
+Baseline wrappers file at most once per metric series and class per fixed hour, before truth is consulted.
 Observer filing follows its configured cadence. The missing-telemetry class is deliberately
 uncovered by these value-based arms; the report names it and marks their missing decision windows
 incomplete. The current corpus gives static precision 1, seasonal/shaping precision
 .5, rates 6/12/12 findings per day (normalised from four hours), and recall 1/3 for each. These values
 reflect explicit class matching on this tiny corpus, not broad production performance.
 
-`report.py` runs each arm three times over fresh store/context data. Each repeatability unit is a
-resource UUID plus observation window. Its signature contains the decision and sorted finding
-classes. For each aligned unit, disagreements equal three minus the largest equal-signature count;
+`report.py` runs each arm three times over fresh store/context data. Baseline repeatability units are
+resource UUID plus observation window, with the decision and sorted finding classes. The observer
+produces one cycle-wide verdict, so its unit is one configured cycle window; its signature contains
+that decision and unique sorted resource/class pairs. It never copies the verdict onto every resource.
+Each configured source must actually be read completely for that cycle to enter the comparison;
+unrequested optional sources remain unknown and make the comparison incomplete. Separate resource
+finding summaries describe classes or unknown, without inventing resource-level quiet/watch/tell verdicts.
+For each aligned unit, disagreements equal three minus the largest equal-signature count;
 the denominator is three times the unit count. One differing decision among 100 units therefore
 gives 1/300, not 1/3. Missing or null decisions make that arm's rate unknown, never zero.
 Observer timing, token counts and prose do not change a signature. The default observer reads one
@@ -114,8 +142,29 @@ alias may differ from the returned backend identifier; each must remain stable s
 Unknown metadata cannot be replaced by a placeholder label. Reports preserve cycle Config hashes
 and call provenance; manifests also hash the relevant observer and AI source files. They export no
 raw Config, paths, endpoints, credential references, prompt bodies or evidence bodies in provenance.
+Retained cycle metadata includes the observation `window`, `covered_sources` and `evaluation_complete`;
+acceptors must compare coverage with the accepted Config and derive expected cadence windows.
 
-`flip_rate.measurements` records each arm's status, units, missing decisions, disagreements and
+`manifest.baseline` has exactly `schema_version` (1), `configuration_authority` (`demo-default` or
+`operator-supplied`), `config_sha256` and `inventory_sha256`. The config digest covers validated settings
+with finite floating-point thresholds sorted by resource/metric. The inventory digest covers the exact
+ephemeral declaration used by the detector. `verify_manifest()` requires `baseline_config=` to verify an
+operator baseline; an omitted or changed policy cannot verify it. Deployment acceptance must require
+operator-supplied baseline authority as well as the accepted observer Config.
+
+Reports retain a `measurement` envelope (schema version 1) containing the full validated `corpus`,
+normalized `baseline_config` (null for demo defaults) and exactly three `runs`. Each run names every arm;
+each arm retains its complete canonical `findings` array and aligned `decisions` map. Identical retries
+remain in that array for the scorer to deduplicate; different observation times or evidence identities
+remain distinct. An acceptor must recompute scores, novelty and flip rates from this envelope and reject
+contradictory summaries. The corpus digest must match the manifest. These retained inputs do not
+authenticate truth labels or replace independent human acceptance.
+
+Real reports therefore contain private telemetry and labels and must stay in protected storage. They
+are not anonymized merely by an origin label. Generated CI reports remain synthetic. Truth enters the
+report after investigations; it never enters the investigator context.
+
+`flip_rate.measurements` records each arm's explicit unit, status, units, missing decisions, disagreements and
 comparisons. `per_arm` and aggregate `rate` are null when the corresponding population is incomplete.
 Deployment review needs an independently held-out corpus, operator-supplied configuration, matching
 runtime identity and separate human acceptance bound to the report, channel and budget. A corpus
@@ -124,7 +173,7 @@ origin label or a passing generated fixture does not supply that acceptance.
 ## Tests and CI
 
 The `evaluation` subgroup is registered in `tests/tiers.py`. Run all evaluation regression modules:
-`PYTHONPATH=tests:. python -B -m unittest test_eval_gate test_eval_arms test_eval_corrections test_observer_evaluation test_fault_injection`.
+`PYTHONPATH=tests:. python -B -m unittest test_eval_gate test_eval_arms test_eval_corrections test_eval_final test_observer_evaluation test_fault_injection`.
 CI executes these tests once inside the existing covered base pass. Its additional evaluation step
 generates and uploads the quality report, without a second unittest pass. Negative controls prove
 fires-everywhere fails a deliberately chosen test policy and unwired stays unwired. Bounds,

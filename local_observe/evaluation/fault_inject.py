@@ -42,9 +42,10 @@ def synthetic():
                                  'rows': sorted(points, key=lambda row: row['ts'])}]})
 
 
-def seed_store(corpus):
+def seed_store(corpus, *, resources=None):
     corpus = validate(corpus)
-    declared = {item['id'] for item in read_document(ROOT / 'examples/inventory/declared.yaml')['resources']}
+    declared = (set(resources) if resources is not None else
+                {item['id'] for item in read_document(ROOT / 'examples/inventory/declared.yaml')['resources']})
     samples = []
     for series in corpus['series']:
         if series['resource_id'] not in declared:
@@ -55,10 +56,10 @@ def seed_store(corpus):
     return InMemoryStore(samples)
 
 
-def injected_read(corpus):
+def injected_read(corpus, *, resources=None):
     """Round-trip bounded rows through the product facade; return data and read receipts."""
     corpus = validate(corpus)
-    store = seed_store(corpus)
+    store = seed_store(corpus, resources=resources)
     result, receipts = [], []
     for series in corpus['series']:
         start = min(row['ts'] for row in series['rows'])

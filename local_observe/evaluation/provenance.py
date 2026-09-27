@@ -56,7 +56,10 @@ def cycle_identity(cycles, config_sha256):
     identities = []
     for cycle in cycles:
         if (not isinstance(cycle, dict) or cycle.get('status') != 'completed'
-                or cycle.get('coverage') != 'complete' or cycle.get('config_sha256') != config_sha256):
+                or cycle.get('coverage') != 'complete' or cycle.get('config_sha256') != config_sha256
+                or cycle.get('decision') not in ('quiet', 'watch', 'tell')
+                or 'error' not in cycle or cycle['error'] is not None
+                or cycle.get('structured_findings') is not True or cycle.get('evaluation_complete') is not True):
             return None
         calls = cycle.get('model_calls')
         if not isinstance(calls, list) or not calls:

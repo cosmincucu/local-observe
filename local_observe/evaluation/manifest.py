@@ -6,13 +6,14 @@ from local_observe.inventory.validation import canonical
 
 from .model import ROOT, CorpusError, validate
 from .provenance import valid_hash, validate_provenance
+from .baseline_config import prepare
 
 
 def sha(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def build_manifest(corpus, *, revision, arms, exclusions, observer=None):
+def build_manifest(corpus, *, revision, arms, exclusions, observer=None, baseline_config=None):
     if not isinstance(revision, str) or re.fullmatch('[0-9a-f]{40}', revision) is None:
         raise CorpusError('Revision must be a complete lowercase Git commit id')
     corpus = validate(corpus)
@@ -45,17 +46,18 @@ def build_manifest(corpus, *, revision, arms, exclusions, observer=None):
     return {'schema_version': 2, 'fixture_set': corpus['id'], 'origin': corpus['origin'],
             'revision': revision, 'revision_authority': 'caller-supplied; source hashes recorded independently',
             'corpus_sha256': sha(canonical(corpus).encode('utf-8')), 'arms': list(arms),
-            'exclusions': list(exclusions), 'observer': observer,
+            'exclusions': list(exclusions), 'observer': observer, 'baseline': prepare(corpus, baseline_config)[2],
             'implementation_sha256': {path: sha((ROOT / path).read_bytes()) for path in dependencies}}
 
 
-def verify_manifest(manifest, corpus):
+def verify_manifest(manifest, corpus, *, baseline_config=None):
     required = {'schema_version', 'fixture_set', 'origin', 'revision', 'revision_authority', 'corpus_sha256',
-                'arms', 'exclusions', 'observer', 'implementation_sha256'}
+                'arms', 'exclusions', 'observer', 'baseline', 'implementation_sha256'}
     if not isinstance(manifest, dict) or set(manifest) != required:
         raise CorpusError('Invalid evaluation manifest fields')
     rebuilt = build_manifest(corpus, revision=manifest['revision'], arms=manifest['arms'],
-                             exclusions=manifest['exclusions'], observer=manifest['observer'])
+                             exclusions=manifest['exclusions'], observer=manifest['observer'],
+                             baseline_config=baseline_config)
     if rebuilt != manifest:
         raise CorpusError('Manifest differs from corpus or implementation')
     return True

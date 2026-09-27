@@ -3,11 +3,11 @@ import datetime as dt
 from dataclasses import asdict
 from pathlib import Path
 
-from local_observe.inventory.validation import timestamp, utc_text
+from local_observe.inventory.validation import canonical, timestamp, utc_text
 
 from .arms import finding
 from .model import CorpusError
-from .decisions import identity, signature
+from .decisions import identity
 from .provenance import cycle_identity, digest, safe_provenance
 
 
@@ -78,7 +78,7 @@ def judge(context, *, directory, model_factory=None, config=None):
         raise CorpusError('Observer comparison requires complete configured cadence/windows')
     model = (model_factory or CurrentModel)()
     journal = Journal(Path(directory))
-    cycles, findings, seen, decisions = [], [], set(), {}
+    cycles, findings, decisions, resource_findings = [], [], {}, {}
     try:
         current = begin + dt.timedelta(seconds=config.window_seconds)
         while current <= end:
@@ -87,39 +87,49 @@ def judge(context, *, directory, model_factory=None, config=None):
             answer = cycle.get('answer') or {}
             structured = answer.get('findings', [])
             supported = not (cycle.get('decision') == 'tell' and not structured)
+            covered = {row['source'] for row in cycle.get('evidence', []) if row.get('coverage') == 'complete'}
+            evaluation_complete = {source.id for source in config.sources} <= covered
+            known = (cycle['status'] == 'completed' and cycle['coverage'] == 'complete'
+                     and cycle.get('decision') in ('quiet', 'watch', 'tell') and cycle.get('error') is None
+                     and supported and evaluation_complete)
+            window = {'start': utc_text(current - dt.timedelta(seconds=config.window_seconds)),
+                      'end': utc_text(current)}
             cycles.append({'cycle_id': cycle['cycle_id'], 'status': cycle['status'],
                            'coverage': cycle['coverage'], 'decision': cycle['decision'],
                            'error': cycle['error'], 'structured_findings': supported,
+                           'evaluation_complete': evaluation_complete,
+                           'window': window, 'covered_sources': sorted(covered),
                            'config_sha256': cycle.get('config_sha256'),
                            'provenance': safe_provenance(cycle.get('provenance')),
                            'model_calls': [{key: call.get(key) for key in
                                             ('status', 'model', 'response_model', 'usage', 'cost', 'elapsed_seconds')}
                                            | {'provenance': safe_provenance(call.get('provenance'))}
                                            for call in cycle['model_calls']]})
-            window = {'start': utc_text(current - dt.timedelta(seconds=config.window_seconds)),
-                      'end': utc_text(current)}
             for resource in sorted({source.resource_id for source in config.sources}):
-                decisions[identity(resource, window)] = (signature(cycle['decision'],
-                    [item['kind'] for item in structured if item['resource_id'] == resource])
-                    if cycle['status'] == 'completed' and cycle['coverage'] == 'complete' and supported else None)
+                kinds = [item['kind'] for item in structured if item['resource_id'] == resource]
+                read = {source.id for source in config.sources if source.resource_id == resource} <= covered
+                resource_findings[identity(resource, window)] = (
+                    {'kinds': sorted(kinds)} if read and cycle['status'] == 'completed'
+                    and cycle['coverage'] == 'complete' and cycle.get('error') is None and supported else None)
+            # The investigator emits one cycle-wide verdict. Do not copy it onto resources or
+            # enlarge its denominator with sources that were never investigated.
+            decisions[canonical({'window': window})] = (canonical({'decision': cycle['decision'],
+                'findings': sorted({(item['resource_id'], item['kind']) for item in structured})}) if known else None)
             for item in structured:
-                key = item['resource_id'], item['kind'], int(current.timestamp())
-                if key in seen:
-                    continue
-                seen.add(key)
                 findings.append(finding(item['resource_id'], item['kind'],
-                                        timestamp(item['observed_at']).timestamp(), arm='llm-rca', window=window))
+                    timestamp(item['observed_at']).timestamp(), arm='llm-rca', window=window,
+                    observation=sorted(item['evidence_ids'])))
             current += dt.timedelta(seconds=config.cadence_seconds)
     finally:
         journal.close()
-    complete = bool(cycles) and all(row['status'] == 'completed' and row['coverage'] == 'complete'
-                   and row['structured_findings'] for row in cycles)
+    complete = bool(cycles) and all(value is not None for value in decisions.values())
     # Repeatability compares outcomes, never latency, token usage or fresh record IDs.
     verdicts = [{key: row[key] for key in ('status', 'coverage', 'decision', 'error', 'structured_findings')}
                 for row in cycles]
     provenance = cycle_identity(cycles, config_sha256)
     return {'status': 'measured' if complete and provenance else 'unjudgeable', 'findings': findings,
             'cycles': cycles, 'verdicts': verdicts, 'decisions': decisions, 'coverage_complete': complete,
+            'decision_unit': 'cycle-window', 'resource_findings': resource_findings,
             'config_sha256': config_sha256, 'provenance': provenance,
             'configuration_authority': 'operator-supplied' if configured else 'demo-default',
             'filing_cadence_seconds': config.cadence_seconds,

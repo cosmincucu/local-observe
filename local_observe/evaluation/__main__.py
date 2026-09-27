@@ -17,9 +17,15 @@ def main(argv=None):
     parser.add_argument('--observer-directory', type=Path,
                         help='Opt in to real observer/model calls; new protected runtime directory outside Git')
     parser.add_argument('--observer-config', type=Path, help='Evaluate this exact observer Config with corpus sources')
+    parser.add_argument('--baseline-config', type=Path, help='Exact operator resource/metric threshold JSON')
     args = parser.parse_args(argv)
     try:
-        config = None
+        config = baseline_config = None
+        if args.baseline_config:
+            from local_observe.observer.contract import strict_json
+            from .baseline_config import validate_config
+            with args.baseline_config.open('rb') as stream:
+                baseline_config = validate_config(strict_json(stream.read(65537)))
         if args.observer_config:
             from local_observe.observer.contract import Config, strict_json
             with args.observer_config.open('rb') as stream:
@@ -29,15 +35,25 @@ def main(argv=None):
                 raise ValueError('Observer output requires an absolute private path')
             if not args.output or args.output.parent != args.observer_directory:
                 raise ValueError('Observer report must be inside its protected output directory')
-            from local_observe.observer.journal import private_file
+        private_output = args.observer_directory is not None or args.baseline_config is not None
+        if private_output:
+            if not args.output or not args.output.is_absolute():
+                raise ValueError('Operator comparison requires an absolute protected report output')
+            from local_observe.observer.journal import private_directory, private_file
             import os
         report = evaluate(load(args.corpus) if args.corpus else synthetic(), revision=args.revision,
-                          observer_directory=args.observer_directory, observer_config=config)
+                          observer_directory=args.observer_directory, observer_config=config,
+                          baseline_config=baseline_config)
         text = json.dumps(report, indent=2, allow_nan=False)
         if args.output:
-            if args.observer_directory:
-                with os.fdopen(private_file(args.output, exclusive=True), 'w', encoding='utf-8') as stream:
-                    stream.write(text + '\n')
+            if private_output:
+                fd = private_directory(args.output.parent, create=False, reject_git=True)
+                try:
+                    with os.fdopen(private_file(args.output.name, directory_fd=fd, exclusive=True),
+                                   'w', encoding='utf-8') as stream:
+                        stream.write(text + '\n')
+                finally:
+                    os.close(fd)
             else:
                 with args.output.open('x', encoding='utf-8') as stream:
                     stream.write(text + '\n')

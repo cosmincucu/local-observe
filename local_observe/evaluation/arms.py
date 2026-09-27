@@ -3,7 +3,7 @@ import datetime as dt
 import math
 from statistics import mean, pstdev
 
-from local_observe.inventory.validation import read_document, timestamp, utc_text
+from local_observe.inventory.validation import digest, read_document, timestamp, utc_text
 from local_observe.platform import anomaly, detections
 
 from .model import ROOT, CorpusError
@@ -17,12 +17,14 @@ def threshold_defaults():
     return {(row['resource_id'], row['series']): row['threshold'] for row in document['rules']}
 
 
-def finding(resource_id, kind, instant, *, arm, window=None):
+def finding(resource_id, kind, instant, *, arm, window=None, observation=None):
     end = dt.datetime.fromtimestamp(int(instant) // 3600 * 3600 + 3600, dt.timezone.utc)
     window = window or {'start': utc_text(end - dt.timedelta(hours=1)), 'end': utc_text(end)}
-    return detections.event('eval-' + arm, resource_id, 'eval.' + arm + '.' + kind, kind, 'firing',
+    result = detections.event('eval-' + arm, resource_id, 'eval.' + arm + '.' + kind, kind, 'firing',
                             window, {'resource_id': resource_id}, query_type='metric-threshold',
                             observed_at=utc_text(dt.datetime.fromtimestamp(instant, dt.timezone.utc)))
+    result['source_event_id'] = digest([result['source_event_id'], result['observed_at'], observation])
+    return result
 
 
 def downsample(points, seconds=60):
@@ -56,7 +58,7 @@ def shape(training, current):
     return selected, 0
 
 
-def judge(name, context, *, index_path):
+def judge(name, context, *, index_path, thresholds=None):
     """Context contains telemetry/evaluation only, never incident or quiet labels."""
     if set(context) != {'series', 'evaluation'}:
         raise CorpusError('Arm context must not carry truth')
@@ -66,7 +68,7 @@ def judge(name, context, *, index_path):
         return {'status': 'unwired', 'findings': [],
                 'reason': 'Observer comparison requires an explicit protected output directory and model configuration'}
     start = timestamp(context['evaluation']['start']).timestamp()
-    limits = threshold_defaults() if name == 'static-threshold' else {}
+    limits = (threshold_defaults() if thresholds is None else thresholds) if name == 'static-threshold' else {}
     result, missing, unknown_series = [], 0, 0
     for series in context['series']:
         training = [(row['ts'], row['v']) for row in series['rows'] if row['ts'] < start]
@@ -100,7 +102,7 @@ def judge(name, context, *, index_path):
         by_hour = {}
         for instant in selected:
             by_hour.setdefault(int(instant) // 3600, instant)
-        result.extend(finding(series['resource_id'], kind, instant, arm=name)
+        result.extend(finding(series['resource_id'], kind, instant, arm=name, observation=series['metric'])
                       for instant in by_hour.values())
     return {'status': 'unjudgeable' if missing or unknown_series else 'measured',
             'findings': result, 'unjudgeable_points': missing, 'unconfigured_series': unknown_series,

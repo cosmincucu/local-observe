@@ -32,6 +32,7 @@ def provenance(config='a' * 64, **changes):
 def observer_detail(value=None):
     value = value or provenance()
     cycle = {'status': 'completed', 'coverage': 'complete', 'config_sha256': value['config_sha256'],
+             'decision': 'tell', 'error': None, 'structured_findings': True, 'evaluation_complete': True,
              'provenance': value, 'model_calls': [{'status': 'completed', 'model': value['configured_model'],
                  'response_model': value['response_model'], 'provenance': value}]}
     return {'coverage_complete': True, 'config_sha256': value['config_sha256'],
