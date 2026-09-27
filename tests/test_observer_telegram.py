@@ -74,6 +74,9 @@ class TelegramTests(unittest.TestCase):
         block = patch.object(socket, 'create_connection', side_effect=AssertionError('real notification forbidden'))
         block.start()
         self.addCleanup(block.stop)
+
+    def arm(self):
+        self.sender.arm_after_reconciliation(EPOCH1, now=NOW, used_today_floor=0)
         self.cycle('cycle-1')
 
     def verifier(self, cycle, binding, now):
@@ -97,7 +100,7 @@ class TelegramTests(unittest.TestCase):
     def test_unarmed_denied_and_changed_binding_send_nothing(self):
         with self.assertRaisesRegex(ObserverError, 'delivery_not_armed'):
             self.sender.deliver('cycle-1', now=NOW)
-        self.sender.arm_after_reconciliation(EPOCH1)
+        self.arm()
         self.authorize = False
         with self.assertRaisesRegex(ObserverError, 'independent_evaluation_required'):
             self.sender.deliver('cycle-1', now=NOW)
@@ -109,7 +112,7 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(self.transport.calls, [])
 
     def test_sends_once_minimal_message_and_separate_two_per_day_budget(self):
-        self.sender.arm_after_reconciliation(EPOCH1)
+        self.arm()
         result = self.sender.deliver('cycle-1', now=NOW)
         self.assertEqual(result['status'], 'sent')
         self.assertEqual(self.sender.deliver('cycle-1', now=NOW), result)
@@ -127,7 +130,7 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(self.verified[0]['config_sha256'], digest(asdict(self.observer_config)))
 
     def test_accepted_but_lost_ack_is_uncertain_without_any_retry_after_restart(self):
-        self.sender.arm_after_reconciliation(EPOCH1)
+        self.arm()
         self.transport.lose_ack = True
         result = self.sender.deliver('cycle-1', now=NOW)
         self.assertEqual(result['status'], 'uncertain')
@@ -152,7 +155,9 @@ class TelegramTests(unittest.TestCase):
                     os._exit(19)
             self_root = self.root
             sender = self.new_sender(journal, CrashTransport())
-            sender.arm_after_reconciliation(EPOCH1)
+            sender.arm_after_reconciliation(EPOCH1, now=NOW, used_today_floor=0)
+            Observer(self.observer_config, journal, sources=Telemetry(), model=Finding(),
+                     clock=lambda: NOW).run('cycle-1')
             sender.deliver('cycle-1', now=NOW)
         process = multiprocessing.get_context('fork').Process(target=child)
         process.start()
@@ -165,7 +170,7 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(self.transport.calls, [])
 
     def test_authenticated_grading_is_single_use_cursor_is_durable(self):
-        self.sender.arm_after_reconciliation(EPOCH1)
+        self.arm()
         self.sender.deliver('cycle-1', now=NOW)
         self.transport.updates = [self.callback()]
         result = self.sender.poll_feedback(now=NOW)
@@ -186,7 +191,7 @@ class TelegramTests(unittest.TestCase):
             reopened.close()
 
     def test_wrong_user_chat_message_nonce_bot_expired_and_old_epoch_are_rejected(self):
-        self.sender.arm_after_reconciliation(EPOCH1)
+        self.arm()
         self.sender.deliver('cycle-1', now=NOW)
         forged = []
         for field, value in [('id', 74), ('is_bot', True)]:
@@ -213,7 +218,7 @@ class TelegramTests(unittest.TestCase):
     def test_old_backup_cannot_rearm_on_open(self):
         backup = self.root / 'state' / 'before-send.sqlite3'
         self.journal.backup(backup)
-        self.sender.arm_after_reconciliation(EPOCH1)
+        self.arm()
         self.sender.deliver('cycle-1', now=NOW)
         restored = self.root / 'restored'
         restored.mkdir(mode=0o700)

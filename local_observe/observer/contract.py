@@ -175,12 +175,15 @@ class Config:
     max_age_seconds: int = 900
     data_class: str = 'internal'
     mode: str = 'shadow'
+    retrieval_examples: int = 0
+    retrieval_bytes: int = 8192
 
     def __post_init__(self):
         require(type(self.schema_version) is int and self.schema_version == 1, 'unsupported_config_version')
         bounds = {'cadence_seconds': (60, 86400), 'window_seconds': (60, 86400), 'max_sources': (1, 20),
                   'max_result_bytes': (1024, 65536), 'max_model_calls': (0, 4),
-                  'max_cycle_seconds': (1, 600), 'max_rows': (1, 2000), 'max_age_seconds': (1, 86400)}
+                  'max_cycle_seconds': (1, 600), 'max_rows': (1, 2000), 'max_age_seconds': (1, 86400),
+                  'retrieval_examples': (0, 10), 'retrieval_bytes': (512, 16384)}
         for key, (low, high) in bounds.items():
             value = getattr(self, key)
             require(type(value) is int and low <= value <= high, 'invalid_' + key)

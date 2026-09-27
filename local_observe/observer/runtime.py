@@ -12,6 +12,7 @@ from dataclasses import asdict, replace
 from .adapters import Model, Sources
 from .contract import Config, ObserverError, digest, encoded, model_answer, redact, require, snapshot, utc
 from .journal import Journal
+from .provenance import build_provenance
 
 
 @contextlib.contextmanager
@@ -38,10 +39,10 @@ class CycleDeadline(BaseException):
 
 
 class Observer:
-    def __init__(self, config: Config, journal: Journal, *, sources=None, model=None, clock=None):
+    def __init__(self, config: Config, journal: Journal, *, sources=None, model=None, clock=None, environ=None):
         self.config, self.journal = config, journal
-        self.sources = sources if sources is not None else Sources(config)
-        self.model = model if model is not None else Model()
+        self.sources = sources if sources is not None else Sources(config, environ=environ)
+        self.model = model if model is not None else Model(environ=environ)
         self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
 
     def run(self, cycle_id: str | None = None) -> dict:
@@ -60,12 +61,15 @@ class Observer:
             if not created:
                 return document
             document['config_sha256'] = digest(asdict(self.config))
+            document['retrieval'] = []
             self.journal.save(document)
             if not acquired:
                 document.update(status='skipped', coverage='skipped', error='already_running')
                 return self._finish(document, began)
             try:
                 with deadline(self.config.max_cycle_seconds):
+                    document['provenance'] = build_provenance(self.config, self.model)
+                    self.journal.save(document)
                     self._cycle(document, now)
             except CycleDeadline:
                 document.update(status='failed', coverage='failed', decision=None, error='cycle_deadline')
@@ -80,6 +84,8 @@ class Observer:
             return self._finish(document, began)
 
     def _finish(self, document: dict, began: float) -> dict:
+        if 'provenance' not in document:
+            document['provenance'] = build_provenance(self.config, None)
         for call in document['model_calls']:
             if call['status'] == 'running':
                 call['status'] = 'failed'
@@ -96,6 +102,7 @@ class Observer:
         pending = [s.id for s in self.config.sources if s.initial]
         queried: set[str] = set()
         partial = False
+        history = None
         while True:
             for source_id in pending:
                 if len(queried) >= self.config.max_sources:
@@ -113,7 +120,8 @@ class Observer:
                     raw = self.sources.read(source, document['window'], now)
                     item = snapshot(source, raw, document['window'], self.config, now,
                                     getattr(self.sources, 'secrets', ()))
-                    require(len(encoded([*document['evidence'], item]).encode()) <= self.config.max_result_bytes,
+                    require(len(encoded([*document['evidence'], item]).encode())
+                            + len(encoded(history or []).encode()) - 2 <= self.config.max_result_bytes,
                             'cycle_evidence_budget')
                     document['evidence'].append(item)
                     activity.update(status=item['coverage'], evidence_id=item['evidence_id'])
@@ -131,17 +139,34 @@ class Observer:
             if len(document['model_calls']) >= self.config.max_model_calls:
                 document.update(status='partial', coverage='partial', decision=None, error='model_budget')
                 return
+            if history is None:
+                remaining = self.config.max_result_bytes - len(encoded(document['evidence']).encode())
+                history = self.journal.retrieve(before=now, limit=self.config.retrieval_examples,
+                                               max_bytes=min(self.config.retrieval_bytes, max(0, remaining)),
+                                               exclude=document['cycle_id'])
+                document['retrieval'] = [{k: item[k] for k in ('history_id', 'cycle_id', 'feedback_id', 'sha256',
+                                                              'data_class')} for item in history]
             allowed = set(sources) - queried
             call = {'number': len(document['model_calls']) + 1, 'status': 'running', 'model': None,
                     'response_model': None, 'usage': {'input_tokens': None, 'output_tokens': None},
-                    'elapsed_seconds': None, 'cost': None}
+                    'elapsed_seconds': None, 'cost': None, 'provenance': document['provenance']}
             document['model_calls'].append(call)
             self.journal.save(document)
             began = time.monotonic()
             classes = ('public', 'internal', 'restricted')
-            classification = max((item['data_class'] for item in evidence), key=classes.index)
-            result = self.model.complete(evidence, allowed, replace(self.config, data_class=classification), now)
+            classification = max((item['data_class'] for item in [*evidence, *history]), key=classes.index)
+            call['data_class'] = classification
+            request_config = replace(self.config, data_class=classification)
+            if history:
+                require(callable(getattr(self.model, 'complete_with_history', None)), 'historical_examples_unsupported')
+                result = self.model.complete_with_history(evidence, allowed, request_config, now, history=history)
+            else:
+                result = self.model.complete(evidence, allowed, request_config, now)
             require(isinstance(result, dict) and isinstance(result.get('content'), str), 'invalid_model_envelope')
+            call['provenance'] = build_provenance(self.config, self.model, response_model=result.get('response_model'))
+            document['provenance'] = call['provenance']
+            previous = [c.get('provenance') for c in document['model_calls'][:-1]]
+            require(not previous or all(p == call['provenance'] for p in previous), 'mixed_model_provenance')
             for key in ('model', 'response_model'):
                 value = result.get(key)
                 require(value is None or isinstance(value, str) and len(value) <= 160, 'invalid_model_metadata')
@@ -173,11 +198,21 @@ class Observer:
                                     'channel': 'recording', 'external_send': False, 'evaluation': 'not_approved'}
             return
 
-    def serve(self, *, stop: threading.Event | None = None) -> None:
+    def serve(self, *, stop: threading.Event | None = None, delivery=None, on_delivery=None) -> None:
         stop = stop or threading.Event()
+        last_slot = None
         while not stop.is_set():
             now = self.clock()
+            if delivery is not None:
+                delivery.tick(now=now, poll=False)
             slot = int(now.timestamp()) // self.config.cadence_seconds
-            self.run(f'scheduled-{self.config.cadence_seconds}-{slot}')
+            cycle = None
+            if slot != last_slot:
+                cycle = self.run(f'scheduled-{self.config.cadence_seconds}-{slot}')
+                last_slot = slot
+            if delivery is not None:
+                result = delivery.tick(cycle=cycle, now=self.clock())
+                if on_delivery is not None:
+                    on_delivery(result)
             remaining = (slot + 1) * self.config.cadence_seconds - self.clock().timestamp()
-            stop.wait(max(0.1, min(remaining, self.config.cadence_seconds)))
+            stop.wait(max(0.1, min(remaining, 30 if delivery else self.config.cadence_seconds)))

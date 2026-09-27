@@ -3,7 +3,8 @@
 The observer is a read-only, bounded investigator with its own private SQLite journal.
 It starts from configured telemetry sources; no incident or rule candidate is required.
 `python -m local_observe.observer` provides `run`, `serve`, `check`, `replay`, `feedback`,
-`retrieve`, `export` and `backup`. Python 3.12 and the product base dependencies are required.
+`retrieve`, `export`, `backup` and the optional delivery commands below.
+Python 3.12 and the product base dependencies are required.
 The protected directory handles require Linux; the scheduler deadline requires the main Python thread.
 
 ## Configuration and adapters
@@ -84,9 +85,20 @@ Remote requests carry the fixed output contract in short structured fields, so t
 any evidence text, the cycle fails explicitly as `model_evidence_withheld`; it cannot become
 a quiet finding over data the model did not receive. Prefer local inference for prose-heavy logs.
 
+`run` and `serve` accept `--environment /private/path/observer-environment.json`, including
+the JSON emitted by guided setup. This is an allowlisted mapping of environment names to
+strings, never a shell script. The file must be an owned, regular mode-0600 file within an
+owned mode-0700 directory, with no symlinks or hardlinks. It replaces ambient settings;
+it does not merge with them. Allowed settings are the ClickHouse URL, read user and password
+file; AI base URL, key file, model/fast model, out-of-LAN flag, capture flag, policy, capability
+and budget files; internal HTTP flag; and the nonsecret `LO_OBSERVER_MODEL_PROVIDER` and
+`LO_OBSERVER_MODEL_VERSION` labels. Raw credentials and other names are rejected. Capture
+is always disabled. Without this option, only the same allowlisted ambient names are used.
+
 ## Running and reviewing
 
 Create the state directory with mode 0700, outside Git and owned by the service account.
+The journal rejects `.git` directories or worktree marker files on every ancestor.
 Each journal, lock, export and backup file is mode 0600. Use an existing private parent directory.
 
 ```sh
@@ -109,7 +121,9 @@ slots and resumes the same durable slot ID after restart; it does not backfill m
 
 Human review JSON separates `usefulness` (`useful`, `noise`, `unsure`) and `correctness`
 (`correct`, `incorrect`, `unsure`). Optional fields are `corrected_answer`, `outcome_refs`
-(retained evidence IDs), and `export_approved` (default false). No response stays unknown.
+(retained evidence IDs), `export_approved` (default false), and `review_seconds` (an integer
+from 0 through 3600). Review time is human self-report, not measured elapsed time; omitted
+values remain null. Each review version retains its own value. No response stays unknown.
 The CLI authenticates through the OS-owned private directory and derives reviewer identity
 from the OS UID. Do not expose it as a web service or run it from model-selected commands.
 Reviews are append-only, with idempotent review IDs. Reusing an ID with different content fails.
@@ -120,6 +134,13 @@ approval, evidence, and a decided correctness grade. Scalar grades alone are ins
 Examples are labelled `untrusted_reference_only`; they are never inserted as policy.
 Retrieval scans at most the latest 1,000 independently reviewed cycles and returns at most 100.
 It is a local evaluation/training preparation seam, not a fine-tuning or self-training loop.
+Automatic retrieval is off by default. Set `retrieval_examples` (0–10) and optionally
+`retrieval_bytes` (512–16384, default 8192) in Config to enable it. The observer uses only
+approved corrections reviewed before the current window end, with older evidence windows.
+Whole examples must fit both retrieval and total evidence byte budgets. Their IDs, feedback
+versions, digests and classifications are retained on the cycle. Historical evidence cannot
+validate current citations. Its classification can only raise the model request's class;
+remote redaction still applies. Models cannot grant export approval or create human grades.
 
 ## Durable states and safety boundaries
 
@@ -131,10 +152,22 @@ receive durable `skipped` records. Source count, total evidence bytes, result ro
 calls and wall time have independent ceilings. A killed process leaves `running`; the next
 lock holder marks it failed/interrupted without requerying or repeating delivery.
 
-`run` and `serve` support `shadow` and `recording` modes. Their delivery is a durable recording
-with a stable cycle ID and `external_send: false`. Optional Telegram delivery is a separate
-post-cycle API described below. Model text cannot approve its own release. Urgent rule
+`run` and `serve` support `shadow` and `recording` modes. Their default delivery is a durable
+recording with a stable cycle ID and `external_send: false`. Optional Telegram delivery uses
+the separate acceptance and reconciliation boundary below. Model text cannot approve its own release. Urgent rule
 notifications remain independent of this observer and its message budget.
+
+Each cycle and model call retains provenance schema v1: `implementation_sha256`,
+`prompt_sha256`, `config_sha256`, `policy_sha256`, `capability_sha256`, `budget_sha256`,
+`configured_model`, `provider`, `model_version`, `response_model`, `complete` and `sha256`.
+Together with `schema_version`, these are the exact allowed fields. `sha256` hashes the
+canonical object excluding that digest itself. Implementation covers observer, AI and
+relevant shared source files; policy, capability and budget hash effective documents.
+The configured model and actual provider response model are separate identities. Missing
+metadata remains null and makes `complete` false; shadow observation can still proceed.
+Mixed provenance within a cycle fails it. Provider/version labels are explicit operator
+metadata, not independently verified provider claims. No endpoints, credential references,
+prompt bodies or evidence bodies appear in this object.
 
 Credential-named fields, recognizable credential assignments, URL credentials and known
 mounted credential values are redacted before persistence. Arbitrary unlabelled secrets
@@ -159,6 +192,12 @@ the model adapter implements `complete(evidence, allowed_source_ids, config, now
 returning `content`, optional `model`/`response_model`, and `usage` with token counts.
 Adapters may expose a tuple `secrets` for exact-value scrubbing. Injected adapters are
 trusted application code; telemetry and model response content are not.
+An adapter enabling retrieval implements `complete_with_history(..., history=...)`.
+Its optional `provenance()` returns configured model/provider/version labels and effective
+policy/capability/budget hashes. The observer supplies implementation, prompt and Config
+hashes and reads actual response identity from the adapter's provider-envelope result.
+Unknown provenance cannot enable delivery. Stable alias/backend differences are represented
+by the contract; the existing production AI adapter still enforces its own model matching policy.
 
 Model `content` is strict JSON with `schema_version: 1`, `decision`, `rationale`,
 `citations`, `follow_up`, and optional `findings`. Each citation must contain `evidence_id`, zero-based `row_index`,
@@ -181,8 +220,9 @@ Failures and coverage gaps must be scored separately from quiet observations.
 
 ## Optional Telegram delivery and phone grading
 
-`local_observe.observer.telegram.Telegram` is a replaceable post-cycle API, separate from
-the default CLI scheduler. It uses a fixed `https://api.telegram.org` host, disables proxies
+`local_observe.observer.telegram.Telegram` implements the replaceable channel interface used
+by `DeliverySession` and the optional CLI scheduler wiring. It uses a fixed
+`https://api.telegram.org` host, disables proxies
 and redirects, reads a token FILE reference, and never logs token-bearing paths. Sends and
 polls have a 20-second overall deadline. A completed, fully covered `tell` with structured
 findings is required; restricted evidence is refused. The phone message contains only a
@@ -196,21 +236,68 @@ and `Telegram(journal, config, verifier=..., config_digest=...)`. The required v
 trusted application code supplied by the integration, not model output. It receives
 `(cycle, binding, now)` and must return exactly `True` only after independently verifying
 accepted evaluation evidence for the supplied configuration/model and delivery binding.
-There is no default verifier or built-in self-certification. The binding includes schema,
+`AcceptedQuality` is the supplied protected-file verifier; there is no default-true verifier.
+The binding includes schema,
 the exact observer configuration SHA-256, actual response model, cycle SHA-256, fixed
-channel, allowed chat/user IDs, optional trusted review URL and delivery epoch. `cycle['config_sha256']` is computed by
+channel, allowed chat/user IDs, optional trusted review URL, daily budget, full channel
+configuration hash, provenance hash and delivery epoch. `cycle['config_sha256']` is computed by
 the production observer as the canonical SHA-256 of `dataclasses.asdict(config)`.
 `review_base_url` can name an operator-controlled HTTPS review route; the adapter appends
 the validated cycle ID. A finding without numeric context requires this URL, otherwise
 delivery is refused before reserving budget. No telemetry or model text supplies URLs.
 
-Every new instance starts disarmed, including after reopening a restored database.
-An operator must reconcile previous external effects and explicitly call
-`arm_after_reconciliation(fresh_uuid_epoch)`. A stored/environment flag cannot re-arm it;
-the CLI intentionally has no automatic arming command. Changing the epoch also invalidates
-old phone callbacks. The verifier must be integrated with the installation's independently
-accepted quality artifact before an operator arms delivery. Scheduler wiring, signed-artifact
-validation and operator UX for reconciliation are integration responsibilities.
+Store channel JSON in an owned mode-0600 file in a private mode-0700 directory:
+
+```json
+{"schema_version":1,"mode":"telegram","token_file":"/private/telegram-token","chat_id":42,"user_id":7,"daily_limit":2}
+```
+
+Guided setup's `mode: recording` channel remains offline. Before enabling Telegram, an
+OS-authenticated human must review an evaluation schema-v2 report from three complete runs
+with the exact operator Config and complete, identical runtime provenance. Generated/demo
+corpora, demo-default Config, unknown measurements, incomplete baselines and model drift are
+refused. The report must meet precision >=0.7, at most two findings/day, flip rate <0.1 and
+at least one novel correctly detected class. The separate human attestation must establish
+independent held-out labels; the report's origin label cannot establish that itself.
+
+```sh
+python -m local_observe.observer --state /private/observer quality-accept --config /private/observer.json --environment /private/observer-environment.json --channel /private/channel.json --report /private/evaluation/report.json --output /private/observer/accepted.json --expires-at 2026-02-01T00:00:00Z --attest-independent-held-out-labels
+python -m local_observe.observer --state /private/observer serve --config /private/observer.json --environment /private/observer-environment.json --channel /private/channel.json --acceptance /private/observer/accepted.json --report /private/evaluation/report.json
+python -m local_observe.observer --state /private/observer delivery-status
+python -m local_observe.observer --state /private/observer reconcile --session CURRENT_SESSION_ID --epoch FRESH_UUID --attest-external-effects-reconciled
+```
+
+Replace the illustrative expiry with a future UTC instant at most 30 days away. The report
+and receipt must be protected regular files. The receipt pins exact report bytes, Config,
+provenance, OS UID, channel/budget, attestation and expiry. This is an OS-account trust
+boundary, not a digital signature or a model-generated approval. The verifier rereads both
+files before delivery. Changing implementation, model metadata, policy, Config, report or
+channel requires fresh evaluation and acceptance as applicable.
+
+Every new process starts disarmed, including after restore. Starting `serve` prints a fresh
+one-hour session challenge; reconcile it from another terminal after checking external
+effects. Persisted acceptance cannot rearm the process. A fresh UUID invalidates old phone
+callbacks. Only cycles created after activation may send; retained cycles cannot be resent
+by choosing a new epoch. Without `--used-today-floor`, delivery waits until the next UTC day.
+For same-day operation, a human can explicitly supply the total sends already spent today
+including those absent from a restored database. The value must cover retained reservations
+and previous confirmed spend floors and cannot exceed the daily budget. In the Python API, pass the same value to
+`arm_after_reconciliation(epoch, now=..., used_today_floor=...)`.
+
+For one new cycle, `deliver NEW_CYCLE_ID` takes the same Config/environment/channel/acceptance/
+report options and optional `--used-today-floor`. It requires a real interactive terminal
+and the human to type the fresh displayed challenge, then collects a new cycle and attempts
+delivery. It cannot dispatch an existing cycle. `serve` polls feedback at most every 30
+seconds and checks reconciliation before starting each new scheduled cycle. A slot already
+recorded before reconciliation remains ineligible; the next fresh slot can send.
+
+`disarm` immediately invalidates the running session's epoch. `quality-revoke` takes the
+Config/environment/channel/acceptance options and records revocation in the journal.
+Expiry, changed bindings, revocation, or post-acceptance reviewed correctness below 0.7
+returns the session to shadow. The correctness calculation uses the latest independent
+human grade for delivered matching-provenance cycles; unknown and unsure are reported
+separately and excluded from the known denominator. No known grades means unknown
+precision, never measured success. A new process and reconciliation are needed after demotion.
 
 Call `deliver(cycle_id, now=utc_datetime)` after the cycle completes. It rechecks the gate,
 debits an observer-only maximum two-per-UTC-day budget, and commits `sending` before provider
@@ -227,10 +314,11 @@ chat, acknowledged message ID, cycle-bound random nonce, current epoch and expir
 is consumed once; its human feedback and the polling cursor commit atomically. Rejected or
 replayed callbacks create no labels or action approval. Phone scalar grades cannot enable
 retrieval/export; an independently reviewed correction and explicit local export approval
-are still required. Each bot should belong to this integration, because Telegram polling
+are still required. Quick phone grades leave `review_seconds` null. Each bot should belong to this integration, because Telegram polling
 cursors are shared by all consumers of a bot.
 
 Backups include delivery outcomes, spent reservations, cursor, callback consumption and
 grades in the same SQLite database. An older backup cannot prove which external effects
-happened after it: reopening stays disarmed, and operator reconciliation is required before
-a fresh epoch. This is an intentional restoration boundary, not exactly-once delivery.
+happened after it, including sends or revocations: reopening stays disarmed, and operator
+reconciliation is required before a fresh epoch. Unknown same-day spend defers new sends
+until the next UTC day. This is an intentional restoration boundary, not exactly-once delivery.

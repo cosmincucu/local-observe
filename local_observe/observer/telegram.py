@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from collections.abc import Callable
 
 from local_observe.http import NoRedirect
@@ -97,9 +97,12 @@ class Telegram:
                 CREATE TABLE IF NOT EXISTS observer_deliveries (
                     cycle_id TEXT PRIMARY KEY REFERENCES cycles(cycle_id), epoch TEXT NOT NULL,
                     day TEXT NOT NULL, status TEXT NOT NULL, document TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS observer_reconciliations (
+                    epoch TEXT PRIMARY KEY, document TEXT NOT NULL);
             ''')
 
-    def arm_after_reconciliation(self, epoch: str) -> None:
+    def arm_after_reconciliation(self, epoch: str, *, now: dt.datetime | None = None,
+                                 used_today_floor: int | None = None) -> None:
         """Explicit operator boundary, needed for every process/restore; use a fresh UUID epoch.
 
         Reconcile previous external effects before calling. There is deliberately no
@@ -111,11 +114,39 @@ class Telegram:
             raise ObserverError('fresh_delivery_epoch_required') from exc
         with self.journal.lock() as acquired:
             require(acquired, 'observer_busy')
+            now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
+            day = now.date().isoformat()
+            spent = self.journal.db.execute('SELECT count(*) FROM observer_deliveries WHERE day=?',
+                                            (day,)).fetchone()[0]
+            # A later epoch cannot erase a human-confirmed spend floor from an earlier restore.
+            for row in self.journal.db.execute('SELECT document FROM observer_reconciliations WHERE document LIKE ?',
+                                                ('%"day":"' + day + '"%',)):
+                previous = strict_json(row[0])
+                if previous['not_before'] != previous['reconciled_at']:
+                    continue  # Unknown spend deferred that epoch; it was not a human count.
+                later = self.journal.db.execute('SELECT count(*) FROM observer_deliveries WHERE day=? AND rowid>?',
+                                                (day, previous['delivery_row_floor'])).fetchone()[0]
+                spent = max(spent, previous['used_today_floor'] + later)
+            require(used_today_floor is None or type(used_today_floor) is int
+                    and spent <= used_today_floor <= self.config.daily_limit, 'reconciled_spend_below_known_count')
+            next_day = dt.datetime.combine(now.date() + dt.timedelta(days=1), dt.time(), tzinfo=dt.timezone.utc)
+            reconciliation = {'epoch': epoch, 'reconciled_at': utc(now), 'day': day,
+                              'not_before': utc(next_day if used_today_floor is None else now),
+                              'used_today_floor': (self.config.daily_limit if used_today_floor is None
+                                                   else used_today_floor),
+                              'cycle_row_floor': self.journal.db.execute(
+                                  'SELECT coalesce(max(rowid),0) FROM cycles').fetchone()[0],
+                              'delivery_row_floor': self.journal.db.execute(
+                                  'SELECT coalesce(max(rowid),0) FROM observer_deliveries').fetchone()[0]}
             old = self.journal.db.execute('SELECT epoch FROM observer_delivery_control WHERE singleton=1').fetchone()
             require(old is None or old[0] != epoch, 'fresh_delivery_epoch_required')
+            require(self.journal.db.execute('SELECT 1 FROM observer_reconciliations WHERE epoch=?',
+                                            (epoch,)).fetchone() is None, 'fresh_delivery_epoch_required')
             with self.journal.db:
                 self.journal.db.execute('INSERT INTO observer_delivery_control VALUES(1,?,0) '
                                         'ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch,cursor=0', (epoch,))
+                self.journal.db.execute('INSERT INTO observer_reconciliations VALUES(?,?)',
+                                        (epoch, encoded(reconciliation)))
                 rows = self.journal.db.execute(
                     "SELECT document FROM observer_deliveries WHERE status='sending'").fetchall()
                 for row in rows:
@@ -152,8 +183,16 @@ class Telegram:
             cycle = self.journal.get(cycle_id)
             require(cycle is not None and cycle['status'] == 'completed' and cycle['coverage'] == 'complete'
                     and cycle['decision'] == 'tell' and bool(cycle['answer'].get('findings')), 'cycle_not_deliverable')
+            reconciliation = strict_json(self.journal.db.execute(
+                'SELECT document FROM observer_reconciliations WHERE epoch=?', (self.epoch,)).fetchone()[0])
+            row_id = self.journal.db.execute('SELECT rowid FROM cycles WHERE cycle_id=?', (cycle_id,)).fetchone()[0]
+            require(row_id > reconciliation['cycle_row_floor']
+                    and instant(cycle['started_at']) >= instant(reconciliation['reconciled_at']),
+                    'pre_reconciliation_cycle_refused')
+            require(now >= instant(reconciliation['not_before']), 'reconciled_day_budget_unknown')
             require(0 <= (now - instant(cycle['ended_at'])).total_seconds() <= 7200, 'delivery_cycle_stale')
-            require(all(item['data_class'] != 'restricted' for item in cycle['evidence']),
+            require(all(item.get('data_class') in ('public', 'internal')
+                        for item in [*cycle['evidence'], *cycle.get('retrieval', [])]),
                     'restricted_delivery_refused')
             require(cycle.get('config_sha256') == self.config_digest, 'delivery_configuration_changed')
             model = cycle['model_calls'][-1]['response_model']
@@ -161,12 +200,18 @@ class Telegram:
             binding = {'schema_version': 1, 'config_sha256': self.config_digest, 'model': model,
                        'cycle_sha256': digest(cycle), 'channel': 'telegram', 'chat_id': self.config.chat_id,
                        'user_id': self.config.user_id, 'epoch': self.epoch,
-                       'review_base_url': self.config.review_base_url}
+                       'review_base_url': self.config.review_base_url, 'daily_limit': self.config.daily_limit,
+                       'channel_sha256': digest(asdict(self.config)),
+                       'provenance_sha256': (cycle.get('provenance') or {}).get('sha256')}
             require(self.verifier(cycle, binding, now) is True, 'independent_evaluation_required')
             text = self._message(cycle)
             day = now.date().isoformat()
             count = self.journal.db.execute('SELECT count(*) FROM observer_deliveries WHERE day=?',
                                             (day,)).fetchone()[0]
+            if day == reconciliation['day']:
+                after = self.journal.db.execute('SELECT count(*) FROM observer_deliveries WHERE day=? AND rowid>?',
+                                                (day, reconciliation['delivery_row_floor'])).fetchone()[0]
+                count = max(count, reconciliation['used_today_floor'] + after)
             require(count < self.config.daily_limit, 'model_delivery_budget')
             nonce = secrets.token_urlsafe(18)
             item = {'schema_version': 1, 'cycle_id': cycle_id, 'epoch': self.epoch, 'day': day,
@@ -283,7 +328,7 @@ class Telegram:
                         'cycle_id': item['cycle_id'], 'reviewer': f'telegram-user:{item["user_id"]}',
                         'recorded_at': utc(now), 'usefulness': ('useful', 'noise', 'unsure')[int(parts[2][0])],
                         'correctness': ('correct', 'incorrect', 'unsure')[int(parts[2][1])],
-                        'corrected_answer': None, 'outcome_refs': [], 'export_approved': False}
+                        'corrected_answer': None, 'outcome_refs': [], 'export_approved': False, 'review_seconds': None}
             self.journal.db.execute('INSERT INTO feedback VALUES(?,?,?,?)',
                                     (document['feedback_id'], item['cycle_id'], utc(now), encoded(document)))
             item['callback_used'] = True

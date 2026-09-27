@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import itertools
 import os
 from pathlib import Path
 import sqlite3
 import stat
 from typing import Any
 
-from .contract import ObserverError, encoded, fields, instant, name, redact, require, strict_json, utc
+from .contract import ObserverError, digest, encoded, fields, instant, name, redact, require, strict_json, utc
 
 
 def private_file(path: Path | str, *, exclusive: bool = False, directory_fd: int | None = None) -> int:
@@ -26,15 +27,17 @@ def private_file(path: Path | str, *, exclusive: bool = False, directory_fd: int
     return fd
 
 
-def private_directory(path: Path) -> int:
+def private_directory(path: Path, *, create: bool = True, reject_git: bool = False) -> int:
     """Walk without following symlinks; anchor subsequent writes to the admitted directory."""
     require(path.is_absolute() and '..' not in path.parts, 'absolute_private_path_required')
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open('/', flags)
     try:
         for index, part in enumerate(path.parts[1:]):
+            if reject_git:
+                _no_git_marker(fd)
             final = index == len(path.parts) - 2
-            if final:
+            if final and create:
                 try:
                     os.mkdir(part, 0o700, dir_fd=fd)
                 except FileExistsError:
@@ -50,10 +53,20 @@ def private_directory(path: Path) -> int:
                 require(info.st_uid in (0, os.getuid()) and
                         (not mode & 0o022 or info.st_uid == 0 and bool(mode & stat.S_ISVTX)),
                         'unsafe_state_ancestor')
+        if reject_git:
+            _no_git_marker(fd)
         return fd
     except BaseException:
         os.close(fd)
         raise
+
+
+def _no_git_marker(directory_fd: int) -> None:
+    try:
+        os.stat('.git', dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise ObserverError('runtime_state_inside_repository')
 
 
 class Journal:
@@ -62,7 +75,7 @@ class Journal:
     def __init__(self, directory: str | Path):
         self.directory = Path(directory).absolute()
         require(self.directory != Path('/'), 'private_owned_directory_required')
-        self.directory_fd = private_directory(self.directory)
+        self.directory_fd = private_directory(self.directory, reject_git=True)
         try:
             self._initialize()
         except BaseException:
@@ -169,7 +182,8 @@ class Journal:
         name(feedback_id)
         cycle = self.get(cycle_id)
         require(cycle is not None and cycle['status'] in ('completed', 'partial', 'failed'), 'cycle_not_reviewable')
-        fields(values, {'usefulness', 'correctness'}, {'corrected_answer', 'outcome_refs', 'export_approved'})
+        fields(values, {'usefulness', 'correctness'},
+               {'corrected_answer', 'outcome_refs', 'export_approved', 'review_seconds'})
         require(values['usefulness'] in ('useful', 'noise', 'unsure'), 'invalid_usefulness')
         require(values['correctness'] in ('correct', 'incorrect', 'unsure'), 'invalid_correctness')
         correction = values.get('corrected_answer')
@@ -181,18 +195,23 @@ class Journal:
         known = {item['evidence_id'] for item in cycle['evidence']}
         require(all(r in known for r in refs), 'unknown_outcome_reference')
         approved = values.get('export_approved', False)
+        review_seconds = values.get('review_seconds')
+        require(review_seconds is None or type(review_seconds) is int and 0 <= review_seconds <= 3600,
+                'invalid_review_seconds')
         require(type(approved) is bool, 'invalid_export_approval')
         require(not approved or bool(correction) and values['correctness'] != 'unsure' and bool(known),
                 'corrected_evidence_required_for_export')
         document = {'schema_version': 1, 'feedback_id': feedback_id, 'cycle_id': cycle_id,
                     'reviewer': f'os-uid:{os.getuid()}', 'recorded_at': utc(now or dt.datetime.now(dt.timezone.utc)),
                     'usefulness': values['usefulness'], 'correctness': values['correctness'],
-                    'corrected_answer': redact(correction), 'outcome_refs': refs, 'export_approved': approved}
+                    'corrected_answer': redact(correction), 'outcome_refs': refs, 'export_approved': approved,
+                    'review_seconds': review_seconds}
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO feedback VALUES(?,?,?,?)',
                             (feedback_id, cycle_id, document['recorded_at'], encoded(document)))
             old = strict_json(self.db.execute('SELECT document FROM feedback WHERE feedback_id=?',
                                               (feedback_id,)).fetchone()[0])
+            old.setdefault('review_seconds', None)
             require({k: v for k, v in old.items() if k != 'recorded_at'} ==
                     {k: v for k, v in document.items() if k != 'recorded_at'}, 'feedback_id_reused')
         return old
@@ -202,27 +221,56 @@ class Journal:
         require(cycle is not None, 'unknown_cycle')
         feedback = [strict_json(r[0]) for r in self.db.execute(
             'SELECT document FROM feedback WHERE cycle_id=? ORDER BY rowid', (cycle_id,))]
+        for review in feedback:
+            review.setdefault('review_seconds', None)
         return {**cycle, 'review': 'reviewed' if feedback else 'unknown', 'feedback': feedback}
 
     def examples(self, *, query: str = '', limit: int = 10) -> list[dict]:
         """Latest independent correction only; scalar grades never create training examples."""
         require(type(limit) is int and 1 <= limit <= 100 and isinstance(query, str) and len(query) <= 200,
                 'invalid_retrieval_bound')
+        return list(itertools.islice(self._examples(query), limit))
+
+    def _examples(self, query=''):
         rows = self.db.execute('''
             SELECT f.document,c.document FROM feedback f JOIN cycles c USING(cycle_id)
             WHERE f.rowid=(SELECT max(f2.rowid) FROM feedback f2 WHERE f2.cycle_id=f.cycle_id)
             ORDER BY f.rowid DESC LIMIT 1000
-        ''').fetchall()
-        result = []
+        ''')
         for row in rows:
             review, cycle = strict_json(row[0]), strict_json(row[1], 524288, max_depth=20)
             if not review['export_approved'] or not review['corrected_answer']:
                 continue
             if query and query.casefold() not in encoded(cycle['evidence']).casefold():
                 continue
-            result.append({'schema_version': 1, 'trust': 'untrusted_reference_only', 'cycle_id': cycle['cycle_id'],
-                           'evidence': cycle['evidence'], 'answer': review['corrected_answer'], 'feedback': review})
-            if len(result) >= limit:
+            yield {'schema_version': 1, 'trust': 'untrusted_reference_only', 'cycle_id': cycle['cycle_id'],
+                   'evidence': cycle['evidence'], 'answer': review['corrected_answer'], 'feedback': review}
+
+    def retrieve(self, *, before: dt.datetime, limit: int, max_bytes: int, exclude: str) -> list[dict]:
+        """Older independent corrections only, bounded whole examples; no partial/truncated targets."""
+        require(type(limit) is int and 0 <= limit <= 10 and type(max_bytes) is int
+                and 0 <= max_bytes <= 65536, 'invalid_retrieval_bound')
+        result = []
+        if not limit:
+            return result
+        for example in itertools.islice(self._examples(), 100):
+            feedback = example['feedback']
+            if (example['cycle_id'] == exclude or instant(feedback['recorded_at']) >= before
+                    or any(instant(item['window']['end']) >= before for item in example['evidence'])):
+                continue
+            classes = [item.get('data_class') for item in example['evidence']]
+            if not classes or any(c not in ('public', 'internal', 'restricted') for c in classes):
+                continue
+            content = {'trust': 'untrusted_historical_example', 'cycle_id': example['cycle_id'],
+                       'feedback_id': feedback['feedback_id'], 'evidence': example['evidence'],
+                       'corrected_answer': feedback['corrected_answer'],
+                       'data_class': max(classes, key=('public', 'internal', 'restricted').index)}
+            content['history_id'] = digest({'cycle_id': content['cycle_id'], 'feedback_id': content['feedback_id']})
+            content['sha256'] = digest(content)
+            if len(encoded([*result, content]).encode()) > max_bytes:
+                continue
+            result.append(content)
+            if len(result) == limit:
                 break
         return result
 
