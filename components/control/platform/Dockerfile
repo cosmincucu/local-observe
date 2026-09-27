@@ -52,7 +52,7 @@ COPY --chmod=0444 examples/platform/forecast.yaml /app/examples/platform/forecas
 # came from a restrictive workstation checkout. No runtime secret is copied here.
 # A named volume mounted at a path the image lacks arrives root-owned 0755, which
 # anomaly_cursor.private_parent refuses; install -d gives /state the mode and the owner in one call.
-RUN chmod -R a+rX /app/local_observe && mkdir /data && chown 65532:65532 /data \
+RUN chmod -R a+rX /app/local_observe /app/examples && mkdir /data && chown 65532:65532 /data \
     && install -d -m 0700 -o 65532 -g 65532 /state
 USER 65532:65532
 EXPOSE 8002
