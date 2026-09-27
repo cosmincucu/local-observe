@@ -70,29 +70,35 @@ class OperatorTests(unittest.TestCase):
             async with async_playwright() as browser_api:
                 browser = await browser_api.chromium.launch(executable_path=os.environ['LO_TEST_BROWSER'])
                 try:
-                    for width, height in ((1440, 960), (390, 844)):
+                    for width, height, with_runner in ((1440, 960, True), (390, 844, True),
+                                                       (1440, 960, False), (390, 844, False)):
                         platform = Platform()
                         self.addCleanup(platform.close)
                         platform.store.path.chmod(0o600)
                         binding = reviewed_binding([HOST])
                         binding['dag'] += '-' + binding['sha256'][:16]
-                        platform.app = create_app(platform.store, [
+                        credentials = [
                             {'identity': 'agent-ask', 'role': 'proposer', 'token': platform.tokens['proposer']},
                             {'identity': 'operator', 'role': 'human', 'token': HUMAN_TOKEN},
-                            {'identity': 'trusted-runner', 'role': 'executor', 'token': RUNNER_TOKEN}],
-                            platform.policy, index_path=platform.index_path,
-                            runner_handoff=RunnerHandoff(platform.store, platform.policy,
-                                                         {'trusted-runner': [binding]}))
+                            {'identity': 'trusted-runner', 'role': 'executor', 'token': RUNNER_TOKEN}]
+                        handoff = RunnerHandoff(platform.store, platform.policy, {'trusted-runner': [binding]})
+                        def app_for(enabled):
+                            return create_app(platform.store, credentials, platform.policy,
+                                              index_path=platform.index_path,
+                                              runner_handoff=handoff if enabled else None)
+                        platform.app = app_for(with_runner)
                         proposal = await asyncio.to_thread(platform.proposal, retry_key=platform.next_key())
                         action = proposal['action_id']
                         app = with_ui(platform.app)
                         decisions, errors = [], []
-                        fault = {'review': 0, 'decision': 0}
+                        fault = {'review': 0, 'decision': 0, 'malformed': False, 'race': False}
                         context = await browser.new_context(viewport={'width': width, 'height': height})
                         page = await context.new_page()
                         page.on('pageerror', lambda error: errors.append(str(error)))
                         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                                     base_url='https://operator.example.test') as client:
+                                                     base_url='https://operator.example.test') as client, \
+                                httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(not with_runner)),
+                                                  base_url='https://operator.example.test') as changed:
                             async def route_request(route):
                                 request = route.request
                                 url = httpx.URL(request.url)
@@ -107,8 +113,14 @@ class OperatorTests(unittest.TestCase):
                                 if url.path == '/v1/actions/review' and fault['review']:
                                     await route.fulfill(status=fault['review'], json={'error': 'refused'})
                                     return
-                                response = await client.request(request.method, request.url,
+                                active = changed if fault['race'] and url.path == '/v1/actions/decision' else client
+                                response = await active.request(request.method, request.url,
                                                                 headers=request.headers, content=request.post_data)
+                                if url.path == '/v1/actions/review' and fault['malformed']:
+                                    body = response.json()
+                                    body['request_sha256'] = 'invalid'
+                                    await route.fulfill(status=200, json=body)
+                                    return
                                 await route.fulfill(status=response.status_code, headers=dict(response.headers),
                                                     body=response.content)
 
@@ -125,8 +137,14 @@ class OperatorTests(unittest.TestCase):
                             review = (await client.get('/v1/actions/review?action_id=' + action,
                                                        headers={'Authorization': 'Bearer ' + HUMAN_TOKEN})).json()
                             displayed = await page.locator('#confirm-subject dd').all_text_contents()
-                            for expected in (action, 'inspect', '1', HOST, binding['dag'], binding['sha256'],
-                                             review['binding_sha256'], review['request_sha256'], 'trusted-runner'):
+                            exact = [action, 'inspect', '1', HOST, review['request_sha256']]
+                            if with_runner:
+                                exact += [binding['dag'], binding['sha256'], review['binding_sha256'], 'trusted-runner']
+                            else:
+                                self.assertEqual(review['mode'], 'manual')
+                                exact += ['Manual request only. No trusted runner or DAG binding.']
+                                self.assertEqual(json.loads(displayed[-1]), review['request'])
+                            for expected in exact:
                                 self.assertIn(expected, displayed)
                             self.assertFalse(decisions)
                             self.assertTrue(await confirm.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
@@ -134,21 +152,33 @@ class OperatorTests(unittest.TestCase):
                             await expect(confirm).not_to_be_visible()
                             self.assertFalse(decisions)
 
-                            fault['review'] = 503
+                            for status in (404, 503):
+                                fault['review'] = status
+                                await page.get_by_role('button', name='Approve', exact=True).click()
+                                await expect(page.locator('#detail-error')).to_contain_text('No decision was sent')
+                                await expect(confirm).not_to_be_visible()
+                                self.assertFalse(decisions)
+                            fault['review'] = 0
+                            fault['malformed'] = True
                             await page.get_by_role('button', name='Approve', exact=True).click()
                             await expect(page.locator('#detail-error')).to_contain_text('No decision was sent')
                             await expect(confirm).not_to_be_visible()
                             self.assertFalse(decisions)
-                            fault['review'] = 0
-                            fault['decision'] = 400
+                            fault['malformed'] = False
+                            # The same decision goes to a real app with the opposite runner config,
+                            # reproducing reconfiguration between GET review and POST decision.
+                            fault['race'] = True
                             await page.get_by_role('button', name='Approve', exact=True).click()
                             await confirm.get_by_role('button', name='Confirm', exact=True).click()
                             await expect(page.locator('#detail-error')).to_contain_text('Request refused (400)')
                             await expect(page.locator('#detail')).to_be_visible()
-                            self.assertEqual(decisions[-1], {'action_id': action, 'decision': 'approved',
-                                                            'binding_sha256': review['binding_sha256']})
+                            decision = {'action_id': action, 'decision': 'approved'}
+                            if with_runner:
+                                decision['binding_sha256'] = review['binding_sha256']
+                            self.assertEqual(decisions[-1], decision)
+                            self.assertEqual(platform.action_row(action)['status'], 'pending')
 
-                            fault['decision'] = 0
+                            fault['race'] = False
                             await page.get_by_role('button', name='Approve', exact=True).click()
                             await confirm.get_by_role('button', name='Confirm', exact=True).click()
                             await expect(page.locator('#detail')).not_to_be_visible()
@@ -182,7 +212,8 @@ const root = process.argv[1], source = fs.readFileSync(root+'/ui.js','utf8');
 const html = fs.readFileSync(root+'/index.html','utf8');
 const action = '11111111-1111-4111-8111-111111111111';
 const target = '22222222-2222-4222-8222-222222222222';
-const request = {action:'inspect',version:'1',targets:[target],parameters:{},evidence:[],
+const request = {retry_key:'fixture',incident_id:target,action:'inspect',version:'1',targets:[target],
+  parameters:{},evidence:[target],
   expires_at:'2099-01-01T00:00:00Z'};
 const row = {id:action,status:'pending',payload:JSON.stringify(request),
   display:{description:'<img src=x onerror=alert(1)>'}};
@@ -206,7 +237,7 @@ function element(tag='div') {
    showModal(){this.open=true;},classList:{toggle(){},add(){},remove(){}}};
 }
 const tick = ()=>new Promise(resolve=>setImmediate(resolve));
-async function fixture({review=expected,reviewStatus=200,decisionStatus=200,defer=false}={}) {
+async function fixture({review=expected,reviewStatus=200,decisionStatus=200,defer=false,shown=row}={}) {
  const ids=new Map(),calls=[];let finish;
  for(const match of html.matchAll(/id="([^"]+)"/g))ids.set(match[1],element());
  const reply=(body,status=200)=>({ok:status===200,status,json:async()=>JSON.parse(JSON.stringify(body))});
@@ -215,6 +246,7 @@ async function fixture({review=expected,reviewStatus=200,decisionStatus=200,defe
      querySelectorAll:()=>[]},lucide:{createIcons(){}},
    fetch:async(route,options={})=>{calls.push([route,options]);
      if(route.startsWith('/v1/actions/review')){
+       if(reviewStatus===0)throw new Error('Synthetic transport failure');
        if(defer)return new Promise(resolve=>{finish=()=>resolve(reply(review,reviewStatus));});
        return reply(review,reviewStatus);
      }
@@ -223,7 +255,7 @@ async function fixture({review=expected,reviewStatus=200,decisionStatus=200,defe
      if(route==='/v1/status')return reply({incidents:{},actions:{},notifications:{}});
      return reply({rows:[]});
    }});
- vm.runInContext(source,context);await tick();context.row=JSON.parse(JSON.stringify(row));
+ vm.runInContext(source,context);await tick();context.row=JSON.parse(JSON.stringify(shown));
  vm.runInContext("token='synthetic-human-session';role='human';view='actions';details(row)",context);
  return {ids,calls,context,finish:()=>finish(),buttons:()=>ids.get('commands').children,
    posts:()=>calls.filter(([p])=>p==='/v1/actions/decision')};
@@ -293,6 +325,42 @@ async function run() {
   f.context.row={...row,id:target};vm.runInContext('details(row)',f.context);f.finish();await pending;
   assert.equal(f.posts().length,0);assert.equal(f.ids.get('confirm').open,false);checks++;
  }
+ const manualRequest={...request,parameters:{nested:{text:'<img src=x onerror=alert(1)>',items:[1,null,{flag:true}]}}};
+ const manual={mode:'manual',action_id:action,request:manualRequest,request_sha256:'d'.repeat(64)};
+ const shown={...row,payload:JSON.stringify({...manualRequest,
+   parameters:{nested:{items:[1,null,{flag:true}],text:'<img src=x onerror=alert(1)>'}}})};
+ {
+  const f=await fixture({review:manual,shown}),pending=f.buttons()[0].onclick();await tick();
+  const text=f.ids.get('confirm-subject').textContent;
+  assert.ok(text.includes('Manual request only. No trusted runner or DAG binding.'));
+  assert.ok(text.includes(JSON.stringify(manualRequest,null,2)));
+  assert.ok(text.includes(manual.request_sha256));assert.equal(f.posts().length,0);
+  f.ids.get('confirm').close('confirm');await pending;
+  assert.deepEqual(JSON.parse(f.posts()[0][1].body),{action_id:action,decision:'approved'});checks++;
+ }
+ {
+  // A manual action's own policy may allow an array rather than an object of parameters.
+  const request={...manualRequest,parameters:[manualRequest.parameters]};
+  const f=await fixture({review:{...manual,request},shown:{...row,payload:JSON.stringify(request)}});
+  const pending=f.buttons()[0].onclick();await tick();
+  assert.ok(f.ids.get('confirm-subject').textContent.includes(JSON.stringify(request,null,2)));
+  f.ids.get('confirm').close('confirm');await pending;
+  assert.deepEqual(JSON.parse(f.posts()[0][1].body),{action_id:action,decision:'approved'});checks++;
+ }
+ for(const reviewStatus of [0,404,503]) {
+  const f=await fixture({review:manual,shown,reviewStatus});await f.buttons()[0].onclick();
+  assert.equal(f.posts().length,0);assert.equal(f.ids.get('confirm').open,false);
+  assert.ok(f.ids.get('detail-error').textContent.includes('No decision was sent'));checks++;
+ }
+ for(const review of [{...manual,mode:'auto'},{...manual,runner:'trusted-runner'},
+   {...manual,request_sha256:'bad'},{...manual,request:{...manualRequest,targets:[action]}},
+   {...manual,request:{...manualRequest,parameters:{}}},{...manual,request:{...manualRequest,evidence:[]}},
+   {...manual,request:{...manualRequest,extra:1}},{...manual,mode:undefined},
+   {...manual,request:{...manualRequest,expires_at:'bad'}},{...manual,action_id:target}]) {
+  const f=await fixture({review,shown});await f.buttons()[0].onclick();
+  assert.equal(f.posts().length,0);assert.equal(f.ids.get('confirm').open,false);
+  assert.ok(f.ids.get('detail-error').textContent.includes('No decision was sent'));checks++;
+ }
  console.log(JSON.stringify({checks}));
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});
@@ -300,7 +368,7 @@ run().catch(error=>{console.error(error);process.exitCode=1;});
         result = subprocess.run(['node', '-e', javascript, str(static)], capture_output=True,
                                 text=True, encoding='utf-8', timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads(result.stdout)['checks'], 24)
+        self.assertEqual(json.loads(result.stdout)['checks'], 39)
 
     def test_environment_badge_reports_the_serving_delivery_mode(self):
         """The shell ships no fixed environment label; the badge reads the runtime observation."""

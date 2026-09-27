@@ -26,7 +26,7 @@ from . import intake
 from .policy import action_policy
 from .refusal_dispatch import RefusalAuditDispatcher
 from .refusals import SUMMARY_ONLY
-from .state import Actor, StateError, Store, clock, require, validate_event
+from .state import Actor, StateError, Store, clock, identifier, require, validate_event
 from .notifications import deliver_one
 from .owner import exclusive_owner
 
@@ -654,11 +654,25 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(200, runner_handoff.pending(actor))
                 if path == '/v1/setup/pending' and guided_setup is not None:
                     return await respond(200, guided_setup.pending(actor))
-                if path == '/v1/actions/review' and runner_handoff is not None:
+                if path == '/v1/actions/review':
+                    require(actor, 'human')
                     parameters = query_params(scope)
                     if set(parameters) != {'action_id'} or len(parameters['action_id']) != 1:
                         raise StateError('Action review requires one action identifier')
-                    return await respond(200, runner_handoff.review(parameters['action_id'][0], actor))
+                    action_id = parameters['action_id'][0]
+                    if runner_handoff is not None:
+                        return await respond(200, runner_handoff.review(action_id, actor))
+                    identifier(action_id)
+                    with store.transaction() as connection:
+                        row = connection.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone()
+                        if not row:
+                            raise StateError('Action is not available for review')
+                        # Explicit successful manual review, never an interpretation of a failed
+                        # runner review. The immutable action ID binds the stored request. A later
+                        # decision routed to a configured handoff still requires its binding hash.
+                        review = {'mode': 'manual', 'action_id': action_id,
+                                  'request': json.loads(row['payload']), 'request_sha256': row['fingerprint']}
+                    return await respond(200, review)
                 if path == '/v1/me':
                     return await respond(200, {'identity': actor.identity, 'role': actor.role})
                 if path == '/v1/inventory' and index_path:

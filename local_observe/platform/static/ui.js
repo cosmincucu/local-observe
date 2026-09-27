@@ -243,7 +243,7 @@ function command(label, icon, path, body, prepare = null) {
 
 async function approvalReview(row) {
   const refused = () => new Error("Approval review is unavailable or does not match this action. " +
-    "No decision was sent. Refresh and check the trusted runner configuration before retrying.");
+    "No decision was sent. Refresh and check the platform approval configuration before retrying.");
   if (!isIdentifier(row.id)) throw refused();
   let review;
   try {
@@ -257,6 +257,31 @@ async function approvalReview(row) {
     && !/[\r\n]/.test(text);
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
   const request = review?.request, binding = review?.binding, shown = payload(row);
+  if (review?.mode === "manual") {
+    const fields = ["retry_key", "incident_id", "action", "version", "targets", "parameters", "evidence", "expires_at"];
+    // Compare complete request values, allowing harmless object-key reordering while preserving
+    // array order. The server's stored action is immutable; no field can be supplied by the caller.
+    const stable = (value) => Array.isArray(value) ? value.map(stable) : object(value)
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])])) : value;
+    if (!exact(review, ["mode", "action_id", "request", "request_sha256"])
+        || review.action_id !== row.id || !isDigest(review.request_sha256)
+        || !exact(request, fields) || !exact(shown, fields) || !same(stable(request), stable(shown))
+        || !label(request.action) || !label(request.version) || !label(request.retry_key)
+        || !isIdentifier(request.incident_id)
+        || !Array.isArray(request.targets) || !request.targets.length || request.targets.length > 20
+        || !request.targets.every(isIdentifier) || new Set(request.targets).size !== request.targets.length
+        || !Array.isArray(request.evidence) || !request.evidence.length || request.evidence.length > 20
+        || !request.evidence.every(isIdentifier) || typeof request.expires_at !== "string"
+        || !Number.isFinite(Date.parse(request.expires_at))) throw refused();
+    return {
+      body: { action_id: row.id, decision: "approved" },
+      subject: [["Approval scope", "Manual request only. No trusted runner or DAG binding."],
+        ["Action ID", row.id], ["Action", request.action], ["Version", request.version],
+        ["Targets (exact inventory IDs)", request.targets.join("\n")],
+        ["Request SHA-256", review.request_sha256], ["Approval expiry", request.expires_at],
+        ["Request (exact JSON)", JSON.stringify(request, null, 2)]],
+    };
+  }
   if (!exact(review, ["action_id", "request", "request_sha256", "runner", "binding", "binding_sha256"])
       || review.action_id !== row.id || !isDigest(review.binding_sha256)
       || !isDigest(review.request_sha256) || !label(review.runner)

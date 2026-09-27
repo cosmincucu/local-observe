@@ -137,11 +137,21 @@ the exact action, version, target inventory IDs, immutable DAG name, specificati
 SHA-256, binding SHA-256, request SHA-256, runner identity and approval expiry. The
 confirmation submits that reviewed binding hash. Cancelling submits nothing. A
 missing, malformed or mismatched review leaves a visible error and sends no decision;
-there is no automatic legacy approval fallback. Existing deployments without a trusted
-runner can still deliberately use their existing human decision API, but the UI's
-Approve button requires configured review. **Deny** and **Withdraw approval** send
+there is no automatic legacy approval fallback. **Deny** and **Withdraw approval** send
 `denied`; withdrawal is available while the action is approved and the server refuses
 it after claim. Another decision cannot run while review or confirmation is pending.
+
+When no trusted runner handoff is configured, the same authenticated human-only
+review endpoint returns a successful response with exactly `mode: "manual"`,
+`action_id`, `request` and `request_sha256`. The UI confirms **Manual request only.
+No trusted runner or DAG binding.** It shows the complete stored request, including
+parameters and evidence, its fingerprint and expiry. Confirmation uses the existing
+two-field human decision request; a separately authorised manual executor can still
+claim the approved action through the existing API. Assistants gain no approval role.
+This mode must be explicitly returned by the server: a 404, timeout, malformed review
+or other error never enables manual approval. If handoff configuration changes between
+review and decision, the decision fails because manual requests lack the now-required
+binding hash, or bound requests carry a hash where no runner binding is configured.
 
 The existing MCP `execute_action` tool now posts `/v1/actions/execute` with only the
 action ID. It returns a queue receipt, never an execution credential or a claim of

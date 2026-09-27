@@ -268,6 +268,51 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertEqual(self.platform.action_row(action)['status'], 'pending')
 
+    def test_manual_review_is_explicit_human_only_and_preserves_manual_claim(self):
+        configured(self.platform)
+        action = self.platform.proposal()['action_id']
+        route = '/v1/actions/review?action_id=' + action
+        human = ApiBridge(self.platform.app, HUMAN_TOKEN)
+        code, review = human.request('GET', route)
+        self.assertEqual(code, 200)
+        self.assertEqual(set(review), {'mode', 'action_id', 'request', 'request_sha256'})
+        self.assertEqual(review['mode'], 'manual')
+        self.assertEqual(review['action_id'], action)
+        row = self.platform.action_row(action)
+        self.assertEqual(review['request'], json.loads(row['payload']))
+        self.assertEqual(review['request_sha256'], row['fingerprint'])
+        self.assertEqual(digest(review['request']), row['fingerprint'])
+        for role in ('reader', 'proposer', 'executor'):
+            self.assertEqual(self.platform.bridge(role).request('GET', route)[0], 400)
+            self.assertEqual(self.platform.bridge(role).request('POST', '/v1/actions/decision',
+                {'action_id': action, 'decision': 'approved'})[0], 400)
+        self.assertEqual(ApiBridge(self.platform.app, 'unrecognised-synthetic-credential').request('GET', route)[0], 401)
+        for query in ('', '?action_id=bad', '?action_id=' + HOST,
+                      '?action_id=' + action + '&action_id=' + action, '?action_id=' + action + '&mode=manual'):
+            self.assertEqual(human.request('GET', '/v1/actions/review' + query)[0], 400)
+        self.assertEqual(human.request('POST', '/v1/actions/decision',
+            {'action_id': action, 'decision': 'approved'}), (200, {'status': 'approved'}))
+        self.assertEqual(self.platform.bridge('executor').request('POST', '/v1/actions/claim',
+            {'action_id': action})[0], 200)
+        self.assertEqual(len(self.platform.executions()), 1)
+
+    def test_manual_and_bound_review_reconfiguration_races_are_refused(self):
+        for start_configured in (False, True):
+            with self.subTest(start_configured=start_configured):
+                configured(self.platform, handoff=self.handoff if start_configured else None)
+                action = self.platform.proposal(retry_key=self.platform.next_key())['action_id']
+                human = ApiBridge(self.platform.app, HUMAN_TOKEN)
+                code, review = human.request('GET', '/v1/actions/review?action_id=' + action)
+                self.assertEqual(code, 200)
+                decision = {'action_id': action, 'decision': 'approved'}
+                if start_configured:
+                    decision['binding_sha256'] = review['binding_sha256']
+                configured(self.platform, handoff=None if start_configured else self.handoff)
+                human = ApiBridge(self.platform.app, HUMAN_TOKEN)
+                self.assertEqual(human.request('POST', '/v1/actions/decision', decision)[0], 400)
+                self.assertEqual(self.platform.action_row(action)['status'], 'pending')
+                self.assertEqual(self.platform.executions(), [])
+
     def test_crash_after_dispatch_intent_observes_without_start(self):
         request = self.queued()
         from local_observe.platform import dagu
