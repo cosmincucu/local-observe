@@ -394,6 +394,24 @@ class Transport(unittest.TestCase):
         self.assertNotIn('param_rule_id', settings, 'a parameter with no placeholder must not be sent')
         self.assertEqual(outcome.status, 'available')
 
+    def test_metric_window_and_selector_remain_bound_in_the_http_request(self):
+        self.patch(json.dumps({'data': [METRIC_ROW]}).encode())
+        window = facade.Window('2026-09-08T12:15:00Z', '2026-09-08T12:30:00Z')
+        ch.ClickHouseStore(self.client()).read_metrics(
+            'metric-threshold', window=window, parameters={'resource_id': RESOURCE, 'rule_id': 'r.1'},
+            selectors={'metric_name': 'fixture.load'})
+        request, _timeout = Transport.openers[0].requests[0]
+        self.assertEqual(request.data.decode('utf-8'), ch.QUERY_SQL['metric-threshold'])
+        self.assertNotIn(RESOURCE, request.data.decode('utf-8'))
+        self.assertNotIn('fixture.load', request.data.decode('utf-8'))
+        settings = self.settings()
+        self.assertEqual(settings['param_start_ms'], [str(millis(window.start))])
+        self.assertEqual(settings['param_end_ms'], [str(millis(window.end))])
+        self.assertEqual(settings['param_metric_name'], ['fixture.load'])
+        self.assertEqual(settings['param_resource_id'], [RESOURCE])
+        self.assertEqual(settings['max_rows_to_read'], ['1000000'])
+        self.assertEqual(settings['max_bytes_to_read'], ['67108864'])
+
     def test_an_oversized_answer_is_refused_rather_than_cut(self):
         self.patch(b'{"data": ["' + b'y' * 70_000 + b'"]}')
         with self.assertRaises(TransportError):

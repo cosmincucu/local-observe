@@ -115,11 +115,21 @@ is reachable through the facade:
 
 | Query kind (`query_type`) | Tables | Rows |
 | --- | --- | --- |
-| `metric-threshold` | `signoz_metrics.distributed_samples_v4` joined to `signoz_metrics.distributed_time_series_v4` — newest labels per fingerprint, so a sample is not fanned out once per series row | 2 000 |
+| `metric-threshold` | `signoz_metrics.distributed_samples_v4` joined to `signoz_metrics.distributed_time_series_v4` — newest labels in the bounded metadata window per `(env, temporality, metric_name, fingerprint)` | 2 000 |
 | `source-heartbeat` | `signoz_logs.distributed_logs_v2` | 1 aggregate |
 | `log-records` | `signoz_logs.distributed_logs_v2` | 200 |
 | `trace-spans` | `signoz_traces.distributed_signoz_index_v3` | 100 |
 | `describe-metrics` / `describe-logs` / `describe-traces` | the same three, one aggregate each | 1 |
+
+Metric samples use the exact half-open interval `[start_ms, end_ms)`. Metadata uses
+`[floor(start_ms / 3600000) * 3600000, end_ms)`, because SigNoz records
+[`time_series_v4` metadata at the start of each hour](https://signoz.io/docs/userguide/write-a-metrics-clickhouse-query/).
+For example, a 12:15–12:30 sample read needs the 12:00 metadata bucket. The optional
+metric selector narrows both tables; an omitted selector keeps all metric names. Grouping and
+joining by the full series identity prevents duplicate hourly rows or shared fingerprints from
+multiplying samples or attaching another series' labels. The server read limits remain fixed.
+An empty metric join is `unavailable`: a samples-only `describe-metrics` result cannot prove
+that metadata exists for the requested resource. Missing labels never establish a healthy read.
 
 `signoz_logs.distributed_logs_v2_resource` is deliberately **not** read: it is the resource-attribute
 table the v0.1 adapter used to list hosts, and this platform queries by the declared `resource_id` a

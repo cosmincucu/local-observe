@@ -63,8 +63,15 @@ QUERY_SQL: dict[str, str] = {
         'SELECT s.metric_name AS metric_name, s.unix_milli AS unix_milli, s.value AS value, '
         't.labels AS labels '
         f'FROM {METRICS_SAMPLES} AS s INNER JOIN '
-        f"(SELECT fingerprint, argMax(labels, unix_milli) AS labels FROM {METRICS_SERIES} "
-        'GROUP BY fingerprint) AS t ON s.fingerprint = t.fingerprint '
+        # Series metadata is stamped at the start of each hour; samples keep exact bounds.
+        '(SELECT env, temporality, metric_name, fingerprint, '
+        f'argMax(labels, unix_milli) AS labels FROM {METRICS_SERIES} '
+        'WHERE unix_milli >= intDiv({start_ms:Int64}, 3600000) * 3600000 '
+        'AND unix_milli < {end_ms:Int64} '
+        "AND ({metric_name:String} = '' OR metric_name = {metric_name:String}) "
+        'GROUP BY env, temporality, metric_name, fingerprint) AS t '
+        'ON s.env = t.env AND s.temporality = t.temporality '
+        'AND s.metric_name = t.metric_name AND s.fingerprint = t.fingerprint '
         'WHERE s.unix_milli >= {start_ms:Int64} AND s.unix_milli < {end_ms:Int64} '
         "AND JSONExtractString(t.labels, 'resource_id') = {resource_id:String} "
         "AND ({metric_name:String} = '' OR s.metric_name = {metric_name:String}) "
@@ -409,7 +416,9 @@ class ClickHouseStore(StoreClient):
         measured rather than inferred from the absence of rows. A probe that itself fails counts as
         absent: an unanswered question must never be reported as data.
         """
-        if kind.query_type not in PROBES:
+        # describe-metrics counts samples without resource labels. It cannot establish that
+        # an empty metric join has metadata for this resource, even when other samples exist.
+        if kind.query_type == 'metric-threshold' or kind.query_type not in PROBES:
             return False
         describe_type, probe_parameters, narrowing = probe_request(kind.query_type, parameters, selectors)
         probe = TEMPLATES[describe_type]
