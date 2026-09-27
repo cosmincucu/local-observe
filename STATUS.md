@@ -9,6 +9,9 @@ must validate its selected components before relying on them. No production serv
 | Inventory | Versioned declarations, observed resources and a rebuildable index |
 | Incidents | Detection, correlation, suppression, notification state and approval records |
 | Operations | Homepage navigation, platform interface and job-status adapters |
+| Observer | Scheduled, bounded investigations with retained redacted evidence and explicit incomplete coverage |
+| Feedback | Versioned human corrections, eligible-case retrieval and provenance-preserving export |
+| Guided setup | Reviewed plans and a separate trusted execution boundary |
 | Optional integrations | Model-assisted explanation, chat, additional sensors and external APIs |
 
 Start with [installation](docs/INSTALLATION.md), the [full example](examples/full/README.md)
@@ -16,8 +19,14 @@ and the [component guide](docs/COMPONENTS.md). Each component documents its conf
 backup and upgrade requirements.
 
 Automated tests establish behavior under fixtures. The [evaluation harness](local_observe/evaluation/README.md)
-uses a small generated corpus; its model-assisted arm is not scored. Those measurements do not
-establish detection quality in a live installation.
+uses a small generated corpus by default. A configured observer can be compared with the same
+threshold, seasonal and shaping baselines; fixture results do not establish live detection quality.
+Ungraded cases stay unknown. The quality report cannot authorize notifications.
+
+Live model quality, fit on a 16 GB VRAM device and human feedback burden across deployment
+sizes require measured acceptance. No training run or fine-tuned model is shipped. Telegram is
+an optional first channel behind the observer's replaceable delivery interface. The observer
+starts in recording mode; urgent rule alerts keep their independent delivery path.
 
 Before promoting an installation, verify its full composition, credential boundaries, telemetry
 freshness, actual notification delivery, restart behavior and restore procedure. Optional services

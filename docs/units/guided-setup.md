@@ -14,9 +14,19 @@ umask before initializing the platform. Windows guided application is unsupporte
 
 The existing `lo-deployment` command is unaffected; the HTTP operations below are the
 shared mechanism for a manual client and an assistant. A command-line integration
-may call them with its own authenticated client. `create_app` accepts the integration
-objects explicitly; it does not discover runner credentials or enable execution from
-environment variables.
+uses `lo-guided-setup --url https://platform.example.test --token-file /run/secrets/CALLER`.
+Use `plan --profile profile.json`, then a separate human client's
+`decision PLAN_ID --decision approved --expires-at TIMESTAMP`, then `request PLAN_ID`.
+Only the configured runner's client can call `apply PLAN_ID`; `verify PLAN_ID` checks the result.
+The profile cannot select the caller's role or credential.
+
+Platform startup enables guided setup only when both `LO_GUIDED_SETUP_ROOT` and
+`LO_GUIDED_SETUP_RUNNER` are supplied. The root is the existing protected configuration
+directory; the identity must have its own executor credential in the platform role map.
+`LO_TRUSTED_RUNNERS_FILE` separately selects an exact version-1 JSON object with
+`schema_version: 1` and `runners: {identity: [binding, ...]}`. Blank, partial or invalid
+configuration refuses startup. With these settings absent, existing platform behavior remains.
+Use a private creation umask and an owned 0600 database before enabling either service.
 
 | Request | Credential | Body / result |
 |---|---|---|

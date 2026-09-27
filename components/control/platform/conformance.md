@@ -176,14 +176,13 @@ container.
    /v1/actions` shows the proposal, and `GET /v1/audit` carries the `action.proposed` row naming that
    agent's identity — the audit trail chat integration asks for, written by a request no human signed. Approve
    that proposal with a human credential. As the `proposer`, `execute_action` still returns
-   `execute_action needs role executor`; as the `executor`, it returns the tool error
-   `Execution unavailable: no trusted runner handoff exists; no action was claimed`.
-   Repeat the execution call: the action remains approved, execution rows are unchanged and no
-   platform audit row is added. No response carries an execution id, runner credential or parameter
-   document. The trusted Dagu runner can still claim the approved action directly and use its existing
-   journal, dispatch and outcome path; exercise that path only with the isolated synthetic action
-   and reviewed DAG binding described in the Dagu conformance procedure. MCP execution remains
-   unavailable until a trusted handoff is implemented; there is no configuration switch that enables it.
+   `execute_action needs role executor`. With no trusted handoff, the executor request refuses
+   without consuming approval. With a reviewed immutable binding and independent runner, it returns
+   only queue status. Repeat the request and verify one queue entry, one recoverable runner claim
+   and at most one dispatch. Interrupt before/after claim and external acknowledgement: recovery
+   must reconcile uncertainty without a second start. No tool response may contain the runner token.
+   Follow the [trusted handoff contract](../../../docs/units/guided-setup.md) and use only the
+   isolated synthetic action; source tests do not establish live immutable-mount acceptance.
 7. **Nothing secret leaked while any of this ran.** `grep -R` the deployment directory, including
    container logs and the audit export, for each `bearer_token` and `platform_token` value in the map
    and for the runner token: zero hits. Expect the same from the tool list and the descriptions: no

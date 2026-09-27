@@ -22,5 +22,8 @@ its injected boundaries allow tests without a live deployment.
 
 | Unit | Responsibility |
 |---|---|
+| [Observer](units/observer.md), `local_observe/observer/` | Scheduled investigations, protected evidence, independent feedback and delivery state |
+| [Guided setup](units/guided-setup.md), `local_observe/deployment/guided.py` | Exact setup plans, human decisions and trusted apply |
+| Evaluation, `local_observe/evaluation/` | Shared-evidence comparisons, unknown labels and independent quality measurements |
 | [Refusal audit](units/refusal-audit.md) | Durable refusal records and bounded dispatch |
 | Shared HTTP, `local_observe/http.py` | Explicit client trust configuration shared by integrations; no global TLS changes |

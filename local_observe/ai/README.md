@@ -19,10 +19,10 @@ map only, so the two do not drift.
 
 1. **A consumer may not use a capability the manifest marks `unknown` or `false`** — stated once, in
    `capability.py`, and reached through `capability.require()` rather than re-derived at call sites.
-2. **Nothing outside this package imports it.** `tests/test_ai_component.py` walks `local_observe/`
-   and fails on a second importer, which is how "Rules and operator workflows work without
-   generation" (`docs/COMPONENTS.md`, the `ai` row) stays true instead of becoming a hope. Consumers
-   import lazily and keep their own floor: rca on its rules (investigation component), chat on the portal (chat integration).
+2. **Only documented optional consumers import it.** `tests/test_ai_component.py` walks
+   `local_observe/` and requires a reason for each allowed importer. The observer constructs
+   its policy-gated client lazily for a model call. Telemetry and urgent rule workflows keep
+   working with generation disabled; unavailable models produce explicit coverage failures.
 
 There is no second rule about the store: this package imports no query builder, no `Store` and no
 HTTP path to ClickHouse, so it *cannot* re-run a query to replace expired evidence. That absence is

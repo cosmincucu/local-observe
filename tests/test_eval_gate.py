@@ -49,7 +49,8 @@ class EvaluationGateTests(unittest.TestCase):
         inputs = [self.event(1), self.event(0, resource='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2'),
                   self.event(0, kind='threshold')]
         result = score(corpus, inputs)
-        self.assertEqual((result['true_positives'], result['false_positives']), (0, 3))
+        self.assertEqual((result['true_positives'], result['false_positives']), (0, 2))
+        self.assertEqual(result['unlabelled_findings'], 1)  # Removed truth leaves hour one unlabelled.
         self.assertEqual(score(corpus, [self.event(0)])['true_positives'], 1)
 
     def test_fires_everywhere_fails_explicit_test_policy_unwired_never_passes(self):

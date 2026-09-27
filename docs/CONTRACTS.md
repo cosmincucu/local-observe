@@ -522,7 +522,14 @@ and durable volume are mandatory. Use database transactions for related state
 changes and an outbox for notifications and analytical copies. The derived
 inventory database is separate and is never used to store approvals.
 
-The platform schema is v9. The v8-to-v9 step adds one index, `incident_members_condition` over
+The platform schema is v10. The v9-to-v10 step adds `runner_approvals`, `runner_requests`
+and `setup_plans` for exact human approvals and durable trusted handoffs. It does not rewrite
+existing incident, action or verification rows. The explicit migration makes and verifies a
+pre-migration backup; rollback requires that compatible backup. Setup and runner configuration
+remain optional. See [guided setup](units/guided-setup.md) for approval binding, recovery and
+the separate proposer, human and runner identities.
+
+The v8-to-v9 step adds one index, `incident_members_condition` over
 `incident_members(condition_key)`, for the one read that asks how many openings a group swallowed for one
 condition (`platform/suppression.py::_absorbed_openings`, inside the flap count). That table's primary key
 leads with `incident_id`, so the read by condition had no index to take and walked the whole link table;

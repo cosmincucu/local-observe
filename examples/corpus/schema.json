@@ -9,7 +9,7 @@
     "id": {"type": "string", "minLength": 1, "maxLength": 64},
     "origin": {"enum": ["generated-demo", "anonymized-example"]},
     "evaluation": {"$ref": "#/$defs/window"},
-    "incidents": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
+    "incidents": {"type": "array", "minItems": 0, "maxItems": 128, "items": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "resource_id", "window", "expected_class"],
       "properties": {
@@ -19,7 +19,7 @@
         "expected_class": {"enum": ["availability", "coverage", "threshold", "drift", "anomaly", "security"]}
       }
     }},
-    "quiet": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/window"}},
+    "quiet": {"type": "array", "minItems": 0, "maxItems": 128, "items": {"$ref": "#/$defs/window"}},
     "series": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
       "type": "object", "additionalProperties": false, "required": ["resource_id", "metric", "rows"],
       "properties": {

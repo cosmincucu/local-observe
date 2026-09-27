@@ -78,7 +78,7 @@
     },
     "maximum_tools": 10,
     "action_pairs": 1,
-    "pair": "propose_action -> execute_action, and exactly that: `propose` and `execute` are each one tool in tools.CAPABILITIES, which registers more than one of either as a defect. `execute_action` refuses before any platform request because no trusted runner handoff exists , so this image can file a request for a human and cannot satisfy one.",
+    "pair": "propose_action -> execute_action, exactly one of each. Proposals require an independent human decision. Execution requests an approved, allowlisted trusted handoff and returns queue status; the independent runner alone owns claim and dispatch. Without configured handoff, execution refuses.",
     "count_note": "\"exactly one pair\" is a count here, not an adjective: 4 reads always, up to 6 reads with both optional capabilities mounted, 2 gated tools, 10 maximum."
   },
   "credentials": {

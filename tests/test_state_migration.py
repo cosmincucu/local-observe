@@ -45,7 +45,8 @@ V1_TABLES = {'actions', 'audit', 'conditions', 'events', 'evidence', 'executions
 # `tests/test_incident_grouping_migration.py`).
 CURRENT_TABLES = V1_TABLES | {'notification_control', 'notification_reservations',
                               'notification_suppressions', 'verification_bindings',
-                              'verification_records', 'incident_members'}
+                              'verification_records', 'incident_members', 'runner_approvals',
+                              'runner_requests', 'setup_plans'}
 PROBE_V2 = 'CREATE TABLE migration_probe(x);\n'
 PROBE_V3 = 'CREATE TABLE migration_probe_v3(x);\n'
 PROBE_V4 = 'CREATE TABLE migration_probe_v4(x);\n'

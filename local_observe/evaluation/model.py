@@ -95,8 +95,9 @@ def validate(value):
     evaluation = window(value['evaluation'])
     start, end = timestamp(evaluation['start']).timestamp(), timestamp(evaluation['end']).timestamp()
     for field in ('incidents', 'quiet', 'series'):
-        if not isinstance(value[field], list) or not 1 <= len(value[field]) <= MAX_ITEMS:
-            raise CorpusError('Corpus lists must contain 1..128 items')
+        minimum = 1 if field == 'series' else 0
+        if not isinstance(value[field], list) or not minimum <= len(value[field]) <= MAX_ITEMS:
+            raise CorpusError('Corpus lists exceed bounds; at least one series is required')
     truth, quiet, series = [], [], []
     seen = set()
     for item in value['incidents']:

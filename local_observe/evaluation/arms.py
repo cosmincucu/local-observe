@@ -1,4 +1,4 @@
-"""Real threshold/seasonal evaluators, an explicit shaping baseline, and an unwired judge."""
+"""Threshold/seasonal evaluators and shaping baseline; model use is an explicit report opt-in."""
 import datetime as dt
 import math
 from statistics import mean, pstdev
@@ -64,7 +64,7 @@ def judge(name, context, *, index_path):
         raise CorpusError('Unknown arm')
     if name == 'llm-rca':
         return {'status': 'unwired', 'findings': [],
-                'reason': 'No callable rule-first RCA/LLM analyser in this product revision'}
+                'reason': 'Observer comparison requires an explicit protected output directory and model configuration'}
     start = timestamp(context['evaluation']['start']).timestamp()
     limits = threshold_defaults() if name == 'static-threshold' else {}
     result, missing, unknown_series = [], 0, 0

@@ -21,6 +21,8 @@ def build_manifest(corpus, *, revision, arms, exclusions):
                     'local_observe/store/client.py', 'local_observe/store/backends/memory.py']
     dependencies += [path.relative_to(ROOT).as_posix()
                      for path in sorted((ROOT / 'local_observe/evaluation').glob('*.py'))]
+    dependencies += [path.relative_to(ROOT).as_posix()
+                     for path in sorted((ROOT / 'local_observe/observer').glob('*.py'))]
     return {'schema_version': 1, 'fixture_set': corpus['id'], 'origin': corpus['origin'],
             'revision': revision, 'revision_authority': 'caller-supplied; source hashes recorded independently',
             'corpus_sha256': sha(canonical(corpus).encode('utf-8')), 'arms': list(arms),

@@ -43,6 +43,18 @@ Job adapters integrate Dagu and existing scheduled work without granting unrestr
 
 ## Interfaces and optional reasoning
 
+The built-in observer owns its schedule, bounded source catalogue and investigation journal.
+It can originate a finding without a pre-existing rule alert. Each cycle records coverage,
+redacted evidence, model/config provenance, visible tool results and a terminal outcome.
+Missing data and model failures remain distinct from quiet. Retained snapshots support replay
+after source telemetry expires; they belong in protected runtime storage and backups.
+
+Human grades and corrections use a separate authenticated boundary. Corrected eligible cases
+can be retrieved as untrusted evidence; neither model output nor delivery receipts create labels.
+Recording is the default. Model notifications have their own budget and require separately
+accepted quality evidence. Uncertain external sends require reconciliation before any retry.
+See the [observer contract](units/observer.md).
+
 Homepage provides navigation to native component interfaces. The platform UI exposes operational
 status, incidents and requested actions. The optional MCP service offers authenticated, bounded
 tools using the same policy boundaries.
@@ -50,6 +62,10 @@ tools using the same policy boundaries.
 Rule-based investigation assembles evidence and ranked causes. An optional model can explain
 that result within a capability and cost budget; it cannot manufacture evidence or authorize
 an action. Chat and model-serving candidates require separate configuration and validation.
+
+Guided setup binds a reviewed plan to exact inputs and destinations. Human approval and
+trusted execution remain separate from assistant proposal; the assistant receives status,
+never the runner capability. See [guided setup](units/guided-setup.md).
 
 ## Packaging and deployment
 

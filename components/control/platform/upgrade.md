@@ -1,5 +1,13 @@
 # Platform upgrades
 
+Current schema: **10**. The explicit migration adds `runner_approvals`, `runner_requests`
+and `setup_plans` without rewriting existing tables. Verify the pre-migration copy, then
+rehearse role separation, approval binding, queued requests, interrupted claims and repeat
+apply on an isolated restored copy. The observer journal and approved configuration need
+their own consistent backups. Old binaries cannot open schema 10; restore the compatible
+backup and reconcile external effects before dispatch. Earlier migration notes below retain
+their historical scope. See [guided setup](../../../docs/units/guided-setup.md).
+
 Pin the source revision, Python base digest, local image ID and complete
 dependency lock before testing. The build installs this component's own lock
 (requirements.in is the intent, requirements.lock the resolved closure: PyYAML,

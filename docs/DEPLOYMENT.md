@@ -4,8 +4,13 @@ Status: content and scoped runtime release contracts implemented, 2026-09-06.
 The platform/Homepage running upgrade rehearsal passes. This is not yet a
 whole-installation release manager or a production deployment tool. See
 [product philosophy](PRODUCT-PHILOSOPHY.md) for ownership and optional integrations.
-Product development stays in Gitea; sanitised releases later go to GitHub under
-development and public release authority. User deployment history is separate from both product histories.
+The public product repository is authoritative. A downstream staging repository may consume
+exact accepted snapshots without changing product ownership. Installation configuration has
+its own history; runtime data and secrets stay outside all source repositories.
+
+The [guided setup](units/guided-setup.md) contract covers an initial observer over existing
+services. A trusted runner applies exact human-approved configuration; it does not grant the
+assistant shell access or install arbitrary software. Preserve the manual installation path.
 
 ## Ownership and storage
 
@@ -150,7 +155,7 @@ validated there. A capture written before that contract is refused, never guesse
 baseline fails the version check (`Missing versioned source baseline`) and a schema-2 baseline
 carrying no layout is refused by the sentence naming the repair (`regenerate it with
 prepare_migration.py`). `--source` is required by all three readers: it names the checkout the
-capture describes, and the default that used to answer for it pointed at one person's workstation.
+capture describes. There is no installation-specific default source path.
 
 ## Runtime pins and state
 

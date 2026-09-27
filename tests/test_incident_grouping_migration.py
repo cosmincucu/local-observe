@@ -311,7 +311,7 @@ class GroupingMigrationTests(unittest.TestCase):
                                        ).fetchone()[0], 0)
 
     def test_a_v1_file_travels_the_whole_chain_and_arrives_at_grouping(self):
-        """Seven steps, one audit row each, and not one v1 finding, condition or incident rewritten.
+        """Nine steps, one audit row each, and not one v1 finding, condition or incident rewritten.
 
         Not rewound to the v7 build like the step-7 tests above: this is the file a very old install
         holds, and the claim it can make belongs to the newest build — every step it has ever shipped,
@@ -329,7 +329,7 @@ class GroupingMigrationTests(unittest.TestCase):
         self.assertEqual(self.audit_rows()[:len(audit_before)], audit_before,
                         'audit is append-only: the v1 rows are a prefix of the migrated ones')
         steps = [row['subject'] for row in moved.records('audit') if row['operation'] == 'schema.migrated']
-        self.assertEqual(sorted(steps), ['2', '3', '4', '5', '6', '7', '8', '9'])
+        self.assertEqual(sorted(steps, key=int), ['2', '3', '4', '5', '6', '7', '8', '9', '10'])
         # v3 added four columns to `outbox`; the seven v1-era values a row already held must be the same
         # rows in the same order, with this build's defaults filled in beside them.
         after = self.rows_of('outbox')
@@ -351,8 +351,7 @@ class GroupingMigrationTests(unittest.TestCase):
         is this step's claim, and a run that continued into step 9 would answer it with two indexes for a
         reason this test has nothing to do with.
         """
-        self.assertEqual(state.VERSION, 9, 'this test names step 8; the newest step this build ships has '
-                                           'moved, which is why the migration below is rewound to 8')
+        self.assertGreaterEqual(state.VERSION, 8)
         self.at(7)
         before, tables_before, indexes_before = self.snapshot(), self.objects('table'), self.objects('index')
         audit_before = self.audit_rows()
@@ -419,18 +418,18 @@ class GroupingMigrationTests(unittest.TestCase):
         self.assertIn(MEMBER_INDEX, indexes_before, 'the file an install runs today has step 8 in it')
         self.assertEqual(self.raw('PRAGMA user_version')[0][0], 8)
 
-        moved = self.migrate()
+        with self.as_build(9):
+            moved = self.migrate()
+            rows = [row for row in moved.records('audit') if row['operation'] == 'schema.migrated']
 
-        self.assertEqual(state.VERSION, 9, 'this test names its step; a later one moves it deliberately')
         self.assertEqual(moved.migrated_from, 8)
-        self.assertEqual(self.raw('PRAGMA user_version')[0][0], state.VERSION)
+        self.assertEqual(self.raw('PRAGMA user_version')[0][0], 9)
         self.assertEqual(self.objects('table'), tables_before, 'an index arrives with no new table')
         self.assertEqual(self.objects('index') - indexes_before, {CONDITION_INDEX},
                         'and with exactly one index, the one the contract names')
         self.assertEqual(self.snapshot(), before, 'migration 9 moves no business row')
         self.assertEqual(self.audit_rows()[:len(audit_before)], audit_before,
                         'and the audit table gained only its own migration row')
-        rows = [row for row in moved.records('audit') if row['operation'] == 'schema.migrated']
         self.assertEqual([(row['actor'], row['subject']) for row in rows], [('platform-migrate', '9')])
         detail = json.loads(rows[0]['detail'])
         self.assertEqual((detail['from'], detail['to']), (8, 9))

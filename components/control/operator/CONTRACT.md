@@ -33,8 +33,9 @@ reads on the single-token shape (`platform_status`, `platform_overview`, `record
 **ten** on the per-agent shape — those four plus `evidence_window`, `signal_series` and
 `topology_neighbourhood` (each of the last two present only when its store reader or inventory index is
 mounted), `component_boundary`, and **exactly one** gated pair: `propose_action` files a request that a
-human must decide, and `execute_action` refuses before any platform request because no trusted runner
-handoff exists. There is still **no approval tool here and none in MCP**: the decision is
+human must decide, and `execute_action` requests the configured trusted runner after approval.
+It returns queue status without a runner credential; an unconfigured handoff refuses.
+There is still **no approval tool here and none in MCP**: the decision is
 `POST /v1/actions/decision` under a `human` credential, which is what keeps agent self-approval
 rejectable. `records` stays bounded at 20 rows and every answer is budgeted at 64 KiB in both directions
 (a too-large request is a 413, a too-large answer is the refusal sentence, never a truncated document).

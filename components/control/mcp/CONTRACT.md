@@ -30,7 +30,7 @@ gated requests"*. chat integration supplies the shape; incident and action state
 | Streamable-HTTP only | `mcp.py::_serve` builds one FastMCP with `stateless_http=True, json_response=True`, and `/mcp` on container port 8003 is the only route | no session outlives a request, so the agent a message is answered as is the agent whose bearer arrived with it; there is no stdio transport and no SSE resource stream to test |
 | read tools **with an evidence envelope** | every answer is two `TextContent` blocks: the platform document byte-for-byte, then `{"provenance": {query_type, parameters, window, source, read_at}}` (`tools.Provenance`) | a read that carries no provenance is a fabrication path, which is why a new read is a row in two test files and not a function; `structuredContent` is gone — an answer with two halves has one schema for both |
 | exactly **one** `propose_action` → `execute_action` pair | `tools.CAPABILITIES = ('read', 'propose', 'execute')` and `ToolHints.__post_init__` refuse a second of either; §5 counts it | adding a second action tool is a decision, not a task, and the registry says so at import of the second one |
-| gated server-side, decision owned by the platform | the decision route is `/v1/actions/decision`, reached by a `human` credential from the operator UI; no tool names it | "agent self-approval rejection" is provable because the tool surface has no path to a decision — `propose_action` writes a proposal and `execute_action` refuses |
+| gated server-side, decision owned by the platform | the decision route is `/v1/actions/decision`, reached by a `human` credential; no tool names it | Proposing and requesting execution cannot create human approval; the trusted runner rechecks exact approved bindings |
 | per-agent static bearer tokens | the map in `LO_MCP_IDENTITIES`: `{"identity","role","bearer_token","platform_token"}` rows, one credential → one agent → one platform credential | an `action.proposed` audit row names an agent rather than "MCP". **These tokens identify requesters, not human approvers** — chat integration's own caveat, and `human` is a refused role (§4) |
 | read tokens cannot approve or execute | two gates, not one: `tools.authorize` refuses the tool before a request leaves the process, and `api.py`'s role gate refuses the platform route with the agent's own token | `404`-hiding a capability is not a gate: an agent hears "you may not", which is what makes a refusal auditable |
 | 64 KiB in, 64 KiB out | `mcp.MAX_REQUEST_BYTES` (the body, refused as 413 before the SDK parses) and `tools.MAX_RESULT_BYTES` (the answer, refused with v0.1's sentence *"Read exceeds evidence budget; use a smaller result limit"*) | two bounds that happen to agree are not one bound; a truncated document wearing a success is the failure either of them exists to stop |
@@ -118,21 +118,19 @@ hiding a tool is not a gate, and "you may not" is the answer an agent should hea
 current API contract does not expose that field. `retry_key` makes the filing idempotent, so a doubled request is one `action_id` and one offer
 to approve.
 
-**What `execute_action` returns**: a tool error — `Execution unavailable: no trusted runner handoff
-exists; no action was claimed` — for an `executor`, and the role refusal for anyone else. It raises before
-any platform request, consumes no approval, writes no execution row and adds no audit row, however often
-it is called. Claiming mints a single-use runner credential of which the platform keeps only a digest;
-withholding that credential from the caller without durably handing it to a runner would strand the
-execution. The Dagu runner keeps its own direct claim/journal/dispatch/outcome path and is unaffected.
-Whether the handoff becomes a card, a Dagu-side item or a decision is an open question for the reviewer,
-not a gap this component quietly fills.
+**What `execute_action` returns**: an executor receives a durable queue receipt for an
+already approved action with a configured trusted runner. Other roles are refused. The
+platform rechecks approval, policy and the reviewed runner binding. No runner credential
+is returned to the assistant. Without a configured handoff, execution remains unavailable.
+The independent runner journals its own capability before claiming, then dispatches or
+reconciles an uncertain execution. See [trusted handoff](../../../docs/units/guided-setup.md).
 
 **The annotations, and the one the registry refuses.** Both gated tools announce
 `readOnlyHint: false`; `propose_action` is `idempotentHint: true`, `execute_action` is not; both are
 `destructiveHint: false`, and `ToolHints.__post_init__` **refuses to register** a propose or execute tool
 that claims otherwise ("Neither tool of the action pair is destructive: one files a request and the other
-refuses until a trusted runner handoff exists"). That is a truthful statement rather than a modest one:
-neither tool can mutate a monitored system from here.
+requests an approved, policy-bound trusted handoff"). The tool itself never runs a job;
+the independently authenticated runner owns the eventual external effect.
 
 **No `store_query` exists**, and none is planned: the registry *is* the surface
 (`tests/test_mcp_surface.py` compares the bytes a client receives against `descriptors()` in both

@@ -11,6 +11,9 @@ Update related implementation, tests and documentation in the same change.
 | Documentation navigation | `README.md`, `STATUS.md`, `docs/STRUCTURE.md` and `docs/COMPONENTS.md`; repair links when paths change. |
 | Example compositions | `examples/`, `scripts/check_foundation.py` and `tests/test_foundation_checks.py`; keep credentials, required variables and port bindings consistent. |
 | Public command interfaces | `pyproject.toml`, CLI implementations, command tests and installation documentation. |
+| Observer and learning records | `local_observe/observer/`, `tests/test_observer*.py`, `docs/units/observer.md`; update private-state schema, capture policy, adapters, limits and recovery together. |
+| Guided setup and execution | `local_observe/deployment/guided*.py`, `local_observe/platform/runner_handoff.py`, action/API/MCP tests and `docs/units/guided-setup.md`; preserve human approval and runner isolation. |
+| Observer quality | `local_observe/evaluation/`, `examples/corpus/schema.json`, `tests/test_eval*.py`, `tests/test_observer_evaluation.py`, `tests/tiers.py`; preserve unknown labels and truth separation. |
 | Vendor attribution | `LICENSE`, `NOTICE` and `local_observe/platform/static/LUCIDE-LICENSE`; preserve upstream notices. |
 | Component: ai | `components/control/ai/`; update its contract, manifest, pins, conformance, backup and upgrade instructions together with consumers in `examples/`. |
 | Component: anomaly | `components/control/anomaly/`; update its contract, manifest, pins, conformance, backup and upgrade instructions together with consumers in `examples/`. |

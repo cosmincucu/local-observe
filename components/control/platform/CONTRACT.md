@@ -6,13 +6,17 @@ The platform alone owns incidents, canonical intake, approvals, execution claims
 notification attempts/outbox, immutable verification bindings/observations and append-only audit.
 Verification storage is in-process only and defaults off; no new HTTP route or automatic
 recovery is provided. See [the unit contract](../../../docs/units/verification-records.md).
-SQLite application ID 0x4c4f5001, a schema version this build names explicitly (4 since the verification storage migration; every file older
+SQLite application ID 0x4c4f5001, schema version 10 (every file older
 than the build is refused until `lo-platform migrate` runs), WAL, synchronous FULL and
 related-state transactions provide the initial persistence boundary. Inventory and observed
 databases are
 separate. An OS-held lock prevents two service processes from running concurrently.
 CLI maintenance with database write access is trusted administration, not an agent
 API. Run one Uvicorn worker; do not copy SQLite while ignoring WAL.
+
+Schema 10 adds setup plans, human binding approvals and trusted runner requests. The
+observer has a separate private journal; back up both selected state stores and configuration.
+Reconcile external effects before resuming execution or delivery after restoring an older copy.
 
 Intake v1 accepts source retry identity, nullable resource UUID, classification,
 severity, status, rule/version, bounded evaluation window and evidence references.
@@ -129,14 +133,12 @@ not answered as an empty neighbourhood: "nothing depends on this" and "this is n
 different answers and only one of them is data. `component_boundary` is the component graph, which the platform holds but
 ships no route for; it answers for agents and stops being absent from the HTTP surface.
 
-**One action pair, with execution unavailable.** `propose_action` posts to `/v1/actions`.
-`execute_action` requires the mounted `executor` role, then refuses before any platform request:
-`Execution unavailable: no trusted runner handoff exists; no action was claimed`. No trusted handoff
-is implemented or configurable here. Claiming and withholding the new runner credential would consume
-the approval without giving a runner the means to complete it, so the tool does not claim at all.
-An approved action remains available to the existing Dagu runner's direct claim, journal, dispatch and
-outcome path. Repeated MCP calls create no executions, expire no approvals and add no platform audit
-rows. They return a local tool error, without making a claim about the action's current state.
+**One action pair, with trusted execution.** `propose_action` posts to `/v1/actions`.
+`execute_action` requires the mounted `executor` role and requests a durable handoff for an
+already approved action. The platform requires an allowlisted runner and exact human-reviewed
+binding. It returns queue status, never a runner credential. The independent runner owns its
+journal, claim, dispatch and outcome. Missing configuration refuses without consuming approval.
+See [guided setup and trusted execution](../../../docs/units/guided-setup.md).
 
 The registry first checks the role mounted in the identity map: `propose_action needs role proposer`,
 `execute_action needs role executor`. These refusals also make no platform call

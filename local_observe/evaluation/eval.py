@@ -19,7 +19,7 @@ def score(corpus, findings, *, min_precision=None, point_adjust=False):
         raise CorpusError('Findings must be a bounded list')
     now = timestamp(corpus['evaluation']['end'])
     credited, seen = set(), set()
-    tp = fp = duplicates = non_firing = 0
+    tp = fp = duplicates = non_firing = unknown = 0
     for finding in findings:
         validate_event(finding, now)
         if finding['status'] != 'firing':
@@ -31,6 +31,8 @@ def score(corpus, findings, *, min_precision=None, point_adjust=False):
             continue
         seen.add(identity)
         at = timestamp(finding['observed_at'])
+        if not timestamp(corpus['evaluation']['start']) <= at < now:
+            raise CorpusError('Finding is outside the evaluation window')
         matches = [truth for truth in corpus['incidents']
                    if truth['resource_id'] == finding['resource_id']
                    and truth['expected_class'] == finding['kind']
@@ -38,16 +40,20 @@ def score(corpus, findings, *, min_precision=None, point_adjust=False):
         if matches and matches[0]['id'] not in credited:
             credited.add(matches[0]['id'])
             tp += 1
-        else:
+        elif any(timestamp(window['start']) <= at < timestamp(window['end'])
+                 for window in corpus['quiet'] + [row['window'] for row in corpus['incidents']]):
             fp += 1  # Extra findings for an already credited incident still cost precision.
+        else:
+            unknown += 1  # An unlabelled interval supplies neither positive nor negative truth.
     fn = len(corpus['incidents']) - tp
     precision = tp / (tp + fp) if tp + fp else None
-    recall = tp / (tp + fn)
+    recall = tp / (tp + fn) if tp + fn else None
     duration = (now - timestamp(corpus['evaluation']['start'])).total_seconds()
     return {'true_positives': tp, 'false_positives': fp, 'false_negatives': fn,
             'precision': precision, 'recall': recall, 'duplicates': duplicates,
             'non_firing': non_firing, 'findings': tp + fp,
-            'findings_per_day': (tp + fp) * 86400 / duration,
+            'unlabelled_findings': unknown, 'total_findings': tp + fp + unknown,
+            'findings_per_day': (tp + fp + unknown) * 86400 / duration,
             'matched': sorted(credited),
             'verdict': ('measured' if min_precision is None else
                         'pass' if precision is not None and precision >= min_precision else 'fail')}

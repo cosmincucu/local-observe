@@ -1,5 +1,11 @@
 # Installation
 
+For an observer over existing services, use [guided setup](units/guided-setup.md), then
+the [observer walkthrough](units/observer.md). You need a bounded read source, an explicitly
+configured model and protected runtime storage. Start with recording; configure a phone
+channel separately. The manual foundation installation below remains supported and runs
+without a model. Guided configuration does not install or validate third-party services.
+
 For interactive component access, begin with [account setup](OPERATOR-SETUP.md).
 Choose credentials once, use Homepage as the main page, and follow the generated
 handoff for components that require native registration. Machine credentials

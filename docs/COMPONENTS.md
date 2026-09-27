@@ -12,6 +12,8 @@ contract and run its conformance checks before relying on it.
 | [Windows agent](../components/data/agent-windows/CONTRACT.md) | Windows host telemetry | Selected hosts |
 | [Inventory](../local_observe/inventory/README.md) | Declarations, discovery and resource relationships | Operational workflows |
 | [Platform](../local_observe/platform/README.md) | Incidents, approvals, notifications and audit state | Operational workflows |
+| [Observer](units/observer.md) | Bounded scheduled investigation and retained evidence | Optional model use; recording by default |
+| [Guided setup](units/guided-setup.md) | Plan, approve, apply and verify observer configuration | Existing services; trusted runner required to apply |
 | [Homepage](../components/control/homepage/CONTRACT.md) | Navigation and status tiles | Optional |
 | [Dagu](../components/control/dagu/CONTRACT.md) | File-based job definitions and execution adapter | Optional |
 | [Job observation](../components/control/job-observe/CONTRACT.md) | Check-ins and missed-run visibility | Optional |
@@ -53,3 +55,5 @@ The catalog and component manifests use these values. "Built" below describes so
 | Approved action | A proposed action requires approval, executes once within its bounds and records an audit trail. |
 | Operator surfaces | Homepage, MCP and the operator view agree on incident and approval status; disabled and stale states are visible; the phone layout remains usable. |
 | Investigation | Evidence is bounded and attributable; missing sources remain visible; optional AI output cannot execute actions. |
+| Observer recovery | Reopen retained evidence and corrections after source expiry; uncertain sends stay quarantined. |
+| Guided setup | Unapproved, stale or changed plans cannot apply; repeating an accepted plan verifies the same files. |

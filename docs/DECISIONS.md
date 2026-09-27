@@ -17,6 +17,17 @@ These choices define the product. Implementation and deployment requirements are
   integration; any enforcement requires explicit policy and protected-address exclusions.
 - AI, model serving, chat and remote providers are optional. Remote inference requires an explicit
   opt-in, bounded cost and controlled data disclosure. Explanations cannot authorize actions.
+- The product owns a bounded scheduled observer; external assistants can use its tools. A rule
+  alert is not required before investigation. Structured source queries, retained redacted
+  evidence and explicit coverage make each finding reviewable and replayable.
+- Human usefulness, correctness, outcome and corrected answer are separate feedback fields.
+  Unknown labels stay unknown. Retrieval and independent evaluation precede training; export
+  requires corrected, eligible evidence and does not imply a fine-tuning job has run.
+- Model findings use a separate notification budget after accepted evaluation. Urgent rule
+  notifications remain independent. Telegram is an optional initial adapter with a replaceable
+  channel boundary; it is not a required product account.
+- Setup proposals, human decisions and trusted runner execution use separate permissions.
+  Apply binds exact reviewed bytes and rejects stale plans; assistants never receive runner tokens.
 - Notification channels share the platform's approval model. A channel cannot create a second
   source of action authority. Unknown delivery outcomes remain visible.
 - Installation data, private operational records and secret values do not belong in product source.

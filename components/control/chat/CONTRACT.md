@@ -33,7 +33,7 @@ does not exist and this component argues it should not (section 9).
 | `signal_series` | **only when the MCP process was handed a store reader** | same two gates, plus `platform/query.py`'s evidence reauthorisation. Given no `LO_CLICKHOUSE_URL` the tool is **absent from the surface** rather than present and answering "unconfigured" (`query.open_reader` logs one line naming the variable and returns `None`) |
 | `topology_neighbourhood` | **only when the process was handed `LO_INDEX_PATH`** | a capability of that process, not of the token; the same two gates |
 | `propose_action` — one half of the gated pair | **yes**: it is exactly what this surface is for | server side: the tool's role hint names `proposer` (`ToolHints.roles`), so a reader row meets a refusal naming the role it lacked, and `Store.propose_action` then requires `proposer` or `human`; the requester written to the audit row is the authenticated identity and no body field is read as one |
-| `execute_action` — the other half | **no** | the tool's role hint names `executor`, so a `proposer` credential cannot reach it; **and** the handler (`local_observe/platform/tools.py::execute_tool`) raises before any platform request (*"Execution unavailable: no trusted runner handoff exists"*), so no MCP credential of any role claims anything through this surface — the Dagu runner claims directly over the API |
+| `execute_action` — the other half | **no** | the tool requires `executor`, so a chat proposer cannot reach it. A separately granted executor can request an approved trusted handoff; only the independent runner claims and dispatches. |
 | *approve / deny* (the decision) | **no, and not a tool at all** | the only writer is `POST /v1/actions/decision`, whose role gate admits `human` alone (`state.py::Store.decide`), which no MCP tool wraps, and which the identity map may never be handed: `tools.identity_rows` refuses a row whose role is `human`, `producer` or `summary` |
 | *claim / outcome* for a runner | **no** | role `executor`, and `Store.execution_outcome` additionally refuses a runner whose identity or token does not match the claim |
 
@@ -96,11 +96,10 @@ Three refusals carry this, all of them existing behaviour, all of them tested he
    `tests/test_chat_approval_separation.py::ChatCannotApproveTests`.
 2. **The surface cannot dispatch.** `Store.claim_action` admits role `executor` only, so even an
    action a human *did* approve cannot be claimed by `chat-<label>`. Same test class. There is a
-   second, stronger lock on the MCP path specifically: the `execute_action` **tool** raises
-   *"Execution unavailable: no trusted runner handoff exists; no action was claimed"* before it opens a
-   platform request, so no MCP credential of any role — executor included — claims through the tool
-   surface at all. That is why this row's `If disabled` clause can say *"direct MCP clients remain"*
-   without implying an MCP path to execution.
+   separate trusted boundary on the MCP path: an explicitly granted executor may request a
+   durable handoff, but only the independently authenticated runner receives claim authority.
+   The configured human-reviewed binding, policy and expiry remain mandatory. A chat proposer
+   cannot approve or claim; the trusted runner must never share its credential with chat.
 3. **The surface cannot launder an approval through a notification code.** `POST /v1/callbacks/{channel}`
    exists since notifications and its role gate admits `human`, `proposer` **and** `executor`
    (`state.py::Store.record_callback`). That is deliberate and it is the one place a `proposer` token reaches an

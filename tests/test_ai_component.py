@@ -25,10 +25,15 @@ import check_foundation as checks
 COMPONENT = ROOT / 'components' / 'control' / 'ai'
 PACKAGE = ROOT / 'local_observe' / 'ai'
 # Paths allowed to import the ai package outside it, each with the one-sentence reason it earns the
-# exception. Empty on purpose: the `If disabled` column has no exception yet, and an entry without a
-# reason is treated as a failure by the test below, the same way `CREDENTIAL_ENV_EXCEPTIONS` in
+# exception. An entry without a reason is treated as a failure by the test below, the same way
+# `CREDENTIAL_ENV_EXCEPTIONS` in
 # scripts/check_foundation.py refuses a blank waiver.
-ALLOWED_IMPORTERS: dict[str, str] = {}
+ALLOWED_IMPORTERS: dict[str, str] = {
+    'local_observe/observer/adapters.py':
+        'The optional observer lazily constructs the policy-gated client only for a model call.',
+    'local_observe/deployment/guided.py':
+        'Opt-in guided profiles validate a supplied capability manifest without invoking a model.',
+}
 
 
 def product_modules():

@@ -952,7 +952,10 @@ def app_factory() -> Callable[..., Awaitable[None]]:
     # no socket and no environment, and every refusal above it still happens first.
     from . import crowdsec  # noqa: F401  (imported for the adapter registration, which is its whole effect)
     intake_rules = intake.rules_from_environment()
+    policy = action_policy(os.environ['LO_INDEX_PATH'], definitions)
+    from local_observe.deployment.setup_service import configured_services
+    handoff, setup = configured_services(store, policy, os.environ)
     return create_app(store, credentials,
-                      action_policy(os.environ['LO_INDEX_PATH'], definitions), clients or None,
+                      policy, clients or None,
                       os.environ['LO_INDEX_PATH'], display, os.environ.get('LO_OVERVIEW_PATH'),
-                      intake_rules)
+                      intake_rules, runner_handoff=handoff, guided_setup=setup)

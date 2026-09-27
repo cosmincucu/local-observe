@@ -1,8 +1,15 @@
 # Product, deployments and customisations
 
-local-observe provides reusable telemetry and operational workflows for your installation.
+local-observe watches configured systems, investigates changes and helps a person decide
+what needs attention. Guided setup and bounded observation share explicit permissions;
+the assistant cannot approve its own plan or acquire the trusted runner's credentials.
 The public product repository is the source of truth. Installations consume pinned
 releases and maintain their own configuration and protected runtime state.
+
+The observer preserves redacted evidence and independently corrected outcomes. Retrieval
+comes before training; unreviewed cases and the model's own confidence are not labels.
+Incomplete observation stays visible. A quiet conclusion requires adequate evidence, and
+model failure must not interrupt telemetry collection or urgent rule notifications.
 
 ## Two histories, one deployment
 
@@ -93,11 +100,10 @@ Unknown state versions fail closed until an explicit migration/restore path exis
 
 ## Current implementation boundary
 
-The supported installation experience is not a suite of hand-ordered staging
-scripts. The core should have one versioned deployment entrypoint; selected host
-integrations need explicit, packaged enrollment and lifecycle support. Runbooks
-explain recovery and exceptions, not missing install automation. This remains
-Validate installation and lifecycle behavior using the selected component contracts.
+The guided setup path prepares an exact reviewable profile and applies it through a
+trusted boundary. The manual installation path remains available. Selected integrations
+need explicit enrollment, lifecycle and acceptance checks; a generated profile alone
+does not prove a working installation. Validate the selected component contracts.
 
 See [the deployment contract](DEPLOYMENT.md), [migration plan](MIGRATION.md) and
 [STATUS](../STATUS.md) for implemented and rehearsed scope. This philosophy is
