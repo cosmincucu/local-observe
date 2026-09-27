@@ -23,6 +23,7 @@ lo-deployment = "local_observe.deployment.cli:main"
 lo-operator-setup = "local_observe.deployment.operator_setup:main"
 lo-observer = "local_observe.observer.cli:main"
 lo-guided-setup = "local_observe.deployment.guided_cli:main"
+lo-trusted-runner = "local_observe.platform.runner_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["local_observe*"]

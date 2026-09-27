@@ -57,7 +57,8 @@ def assess(corpus, runs, *, observer='llm-rca', observer_flip_rate):
     corpus = validate(corpus)
     if not isinstance(runs, list) or len(runs) != 3:
         raise CorpusError('Quality assessment requires exactly three runs')
-    if observer_flip_rate is not None and (type(observer_flip_rate) not in (int, float) or not math.isfinite(observer_flip_rate)
+    if observer_flip_rate is not None and (
+            type(observer_flip_rate) not in (int, float) or not math.isfinite(observer_flip_rate)
             or not 0 <= observer_flip_rate <= 1):
         raise CorpusError('Observer flip rate must be in 0..1')
     truth = {row['id']: row['expected_class'] for row in corpus['incidents']}
