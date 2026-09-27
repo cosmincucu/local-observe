@@ -15,10 +15,10 @@ The two promises the shape carries.
   A read that found nothing returns an explicit empty (``{'rows': []}``, ``{'status': 'unavailable'}``),
   never a missing key and never a fabricated row: an empty window and an unreachable store are different
   answers and both are sayable.
-* **One action pair, with execution unavailable** (chat integration). ``propose_action`` files a request whose
+* **One action pair, with a trusted runner handoff**. ``propose_action`` files a request whose
   requester is the *authenticated* agent identity. ``execute_action`` checks the ``executor`` role,
-  then refuses before any platform request until a trusted runner handoff exists. Approvals remain
-  available to the Dagu runner. The human decision is ``state.decide`` reached
+  then requests durable dispatch through the configured platform queue. A deployment without a
+  runner refuses. Only the independent runner claims the action. The human decision is ``state.decide`` reached
   over the authenticated API with a human credential — no tool here can cast that vote, because no tool
   here is handed one: :func:`identity_rows` refuses a map row whose role is ``human`` ("Never give real
   human-role tokens to agents", ``components/control/platform/CONTRACT.md``). ``docs/CONTRACTS.md`` §5
@@ -38,9 +38,8 @@ string argument is a canonical UUID or a ``state.label``, whose alphabet holds n
 an argument cannot be a URL, a clause or a path, and the only table names are the ones
 ``state.Store.records`` already admits.
 
-No tool approves a request or runs a job. Execution stays visibly unavailable because claiming and
-discarding the runner credential would consume the approval without giving any runner the means to
-complete it. ``tests/test_platform_tools.py`` verifies approval preservation and the Dagu path.
+No tool approves a request or runs a job. The runner journals its own credential before claiming;
+the tool returns only queue status. ``tests/test_runner_handoff.py`` verifies the durable boundary.
 """
 from __future__ import annotations
 
@@ -93,7 +92,7 @@ CONTROL_CHARACTER = re.compile(r'[\x00-\x1f\x7f]')
 #: reader can tell the two groups apart instead of guessing.
 PROVENANCE_QUERY_TYPES = ('platform-status', 'platform-overview', 'record-window', 'observed-snapshot',
                           'evidence-window', 'metric-threshold', 'log-records', 'trace-spans',
-                          'declared-relations', 'product-contract', 'action-propose', 'action-claim')
+                          'declared-relations', 'product-contract', 'action-propose', 'action-claim', 'action-execute')
 PROVENANCE_KEYS = ('query_type', 'parameters', 'window', 'source', 'read_at')
 #: The columns a state row uses to hold a secret. No tool result may carry one as a key; the test over
 #: it names this tuple rather than guessing at a pattern.
@@ -738,13 +737,17 @@ def propose_tool(agent: Agent, *, retry_key: str, incident_id: str, action: str,
 
 
 def execute_tool(agent: Agent, *, action_id: str) -> ToolResult:
-    """Refuse without consuming approval while this surface has no trusted runner handoff.
-
-    Claiming creates a single-use runner credential. The platform retains only its digest, so
-    withholding it from the caller without durably handing it to a runner strands the execution.
-    The Dagu runner still owns its direct claim, journal, dispatch and outcome lifecycle.
-    """
-    raise ToolRefusal('Execution unavailable: no trusted runner handoff exists; no action was claimed')
+    """Enqueue an approved action; the independently authenticated runner owns its claim."""
+    if agent.role != 'executor':
+        raise ToolRefusal('Execution requires the executor role')
+    _bounded(identifier, action_id, 'action_id')
+    code, data = agent.client.request('POST', '/v1/actions/execute', {'action_id': action_id})
+    if code != 200 or not isinstance(data, dict) or data.get('queued') is not True:
+        raise ToolRefusal('Execution unavailable or refused by the trusted runner handoff: ' + _platform_code(data))
+    # Closed projection: even a malformed upstream reply cannot expose a runner credential.
+    return ToolResult({'action_id': action_id, 'queued': True, 'outcome': 'requested; consult execution records'},
+                      Provenance(query_type='action-execute', parameters={'action_id': action_id},
+                                 source=agent.identity))
 
 
 def _platform_code(data: Any) -> str:
@@ -879,9 +882,9 @@ def agent_registry(*, reader: Any = None, index_path: Any = None) -> ToolRegistr
                                  Argument('expires_at', 'timestamp', 'When this approval offer lapses')))
     registry.register('execute_action', execute_tool,
                       ToolHints(capability='execute', roles=('executor',), read_only=False),
-                      description='Execution is unavailable until a trusted runner handoff exists. '
-                                  'This tool refuses before any platform request and preserves approval '
-                                  'for the Dagu runner. It does not claim or dispatch an action.',
+                      description='Request durable handoff of an already approved action to a configured '
+                                  'trusted runner. Refuses when no runner is configured. '
+                                  'The runner owns claim and dispatch; no credential is returned here.',
                       arguments=(Argument('action_id', 'uuid', 'The action requested for execution'),))
     return registry
 

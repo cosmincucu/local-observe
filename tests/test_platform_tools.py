@@ -793,7 +793,7 @@ class ActionPairTests(PlatformTestCase):
         platform = self.fixture()
         action_id = platform.approved(expires_claim=True)
         before = platform.action_row(action_id)
-        with self.assertRaisesRegex(tools.ToolRefusal, 'no trusted runner handoff'):
+        with self.assertRaisesRegex(tools.ToolRefusal, 'trusted runner handoff'):
             platform.registry().invoke('execute_action', platform.agent('executor'),
                                        {'action_id': action_id})
         self.assertEqual(platform.action_row(action_id), before)
@@ -812,20 +812,20 @@ class ActionPairTests(PlatformTestCase):
         tables = ('actions', 'executions', 'audit')
         before = {table: platform.store.records(table, 100) for table in tables}
         for _ in range(3):
-            with self.assertRaisesRegex(tools.ToolRefusal, 'no trusted runner handoff'):
+            with self.assertRaisesRegex(tools.ToolRefusal, 'trusted runner handoff'):
                 platform.registry().invoke('execute_action', platform.agent('executor'),
                                            {'action_id': action_id})
             self.assertEqual({table: platform.store.records(table, 100) for table in tables}, before)
         self.assertEqual(platform.action_row(action_id)['status'], 'approved')
 
-    def test_execution_refuses_before_any_platform_request(self) -> None:
+    def test_execution_requests_handoff_without_claiming(self) -> None:
         counting = CountingDouble()
         agent = tools.Agent(identity='agent-run', role='executor', client=counting)
-        with self.assertRaisesRegex(tools.ToolRefusal, 'no trusted runner handoff'):
+        with self.assertRaisesRegex(tools.ToolRefusal, 'trusted runner handoff'):
             tools.agent_registry().invoke('execute_action', agent, {'action_id': HOST})
-        with self.assertRaisesRegex(tools.ToolRefusal, 'no trusted runner handoff'):
+        with self.assertRaisesRegex(tools.ToolRefusal, 'trusted runner handoff'):
             tools.execute_tool(agent, action_id=HOST)
-        self.assertEqual(counting.calls, [])
+        self.assertEqual(counting.calls, [('POST', '/v1/actions/execute')] * 2)
 
     def test_dagu_can_complete_an_action_after_mcp_refuses_and_recover_without_redispatch(self) -> None:
         from local_observe.platform import dagu
@@ -853,10 +853,10 @@ class ActionPairTests(PlatformTestCase):
         self.assertEqual(platform.call('POST', '/v1/actions/claim', {'action_id': action_id},
                                        platform.tokens['executor'])[0], 400)
 
-    def test_execution_of_a_pending_action_is_refused_locally(self) -> None:
+    def test_execution_of_a_pending_action_is_refused_without_runner(self) -> None:
         platform = self.fixture()
         answer = platform.proposal()
-        with self.assertRaisesRegex(tools.ToolRefusal, 'no trusted runner handoff'):
+        with self.assertRaisesRegex(tools.ToolRefusal, 'trusted runner handoff'):
             platform.registry().invoke('execute_action', platform.agent('executor'),
                                        {'action_id': answer['action_id']})
         self.assertEqual(platform.action_row(answer['action_id'])['status'], 'pending')

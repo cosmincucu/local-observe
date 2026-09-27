@@ -345,7 +345,7 @@ class TransportTests(unittest.TestCase):
                                          {'action_id': action_id})
                 self.assertTrue(result['isError'], result)
                 self.assertEqual(len(result['content']), 1, 'a refusal carries no claimed result')
-                self.assertIn('no trusted runner handoff', result['content'][0]['text'])
+                self.assertIn('trusted runner handoff', result['content'][0]['text'])
                 text = json.dumps(result)
                 self.assertNotIn('execution_id', text)
                 for secret in (*BEARERS.values(), *self.platform.tokens.values()):

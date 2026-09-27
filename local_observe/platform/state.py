@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 9
+VERSION = 10
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -541,11 +541,23 @@ CREATE INDEX {MEMBERS_CONDITION_INDEX} ON {GROUPING_TABLE}(condition_key);
 
 # target version -> the whole script that reaches it from the version below. MIGRATIONS[1] is the
 # original schema, so a fresh database and a migrated one end up built by the same text, and a fresh
-# database reaches v9 the same way an operational one does: by applying every script above, in order —
+# database reaches the current version by applying each script in order —
 # which is why the v5 step builds its index from `MIGRATIONS[2]`'s table and not from a special case.
+RUNNER_SCHEMA = '''
+CREATE TABLE runner_approvals (action_id TEXT PRIMARY KEY REFERENCES actions(id),
+    runner TEXT NOT NULL, binding_sha256 TEXT NOT NULL);
+CREATE TABLE runner_requests (action_id TEXT PRIMARY KEY REFERENCES actions(id),
+    requested_by TEXT NOT NULL, runner TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
+    requested_at TEXT NOT NULL);
+CREATE TABLE setup_plans (id TEXT PRIMARY KEY, payload TEXT NOT NULL,
+    requested_by TEXT NOT NULL, status TEXT NOT NULL, decided_by TEXT,
+    expires_at TEXT, runner TEXT NOT NULL, receipt TEXT);
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
-                              7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA}
+                              7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
+                              10: RUNNER_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
@@ -1565,17 +1577,23 @@ class Store:
                 return {'action_id': action_id, 'status': 'pending'}
 
     def decide(self, action_id: str, decision: str, actor: Actor, *,
-               now: dt.datetime | None = None) -> dict[str, Any]:
+               now: dt.datetime | None = None, binding_policy=None) -> dict[str, Any]:
         with self.refusal('decide', actor, action_id, now=now):
             require(actor, 'human')
+            identifier(action_id)
             if decision not in ('approved', 'denied'):
                 raise StateError('Invalid decision')
             now = clock(now)
             with self.transaction() as connection:
                 row = connection.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone()
-                if not row or row['status'] != 'pending':
+                if not row or (row['status'] != 'pending' and not
+                               (row['status'] == 'approved' and decision == 'denied')):
                     raise StateError('Action is not pending')
                 outcome = 'expired' if row['expires_at'] <= utc_text(now) else decision
+                if outcome == 'approved' and binding_policy is not None:
+                    runner, binding_sha256 = binding_policy(json.loads(row['payload']))
+                    connection.execute('INSERT INTO runner_approvals VALUES (?,?,?)',
+                                       (action_id, runner, binding_sha256))
                 connection.execute('UPDATE actions SET status=?,decided_by=? WHERE id=?',
                                    (outcome, actor.identity, action_id))
                 self.audit(connection, now, actor.identity, 'action.' + outcome, action_id)
@@ -1587,25 +1605,28 @@ class Store:
             require(actor, 'executor')
             now = clock(now)
             with self.transaction() as connection:
-                row = connection.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone()
-                if not row or row['status'] != 'approved':
-                    raise StateError('Action is not available for dispatch')
-                if row['expires_at'] <= utc_text(now):
-                    connection.execute("UPDATE actions SET status='expired' WHERE id=?", (action_id,))
-                    self.audit(connection, now, actor.identity, 'action.expired', action_id)
-                    return {'status': 'expired'}
-                payload = json.loads(row['payload'])
-                policy(payload)
-                if connection.execute('SELECT status FROM incidents WHERE id=?',
-                                      (payload['incident_id'],)).fetchone()[0] != 'open':
-                    raise StateError('Incident recovered; propose again only if needed')
-                execution_id, token = str(uuid.uuid4()), secrets.token_urlsafe(32)
-                connection.execute('INSERT INTO executions VALUES (?,?,?,?,?,?,?)',
-                    (execution_id, action_id, actor.identity, digest(token), 'executing', utc_text(now), utc_text(now)))
-                connection.execute("UPDATE actions SET status='executing' WHERE id=?", (action_id,))
-                self.audit(connection, now, actor.identity, 'execution.claimed', execution_id)
-                return {'execution_id': execution_id, 'runner_token': token, 'status': 'executing',
-                        'request': payload}
+                return self._claim_action(connection, action_id, actor, policy, now)
+
+    def _claim_action(self, connection, action_id, actor, policy, now, *, token=None):
+        """Shared claim gate; the handoff calls it inside its queue transaction."""
+        row = connection.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone()
+        if not row or row['status'] != 'approved':
+            raise StateError('Action is not available for dispatch')
+        if row['expires_at'] <= utc_text(now):
+            connection.execute("UPDATE actions SET status='expired' WHERE id=?", (action_id,))
+            self.audit(connection, now, actor.identity, 'action.expired', action_id)
+            return {'status': 'expired'}
+        payload = json.loads(row['payload'])
+        policy(payload)
+        if connection.execute('SELECT status FROM incidents WHERE id=?',
+                              (payload['incident_id'],)).fetchone()[0] != 'open':
+            raise StateError('Incident recovered; propose again only if needed')
+        execution_id, token = str(uuid.uuid4()), token or secrets.token_urlsafe(32)
+        connection.execute('INSERT INTO executions VALUES (?,?,?,?,?,?,?)',
+            (execution_id, action_id, actor.identity, digest(token), 'executing', utc_text(now), utc_text(now)))
+        connection.execute("UPDATE actions SET status='executing' WHERE id=?", (action_id,))
+        self.audit(connection, now, actor.identity, 'execution.claimed', execution_id)
+        return {'execution_id': execution_id, 'runner_token': token, 'status': 'executing', 'request': payload}
 
     def execution_outcome(self, execution_id: str, outcome: str, actor: Actor,
                           token: str | None = None, *,

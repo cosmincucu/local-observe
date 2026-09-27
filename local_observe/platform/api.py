@@ -235,8 +235,17 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                policy: Callable[[dict[str, Any]], None], notification_client: Any | None = None,
                index_path: Path | str | None = None, display_config: dict[str, Any] | None = None,
                overview_path: Path | str | None = None,
-               intake_rules: Mapping[str, Any] | None = None) -> Callable[..., Awaitable[None]]:
+               intake_rules: Mapping[str, Any] | None = None, *,
+               runner_handoff: Any | None = None,
+               guided_setup: Any | None = None) -> Callable[..., Awaitable[None]]:
     validate_credentials(credentials)
+    runner_ids = set(runner_handoff.runners) if runner_handoff is not None else set()
+    if guided_setup is not None:
+        runner_ids.add(guided_setup.runner)
+    for identity in runner_ids:
+        rows = [row for row in credentials if row['identity'] == identity]
+        if len(rows) != 1 or rows[0]['role'] != 'executor':
+            raise ValueError('A trusted runner requires its own executor credential')
     from .runtime import observe_startup
     mode = store.notification_policy.delivery_mode
     if mode == 'off':
@@ -641,6 +650,15 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 require(actor, 'reader', 'human', 'proposer', 'executor', 'summary')
                 if actor.role == 'summary' and path not in ('/v1/me', '/v1/overview'):
                     return await respond(403, {'error': 'summary_only'})
+                if path == '/v1/runner/requests' and runner_handoff is not None:
+                    return await respond(200, runner_handoff.pending(actor))
+                if path == '/v1/setup/pending' and guided_setup is not None:
+                    return await respond(200, guided_setup.pending(actor))
+                if path == '/v1/actions/review' and runner_handoff is not None:
+                    parameters = query_params(scope)
+                    if set(parameters) != {'action_id'} or len(parameters['action_id']) != 1:
+                        raise StateError('Action review requires one action identifier')
+                    return await respond(200, runner_handoff.review(parameters['action_id'][0], actor))
                 if path == '/v1/me':
                     return await respond(200, {'identity': actor.identity, 'role': actor.role})
                 if path == '/v1/inventory' and index_path:
@@ -736,7 +754,12 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(413, {'error': 'body_too_large'})
                 if not chunk.get('more_body'):
                     break
-            body = json.loads(raw)
+            if (path.startswith(('/v1/setup/', '/v1/runner/')) or path == '/v1/actions/execute'
+                    or (runner_handoff is not None and path == '/v1/actions/decision')):
+                from .runner_handoff import strict_request
+                body = strict_request(raw)
+            else:
+                body = json.loads(raw)
             if not isinstance(body, dict):
                 # Every POST branch reads named fields; a JSON array/scalar body is a client error,
                 # not the TypeError the field test would otherwise raise out of the handler.
@@ -758,10 +781,31 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 result = {'evidence_id': store.put_evidence(body, actor)}
             elif path == '/v1/actions':
                 result = store.propose_action(body, actor, policy)
-            elif path == '/v1/actions/decision' and set(body) == {'action_id', 'decision'}:
-                result = store.decide(body['action_id'], body['decision'], actor)
+            elif (path == '/v1/actions/decision' and {'action_id', 'decision'} <= set(body)
+                  <= {'action_id', 'decision', 'binding_sha256'}):
+                if runner_handoff is not None:
+                    result = runner_handoff.decide(body['action_id'], body['decision'],
+                                                    body.get('binding_sha256'), actor)
+                elif set(body) == {'action_id', 'decision'}:
+                    result = store.decide(body['action_id'], body['decision'], actor)
+                else:
+                    raise StateError('No runner binding configured')
             elif path == '/v1/actions/claim' and set(body) == {'action_id'}:
+                if runner_handoff is not None:
+                    # Configured handoffs must claim through the queue, including trusted runners.
+                    with store.refusal('claim', actor, body['action_id']):
+                        raise StateError('Direct claims disabled; use the trusted runner handoff')
                 result = store.claim_action(body['action_id'], actor, policy)
+            elif path == '/v1/actions/execute' and set(body) == {'action_id'}:
+                if runner_handoff is None:
+                    raise StateError('Execution unavailable: no trusted runner configured')
+                result = runner_handoff.enqueue(body['action_id'], actor)
+            elif path == '/v1/runner/claim' and set(body) == {'action_id', 'binding_sha256', 'runner_token'}:
+                if runner_handoff is None:
+                    raise StateError('Execution unavailable: no trusted runner configured')
+                result = runner_handoff.claim(body['action_id'], body['binding_sha256'], body['runner_token'], actor)
+            elif path.startswith('/v1/setup/') and guided_setup is not None:
+                result = guided_setup.request(path, body, actor)
             elif path == '/v1/notifications/retry' and set(body) == {'delivery_id'}:
                 result = store.retry_notification(body['delivery_id'], actor)
             elif path == '/v1/notifications/reset-safety' and not body:
