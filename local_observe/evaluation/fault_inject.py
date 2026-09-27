@@ -36,6 +36,8 @@ def synthetic():
                                     'expected_class': kind} for hour, name, kind in
                                    ((0, 'burst', 'threshold'), (1, 'shift', 'anomaly'), (2, 'missing', 'coverage'))],
                      'quiet': [interval(3)],
+                     'labelled': [{'resource_id': RESOURCE, 'window': {
+                         'start': text(START), 'end': text(START + dt.timedelta(hours=4))}}],
                      'series': [{'resource_id': RESOURCE, 'metric': 'filesystem_used_bytes',
                                  'rows': sorted(points, key=lambda row: row['ts'])}]})
 

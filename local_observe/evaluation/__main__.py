@@ -16,20 +16,23 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--observer-directory', type=Path,
                         help='Opt in to real observer/model calls; new protected runtime directory outside Git')
+    parser.add_argument('--observer-config', type=Path, help='Evaluate this exact observer Config with corpus sources')
     args = parser.parse_args(argv)
     try:
+        config = None
+        if args.observer_config:
+            from local_observe.observer.contract import Config, strict_json
+            with args.observer_config.open('rb') as stream:
+                config = Config.from_dict(strict_json(stream.read(65537)))
         if args.observer_directory:
             if not args.observer_directory.is_absolute():
                 raise ValueError('Observer output requires an absolute private path')
             if not args.output or args.output.parent != args.observer_directory:
                 raise ValueError('Observer report must be inside its protected output directory')
-            from local_observe.observer.journal import private_directory, private_file
+            from local_observe.observer.journal import private_file
             import os
-            if args.observer_directory.exists():
-                raise ValueError('Observer evaluation requires a new output directory')
-            os.close(private_directory(args.observer_directory))
         report = evaluate(load(args.corpus) if args.corpus else synthetic(), revision=args.revision,
-                          observer_directory=args.observer_directory)
+                          observer_directory=args.observer_directory, observer_config=config)
         text = json.dumps(report, indent=2, allow_nan=False)
         if args.output:
             if args.observer_directory:

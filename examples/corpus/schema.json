@@ -20,6 +20,11 @@
       }
     }},
     "quiet": {"type": "array", "minItems": 0, "maxItems": 128, "items": {"$ref": "#/$defs/window"}},
+    "labelled": {"description": "Exhaustively annotated resource windows; omitted means unknown outside positive incidents and explicit global quiet windows.",
+      "type": "array", "maxItems": 128, "items": {
+        "type": "object", "additionalProperties": false, "required": ["resource_id", "window"],
+        "properties": {"resource_id": {"$ref": "#/$defs/uuid"}, "window": {"$ref": "#/$defs/window"}}
+      }},
     "series": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
       "type": "object", "additionalProperties": false, "required": ["resource_id", "metric", "rows"],
       "properties": {

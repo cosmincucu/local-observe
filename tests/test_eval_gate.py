@@ -46,11 +46,12 @@ class EvaluationGateTests(unittest.TestCase):
     def test_half_open_end_and_wrong_resource_or_class_cannot_match(self):
         corpus = self.corpus()
         corpus['incidents'] = corpus['incidents'][:1]
+        corpus['labelled'] = [{'resource_id': RESOURCE, 'window': dict(corpus['incidents'][0]['window'])}]
         inputs = [self.event(1), self.event(0, resource='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2'),
                   self.event(0, kind='threshold')]
         result = score(corpus, inputs)
-        self.assertEqual((result['true_positives'], result['false_positives']), (0, 2))
-        self.assertEqual(result['unlabelled_findings'], 1)  # Removed truth leaves hour one unlabelled.
+        self.assertEqual((result['true_positives'], result['false_positives']), (0, 1))
+        self.assertEqual(result['unlabelled_findings'], 2)
         self.assertEqual(score(corpus, [self.event(0)])['true_positives'], 1)
 
     def test_fires_everywhere_fails_explicit_test_policy_unwired_never_passes(self):
@@ -96,9 +97,9 @@ class EvaluationGateTests(unittest.TestCase):
                 load(path)
 
     def test_cross_arm_disagreement_is_not_a_flip_but_one_arm_change_is(self):
-        stable = {'a': 'measured', 'b': 'unwired'}
+        stable = {'a': {'unit': 'quiet'}, 'b': {'unit': 'tell'}}
         self.assertEqual(flip_rate([stable.copy() for _ in range(3)])['rate'], 0)
-        changed = flip_rate([stable, stable, {'a': 'failed', 'b': 'unwired'}])
+        changed = flip_rate([stable, stable, {'a': {'unit': 'watch'}, 'b': {'unit': 'tell'}}])
         self.assertAlmostEqual(changed['per_arm']['a'], 1 / 3)
         self.assertAlmostEqual(changed['rate'], 1 / 6)
         with self.assertRaises(CorpusError):
@@ -124,7 +125,7 @@ class EvaluationGateTests(unittest.TestCase):
 
     def test_three_run_report_and_exclusive_cli_artifact(self):
         report = evaluate(synthetic(), revision=REVISION)
-        self.assertEqual(report['flip_rate']['rate'], 0)
+        self.assertIsNone(report['flip_rate']['rate'], 'unwired and missing decisions are unknown')
         self.assertEqual(report['arms']['llm-rca']['execution'], 'unwired')
         self.assertIsNone(report['arms']['llm-rca']['score'])
         self.assertEqual(report['uncovered_truth_classes'], ['coverage'])

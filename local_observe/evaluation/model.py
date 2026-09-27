@@ -85,7 +85,9 @@ def load(path):
 
 
 def validate(value):
-    keys(value, 'schema_version id origin evaluation incidents quiet series')
+    required = {'schema_version', 'id', 'origin', 'evaluation', 'incidents', 'quiet', 'series'}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {'labelled'}:
+        raise CorpusError('Unknown or missing object fields')
     if type(value['schema_version']) is not int or value['schema_version'] != 1:
         raise CorpusError('Unsupported corpus version')
     if not isinstance(value['id'], str) or not 1 <= len(value['id']) <= 64:
@@ -98,7 +100,7 @@ def validate(value):
         minimum = 1 if field == 'series' else 0
         if not isinstance(value[field], list) or not minimum <= len(value[field]) <= MAX_ITEMS:
             raise CorpusError('Corpus lists exceed bounds; at least one series is required')
-    truth, quiet, series = [], [], []
+    truth, quiet, series, labelled = [], [], [], []
     seen = set()
     for item in value['incidents']:
         keys(item, 'id resource_id window expected_class')
@@ -111,7 +113,14 @@ def validate(value):
         truth.append({**item, 'window': window(item['window'])})
     for item in value['quiet']:
         quiet.append(window(item))
-    for item in truth + [{'window': w} for w in quiet]:
+    scope = value.get('labelled', [])
+    if not isinstance(scope, list) or len(scope) > MAX_ITEMS:
+        raise CorpusError('Labelled scope must be a bounded list')
+    for item in scope:
+        keys(item, 'resource_id window')
+        identifier(item['resource_id'])
+        labelled.append({'resource_id': item['resource_id'], 'window': window(item['window'])})
+    for item in truth + labelled + [{'window': w} for w in quiet]:
         w = item['window']
         if not start <= timestamp(w['start']).timestamp() < timestamp(w['end']).timestamp() <= end:
             raise CorpusError('Truth/quiet windows must be inside evaluation')
@@ -137,7 +146,8 @@ def validate(value):
         if any(not start - 6 * 86400 <= row['ts'] < end for row in points):
             raise CorpusError('Series outside bounded history/evaluation')
         series.append({**item, 'rows': points})
-    result = {**value, 'evaluation': evaluation, 'incidents': truth, 'quiet': quiet, 'series': series}
+    result = {**value, 'evaluation': evaluation, 'incidents': truth, 'quiet': quiet, 'series': series,
+              'labelled': labelled}
     if len(canonical(result).encode('utf-8')) > MAX_BYTES:
         raise CorpusError('Corpus exceeds one MiB')
     return result

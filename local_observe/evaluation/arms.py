@@ -17,10 +17,10 @@ def threshold_defaults():
     return {(row['resource_id'], row['series']): row['threshold'] for row in document['rules']}
 
 
-def finding(resource_id, kind, instant, *, arm):
+def finding(resource_id, kind, instant, *, arm, window=None):
     end = dt.datetime.fromtimestamp(int(instant) // 3600 * 3600 + 3600, dt.timezone.utc)
-    window = {'start': utc_text(end - dt.timedelta(hours=1)), 'end': utc_text(end)}
-    return detections.event('eval-' + arm, resource_id, 'eval.' + arm, kind, 'firing',
+    window = window or {'start': utc_text(end - dt.timedelta(hours=1)), 'end': utc_text(end)}
+    return detections.event('eval-' + arm, resource_id, 'eval.' + arm + '.' + kind, kind, 'firing',
                             window, {'resource_id': resource_id}, query_type='metric-threshold',
                             observed_at=utc_text(dt.datetime.fromtimestamp(instant, dt.timezone.utc)))
 
@@ -102,6 +102,6 @@ def judge(name, context, *, index_path):
             by_hour.setdefault(int(instant) // 3600, instant)
         result.extend(finding(series['resource_id'], kind, instant, arm=name)
                       for instant in by_hour.values())
-    return {'status': 'measured' if result or not (missing or unknown_series) else 'unjudgeable',
+    return {'status': 'unjudgeable' if missing or unknown_series else 'measured',
             'findings': result, 'unjudgeable_points': missing, 'unconfigured_series': unknown_series,
             'filing_cadence_seconds': 3600}
