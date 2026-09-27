@@ -5,6 +5,7 @@ Update related implementation, tests and documentation in the same change.
 | Change | Related files and checks |
 |---|---|
 | Component image build inputs | `components/**/{Dockerfile,requirements.in,requirements.lock,versions.json}`; update pins, build checks and lifecycle documents together. |
+| Observer acceptance resources | The platform Dockerfile retains exact `examples/inventory/declared.yaml` and `examples/platform/forecast.yaml` bytes used by evaluation manifests. Verify the evaluation-to-acceptance path inside the built image after changing these resources, the evaluator or its acceptance consumer. |
 | Deterministic CI | `.github/workflows/ci.yml`, `.gitea/workflows/ci.yml`, `requirements-dev.txt`, `requirements-test-base.txt`, `tests/tiers.py`, `ruff.toml` and `docs/testing-standards.md`. |
 | Public source content | `scripts/check_public_tree.py`, `scripts/export_public_tree.py`, `scripts/check_public_history.py` and their tests; private policies stay outside source. |
 | Deployment contracts | `docs/DEPLOYMENT.md`, `docs/RELEASING.md`, `local_observe/deployment/` and `tests/test_deployment.py`. |

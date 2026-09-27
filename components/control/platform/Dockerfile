@@ -44,6 +44,10 @@ COPY --from=build /install /usr/local
 # and the inventory API imports local_observe.platform.detection_worker, so a partial copy
 # would not start. Optional extras (mcp, pySigma) are not installed and stay unimported here.
 COPY local_observe /app/local_observe
+# Evaluation manifests bind these defaults even with explicit operator baselines.
+# Retain their exact bytes for quality acceptance inside the component image.
+COPY --chmod=0444 examples/inventory/declared.yaml /app/examples/inventory/declared.yaml
+COPY --chmod=0444 examples/platform/forecast.yaml /app/examples/platform/forecast.yaml
 # Public package code must remain readable/traversable when the build context
 # came from a restrictive workstation checkout. No runtime secret is copied here.
 # A named volume mounted at a path the image lacks arrives root-owned 0755, which
