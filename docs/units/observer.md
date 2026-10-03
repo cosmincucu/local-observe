@@ -88,7 +88,12 @@ requires `LO_AI_API_KEY_FILE` and forces payload capture off. A configured local
 API remains subject to the existing policy, capability and per-call token/byte budgets.
 For reasoning models, the optional AI budget can explicitly allow up to 8 192 completion
 tokens and a `request_timeout_seconds` of at most 120. Defaults remain 512 tokens and a
-10-second socket timeout. Test representative observation windows before selecting limits:
+10-second socket timeout. An optional `reasoning_effort` (`low`, `medium`, `high` or
+`xhigh`) is sent unchanged within the same request bounds. Omission leaves the parameter
+unset. The budget provenance hash and configuration-drift check include an explicit value.
+Verify support against the configured gateway/model; this setting does not guarantee
+completion or cause the observer to retain reasoning text.
+Test representative observation windows before selecting limits:
 reasoning may consume the token allowance without producing a final answer. The full
 serialized prompt and model response must still fit their independent byte bounds.
 The final observer JSON answer is limited to 16 KiB; reasoning tokens belong in the

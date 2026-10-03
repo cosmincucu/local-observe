@@ -115,7 +115,7 @@ class AiClient:
     """One serve, one policy, one capability manifest, one budget: the whole AI contract in a class."""
 
     def __init__(self, *, base_url: str, api_key: str, model: str, capability: dict[str, Any],
-                 policy: dict[str, Any], budget: dict[str, int], model_fast: str | None = None,
+                 policy: dict[str, Any], budget: dict[str, Any], model_fast: str | None = None,
                  out_of_lan: bool = True, capture: bool = False, allow_http: bool = False,
                  timeout: int | None = None, provider: str = telemetry.PROVIDER, transport: Any = None) -> None:
         """Bind the four contract values plus the two documents; refuse a shape that cannot be honest.
@@ -183,6 +183,8 @@ class AiClient:
         bundle is redacted per the class's policy before it is measured. `budget.plan` measures the
         bundle and is handed only the framing this caller wraps around it; the exact serialised body
         is then checked against the same ceiling, so every byte that goes on the wire is counted once.
+
+        An explicit reasoning effort is copied unchanged before measuring the complete body.
         """
         if slot not in SLOTS:
             raise AiError(f'slot {slot!r} is not one of {list(SLOTS)}', code='invalid_slot')
@@ -217,6 +219,9 @@ class AiClient:
             payload: dict[str, Any] = {'model': self.model if slot == 'model' else self.model_fast,
                                        'messages': [{'role': 'user', 'content': content}],
                                        'max_tokens': plan['max_completion_tokens'], 'stream': False}
+            if budget_module.REASONING_EFFORT in self.budget:
+                # Omitted settings stay omitted; configured values are never remapped.
+                payload[budget_module.REASONING_EFFORT] = self.budget[budget_module.REASONING_EFFORT]
             if json_mode:
                 payload['response_format'] = {'type': 'json_object'}
             if budget_module.payload_bytes(payload) > self.budget['max_prompt_bytes']:

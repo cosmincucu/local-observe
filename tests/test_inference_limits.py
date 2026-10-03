@@ -11,6 +11,7 @@ from local_observe.ai.client import AiClient, AiError, AiNotConfigured
 from local_observe.http import JsonClient, ResultTooLarge, TransportError
 from local_observe.observer import Config, Journal, Observer
 from local_observe.observer.adapters import Model, Sources
+from local_observe.observer.contract import ObserverError, digest
 from local_observe.platform.query import open_reader
 from local_observe.store.backends import clickhouse as ch
 from tests.test_ai_client import (BUDGET_EXHAUSTED, FakeTransport, MEASURED, NOW as AI_NOW, POLICY,
@@ -152,6 +153,56 @@ class ReaderLimits(unittest.TestCase):
                               model=FixtureModel(), clock=lambda: NOW).run('safe-code')
             self.assertEqual(result['activity'][0]['error'], 'source_result_too_large')
             self.assertNotIn(canary, json.dumps(result))
+
+
+class ReasoningEffortProvenance(unittest.TestCase):
+    """The spelling is part of the document that gets hashed, so it is part of what got reproduced.
+
+    `budget_sha256` is how a later reader tells which request this cycle made, and the drift gate is
+    how the runtime tells that the document it is about to use is the document it hashed. Both read
+    the validated budget, so an optional key has to move both: an operator who edits the effort in one
+    place only is refused, never quietly served a different request than the provenance describes.
+    """
+
+    def ask(self, *, client, environ):
+        """One adapter-level model call, in the shape the observer hands the adapter."""
+        model = Model(environ=environ, client=client)
+        evidence = [{'source': SOURCE.id, 'query_type': SOURCE.query_type,
+                     'resource_id': SOURCE.resource_id, 'window': dict(WINDOW)}]
+        return model, model.complete(evidence, {SOURCE.id}, Config((SOURCE,)), NOW)
+
+    def test_each_spelling_is_a_different_budget_document(self):
+        digests = {'omitted': digest(budget.validate(dict(budget.DEFAULTS)))}
+        for effort in budget.REASONING_EFFORTS:
+            digests[effort] = digest(budget.validate(dict(budget.DEFAULTS, reasoning_effort=effort)))
+        self.assertEqual(len(set(digests.values())), 5,
+                         'a changed effort that no digest noticed cannot be reproduced by anyone')
+        self.assertEqual(digests['omitted'], digest(budget.load(None)),
+                         'the unnamed case keeps the legacy document, so legacy digests stand')
+
+    def test_the_adapter_sends_and_hashes_the_spelling_the_file_named(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'budget.json'
+            path.write_text(json.dumps({'max_completion_tokens': 8_192, 'request_timeout_seconds': 90,
+                                        'reasoning_effort': 'xhigh'}), encoding='utf-8')
+            transport = FakeTransport()
+            instance = client(transport=transport,
+                              budget={**budget.DEFAULTS, 'max_completion_tokens': 8_192,
+                                      'request_timeout_seconds': 90, 'reasoning_effort': 'xhigh'})
+            model, result = self.ask(client=instance, environ={'LO_AI_BUDGET': str(path)})
+            self.assertEqual(transport.calls[0]['payload']['reasoning_effort'], 'xhigh')
+            self.assertEqual(transport.calls[0]['payload']['max_tokens'], 8_192)
+            self.assertEqual(result['status'], 'ok')
+            self.assertEqual(model.provenance()['budget_sha256'], digest(instance.budget))
+
+            # The same client, the file edited under it: the runtime refuses rather than generating a
+            # request its own provenance does not describe.
+            path.write_text(json.dumps({'max_completion_tokens': 8_192, 'request_timeout_seconds': 90}),
+                            encoding='utf-8')
+            with self.assertRaises(ObserverError) as caught:
+                self.ask(client=instance, environ={'LO_AI_BUDGET': str(path)})
+            self.assertEqual(str(caught.exception), 'model_configuration_drift')
+            self.assertEqual(len(transport.calls), 1, 'the drift gate ran before a second request')
 
 
 class RefusalDiagnostics(unittest.TestCase):

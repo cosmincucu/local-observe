@@ -13,6 +13,9 @@ ceiling that file puts on the whole canonical event (`state.py:758`).
 evidence is reported as expired, never replaced by a fresh query to make the explanation look
 complete*. The mechanism is that this module has no store, no query builder and no SQL: an expired
 item is the last word, and the refusal says so in as many words.
+
+The optional `reasoning_effort` request setting is validated with the budget so it participates
+in provenance and drift checks. It has no default and requires backend-specific measurement.
 """
 from __future__ import annotations
 
@@ -38,6 +41,9 @@ DEFAULTS: dict[str, int] = {'max_evidence_items': 20, 'max_evidence_bytes': 16_3
 CEILINGS: dict[str, tuple[int, int]] = {'max_evidence_items': (1, 20), 'max_evidence_bytes': (256, 65_536),
                                         'max_prompt_bytes': (1_024, 65_536), 'max_completion_tokens': (1, 8_192),
                                         'request_timeout_seconds': (1, 120)}
+# Optional request setting; the vocabulary does not imply backend support.
+REASONING_EFFORT = 'reasoning_effort'
+REASONING_EFFORTS: tuple[str, ...] = ('low', 'medium', 'high', 'xhigh')
 MAX_BUDGET_BYTES = 4_096
 # The serialised envelope around the payload text: model name, flags, JSON syntax. Measured as an
 # allowance so `max_prompt_bytes` means "the whole body", not "the part of it you remembered". The
@@ -51,11 +57,12 @@ class BudgetError(AiError):
     code = 'budget_exceeded'
 
 
-def load(path: Path | str | None) -> dict[str, int]:
+def load(path: Path | str | None) -> dict[str, Any]:
     """Return the budget named by *path*, or the shipped defaults when *path* is empty.
 
     The budget is the one part of this contract that is safe to default: every value makes a call
-    *smaller*, so a missing file cannot widen what leaves the host.
+    *smaller*, so a missing file cannot widen what leaves the host. An explicit effort is preserved;
+    a missing file leaves it unset.
     """
     if path is None or (isinstance(path, str) and not path.strip()):
         return dict(DEFAULTS)
@@ -69,17 +76,26 @@ def load(path: Path | str | None) -> dict[str, int]:
     return validate(document)
 
 
-def validate(document: Any) -> dict[str, int]:
-    """Merge *document* over `DEFAULTS` after checking every key and bound, refusing a stray key."""
+def validate(document: Any) -> dict[str, Any]:
+    """Merge *document* over `DEFAULTS` after checking every key and bound, refusing a stray key.
+
+    Omitting the optional effort preserves the legacy document shape and provenance digest.
+    """
     if not isinstance(document, dict):
         raise BudgetError('A budget file must be a JSON object')
-    stray = sorted(set(document) - set(CEILINGS))
+    readable = sorted([*CEILINGS, REASONING_EFFORT])
+    stray = sorted(set(document) - set(readable))
     if stray:
-        raise BudgetError(f'budget file names unknown limits {stray}; this product reads '
-                          f'{sorted(CEILINGS)}')
+        raise BudgetError(f'budget file names unknown limits {stray}; this product reads {readable}')
     merged = dict(DEFAULTS)
     merged.update(document)
+    if REASONING_EFFORT in merged and (not isinstance(merged[REASONING_EFFORT], str)
+                                      or merged[REASONING_EFFORT] not in REASONING_EFFORTS):
+        # Rejected values may contain sensitive text; report only the accepted vocabulary.
+        raise BudgetError(f'budget {REASONING_EFFORT} must be one of {list(REASONING_EFFORTS)}')
     for name, value in merged.items():
+        if name == REASONING_EFFORT:
+            continue
         low, high = CEILINGS[name]
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
             raise BudgetError(f'budget limit {name} must be an integer in {low}..{high}')
@@ -94,7 +110,7 @@ def payload_bytes(value: Any) -> int:
     return len(canonical(value).encode())
 
 
-def plan(budget: dict[str, int], items: Sequence[Any], *, prompt_bytes: int,
+def plan(budget: dict[str, Any], items: Sequence[Any], *, prompt_bytes: int,
          now: dt.datetime) -> dict[str, Any]:
     """Return the admitted bundle, or raise `BudgetError` naming the limit or the stale reference.
 
@@ -104,6 +120,8 @@ def plan(budget: dict[str, int], items: Sequence[Any], *, prompt_bytes: int,
     here, so a caller that hands over the whole request text charges the bundle twice and refuses a
     body that would have fitted. An empty bundle is refused: an explanation with nothing behind it is
     the failure this whole component exists to make loud.
+
+    The client includes any explicit effort in its subsequent exact request-size check.
     """
     if not isinstance(items, (list, tuple)):
         raise BudgetError('An evidence bundle must be a list of evidence references')

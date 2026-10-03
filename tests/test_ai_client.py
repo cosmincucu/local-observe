@@ -324,6 +324,105 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(logs.records[0].evidence_bytes, admitted['evidence_bytes'])
 
 
+class ReasoningEffortTests(unittest.TestCase):
+    """The one request-side parameter the budget can carry, checked as a spelling on the wire.
+
+    The claim is deliberately narrow: a configured effort reaches the body unchanged, an absent key
+    changes nothing, and every other value refuses while the transport is still untouched. What a
+    given serve *does* with `xhigh` — honours it, ignores it, answers 400 — is that serve's behaviour,
+    unmeasured by this repository, and no fixture here can turn a spelling into a guarantee. The
+    operator who sets the key has measured one model behind one gateway; the product's job is to lose
+    neither the measurement nor the byte count on the way out.
+    """
+
+    def asked(self, *, budget=None):
+        """Send one explanation with *budget* and return the transport that saw it."""
+        transport = FakeTransport()
+        build(transport=transport, budget=budget or dict(budget_module.DEFAULTS)).complete(
+            instruction='why?', data_class='internal', evidence=[reference()], now=NOW)
+        return transport
+
+    def test_an_omitted_key_sends_the_request_this_client_always_wrote(self):
+        transport = self.asked()
+        payload = transport.calls[0]['payload']
+        self.assertNotIn('reasoning_effort', payload)
+        self.assertEqual(sorted(payload), ['max_tokens', 'messages', 'model', 'stream'],
+                         'no placeholder, no empty string, no extra key')
+
+    def test_a_configured_effort_is_in_the_exact_body_and_changes_nothing_else(self):
+        for effort in budget_module.REASONING_EFFORTS:
+            with self.subTest(effort=effort):
+                transport = self.asked(budget=dict(budget_module.DEFAULTS, reasoning_effort=effort))
+                payload = transport.calls[0]['payload']
+                self.assertEqual(payload['reasoning_effort'], effort)
+                body = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+                self.assertIn(f'"reasoning_effort":"{effort}"', body)
+                self.assertEqual(len(transport.calls), 1,
+                                 'naming a mode is not a reason to send a second request')
+                self.assertEqual({key: value for key, value in payload.items()
+                                  if key != 'reasoning_effort'},
+                                 self.asked().calls[0]['payload'],
+                                 'the same model, the same evidence and the same allowance asked')
+
+    def test_the_slot_asks_the_spelling_configured_because_the_budget_is_one_document(self):
+        """There is no per-slot effort: a client built from one budget asks one way."""
+        transport = FakeTransport(reply={'model': 'qwen3-30b-small', 'choices': [
+            {'message': {'content': 'summary'}, 'finish_reason': 'stop'}]})
+        build(transport=transport, model_fast='qwen3-30b-small',
+              budget=dict(budget_module.DEFAULTS, reasoning_effort='low')).complete(
+            instruction='summarise', data_class='internal', evidence=[reference()], slot='model_fast',
+            now=NOW)
+        self.assertEqual(transport.calls[0]['payload']['reasoning_effort'], 'low')
+        self.assertEqual(transport.calls[0]['payload']['model'], 'qwen3-30b-small')
+
+    def test_a_value_outside_the_accepted_list_refuses_before_the_endpoint_is_reached(self):
+        for value in (None, True, False, 1, 8192, 'xhigh ', 'XHIGH', 'x-high', 'highest', '', 'null',
+                      ['xhigh'], {'spelling': 'xhigh'}):
+            transport = FakeTransport()
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(AiError) as caught:
+                    build(transport=transport,
+                          budget=dict(budget_module.DEFAULTS, reasoning_effort=value))
+                self.assertEqual(transport.calls, [],
+                                 'a spelling this product cannot name must never leave as one')
+                self.assertIn('reasoning_effort', str(caught.exception))
+
+    def test_the_optional_field_is_counted_where_the_written_body_is_measured(self):
+        """`plan` admits the bundle; the body it wrote is what has to make room for the parameter.
+
+        The ceiling below is the exact size of the body *without* the parameter, so the estimate —
+        which never sees it — still admits the request and only the second measurement can refuse it.
+        A field charged nowhere would be a ceiling quietly exceeded on every measured call.
+        """
+        instruction = 'why is this volume full?'
+        bundle = [reference(parameters={'probe': '\\"' * 1_200})]
+
+        def send(transport, limits):
+            build(transport=transport, budget=limits).complete(instruction=instruction,
+                                                              data_class='internal', evidence=bundle,
+                                                              now=NOW)
+            return transport.calls[0]['payload']
+
+        plain_bytes = wire_bytes(send(FakeTransport(), dict(budget_module.DEFAULTS)))
+        effort_bytes = wire_bytes(send(FakeTransport(),
+                                       dict(budget_module.DEFAULTS, reasoning_effort='xhigh')))
+        self.assertGreater(effort_bytes, plain_bytes, 'the spelling is bytes on the wire, not a free hint')
+
+        limits = dict(budget_module.DEFAULTS, max_evidence_bytes=budget_module.payload_bytes(bundle),
+                      max_prompt_bytes=plain_bytes)
+        admitted = budget_module.plan(limits, bundle, prompt_bytes=framing_bytes(instruction), now=NOW)
+        self.assertLessEqual(admitted['body_bytes'], limits['max_prompt_bytes'],
+                             'the estimate never sees the parameter, so it is not what refuses')
+        fits = FakeTransport()
+        send(fits, limits)
+        self.assertEqual(len(fits.calls), 1, 'the body without the parameter fits exactly')
+        over = FakeTransport()
+        with self.assertRaises(AiError) as caught:
+            send(over, dict(limits, reasoning_effort='xhigh'))
+        self.assertEqual(caught.exception.code, 'prompt_bytes')
+        self.assertEqual(over.calls, [], 'the oversized body was never handed over')
+
+
 class RemoteOutputTests(unittest.TestCase):
     def test_a_bundle_that_may_have_left_the_lan_is_labelled_in_the_output(self):
         transport = FakeTransport()
@@ -612,6 +711,21 @@ class FromEnvironmentTests(unittest.TestCase):
         self.assertEqual(built.budget['max_completion_tokens'], 8192)
         self.assertFalse(built.capture)
         path.write_text('{"request_timeout_seconds": 121}', encoding='utf-8')
+        with self.assertRaises(AiError):
+            AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+
+    def test_budget_file_can_name_the_effort_an_operator_measured(self):
+        """The spelling travels from the file to the validated document, or the client is not built."""
+        path = self.root / 'effort.json'
+        path.write_text(json.dumps({'request_timeout_seconds': 90, 'max_completion_tokens': 8192,
+                                    'reasoning_effort': 'xhigh'}), encoding='utf-8')
+        built = AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+        self.assertEqual(built.budget['reasoning_effort'], 'xhigh')
+        self.assertEqual({key: value for key, value in built.budget.items()
+                          if key != 'reasoning_effort'},
+                         budget_module.validate({'request_timeout_seconds': 90,
+                                                 'max_completion_tokens': 8192}))
+        path.write_text('{"reasoning_effort": "maximum"}', encoding='utf-8')
         with self.assertRaises(AiError):
             AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
 

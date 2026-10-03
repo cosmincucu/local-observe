@@ -31,6 +31,11 @@ still decide whether an answer containing partial text satisfies their contract.
 Reasoning fields are ignored and never included in results, exceptions or telemetry. Unknown
 finish labels become `unknown`; consumers must not accept them as completed answers.
 
+An optional budget `reasoning_effort` (`low`, `medium`, `high` or `xhigh`) is validated and
+copied unchanged into the measured request body. Omission preserves the previous request and
+budget digest. An explicit value participates in budget provenance and drift checks. Backend
+support requires measurement; the client never remaps the setting or retries a refusal.
+
 ## The two rules that hold the package together
 
 1. **A consumer may not use a capability the manifest marks `unknown` or `false`** — stated once, in

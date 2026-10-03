@@ -1,4 +1,6 @@
-"""Tests for the evidence budget: whole-bundle refusal, and expired evidence reported as expired."""
+"""Tests for the evidence budget: whole-bundle refusal, expired evidence reported as expired, and
+the optional reasoning spelling that has no default.
+"""
 import datetime as dt
 import json
 from pathlib import Path
@@ -56,6 +58,65 @@ class BudgetFileTests(unittest.TestCase):
             (root / 'broken.json').write_text('nope', encoding='utf-8')
             with self.assertRaises(BudgetError):
                 budget.load(root / 'broken.json')
+
+
+class ReasoningEffortFileTests(unittest.TestCase):
+    """The one budget key that is not a limit: an optional request spelling, and nothing else.
+
+    The three things these tests hold apart are the states an operator can actually be in. Not
+    naming the key is the legacy configuration and must stay byte-for-byte the legacy document.
+    Naming `xhigh` is a measured request to ask for it, so the value must survive unchanged. Naming
+    anything else is a typo, and a typo has to die here rather than arrive at the endpoint as a
+    second, unmeasured question.
+    """
+
+    LEGACY = {'max_evidence_items': 20, 'max_evidence_bytes': 16_384,
+              'max_prompt_bytes': 24_576, 'max_completion_tokens': 512}
+
+    def test_an_absent_key_leaves_the_validated_document_exactly_as_it_was(self):
+        self.assertNotIn('reasoning_effort', budget.DEFAULTS, 'no effort is shipped as a default')
+        self.assertEqual(budget.validate({}), self.LEGACY)
+        self.assertEqual(budget.validate(self.LEGACY), self.LEGACY)
+        self.assertEqual(budget.load(None), self.LEGACY)
+        self.assertEqual(budget.validate({'max_completion_tokens': 8_192}),
+                         dict(self.LEGACY, max_completion_tokens=8_192))
+
+    def test_every_accepted_spelling_is_returned_unchanged(self):
+        self.assertEqual(budget.REASONING_EFFORTS, ('low', 'medium', 'high', 'xhigh'))
+        for effort in budget.REASONING_EFFORTS:
+            with self.subTest(effort=effort):
+                validated = budget.validate({'reasoning_effort': effort})
+                self.assertEqual(validated['reasoning_effort'], effort)
+                # Adding it is the only change: no limit moves, and nothing else is inferred.
+                self.assertEqual({key: value for key, value in validated.items()
+                                  if key != 'reasoning_effort'}, self.LEGACY)
+
+    def test_anything_else_refuses_the_document(self):
+        for value in (None, True, False, 1, 8192, 90.0, ['xhigh'], [], {'spelling': 'xhigh'}, {},
+                      'XHIGH', 'XHigh', 'xhigh ', ' xhigh', 'x-high', 'highest', 'none', 'null', ''):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(BudgetError) as caught:
+                    budget.validate({'reasoning_effort': value})
+                self.assertEqual(caught.exception.code, 'budget_exceeded')
+                self.assertIn('reasoning_effort', str(caught.exception))
+        # A rejected value is never quoted back: it is arbitrary JSON on its way into a log line.
+        with self.assertRaises(BudgetError) as caught:
+            budget.validate({'reasoning_effort': 'untrusted-operator-prose-do-not-echo'})
+        self.assertNotIn('untrusted-operator-prose', str(caught.exception))
+
+    def test_a_budget_file_is_read_with_the_effort_and_refused_without_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'measured.json').write_text(json.dumps({'max_completion_tokens': 8_192,
+                                                           'request_timeout_seconds': 90,
+                                                           'reasoning_effort': 'xhigh'}),
+                                                encoding='utf-8')
+            loaded = budget.load(root / 'measured.json')
+            self.assertEqual(loaded['reasoning_effort'], 'xhigh')
+            self.assertEqual(loaded['max_completion_tokens'], 8_192)
+            (root / 'typo.json').write_text('{"reasoning_effort": "extreme"}', encoding='utf-8')
+            with self.assertRaises(BudgetError):
+                budget.load(root / 'typo.json')
 
 
 class BudgetPlanTests(unittest.TestCase):
@@ -138,6 +199,17 @@ class BudgetPlanTests(unittest.TestCase):
     def test_payload_bytes_uses_the_canonical_form(self):
         self.assertEqual(budget.payload_bytes({'b': 1, 'a': 2}),
                          len(budget.canonical({'a': 2, 'b': 1}).encode()))
+
+    def test_an_effort_changes_the_spelling_asked_not_the_bundle_admitted(self):
+        """`plan` answers "does this fit", and a reasoning mode does not make evidence smaller."""
+        without = self.plan([reference()])
+        with self.assertRaises(BudgetError) as caught:
+            self.plan([reference(), reference()], max_evidence_items=1, reasoning_effort='xhigh')
+        self.assertEqual(caught.exception.code, 'too_many_references',
+                         'asking harder does not buy a bigger bundle')
+        for effort in budget.REASONING_EFFORTS:
+            with self.subTest(effort=effort):
+                self.assertEqual(self.plan([reference()], reasoning_effort=effort), without)
 
 
 if __name__ == '__main__':

@@ -52,7 +52,7 @@ with `_API_KEY` is a separate change with its own argument, not a side effect of
 | `LO_AI_API_KEY_FILE` | compose secret | a file with one API key per line | `config` fails |
 | `LO_AI_CAPABILITY` | `local_observe/ai/client.py`, the overview worker | the measured capability manifest | the client raises `not_configured`; nothing generates |
 | `LO_AI_POLICY` | client | the per-`data_class` policy | same: a missing policy is no permission |
-| `LO_AI_BUDGET` | client | optional ceilings on one request | shipped defaults apply (they only ever make a call smaller) |
+| `LO_AI_BUDGET` | client | optional request ceilings and `reasoning_effort` (§6) | shipped limits apply; reasoning effort is unset |
 | `LO_AI_MODEL_FAST` | client | the rerank/summarise slot | falls back to `LO_AI_MODEL`, recorded as `slot` in the call record |
 | `LO_AI_OUT_OF_LAN` | client | the operator's statement that the endpoint is inside the LAN | **treated as remote** — only the exact `0` means local, so the safe reading is the one an operator gets by default |
 | `LO_AI_CAPTURE` | client | payload capture | off (chat integration); only the exact `1` turns it on |
@@ -190,10 +190,19 @@ retain their validated shape and provenance digest. Other HTTP clients keep thei
 defaults. This is a socket timeout, not a total elapsed-time guarantee; the observer also
 checks its cycle deadline. Each generation still makes one attempt, without retries.
 
+The budget also accepts an optional `reasoning_effort` string: `low`, `medium`, `high` or
+`xhigh`. The configured value is sent unchanged and counted in the serialized request size.
+Other values are refused before any network call. Omitting it preserves the existing request
+and validated budget shape, including its provenance digest. Configuring it changes
+`budget_sha256`; the observer's existing configuration-drift check covers it.
+
+Support varies by gateway and model. Verify the selected value is honored before relying on
+it; the product does not remap values or retry an unsupported request.
+
 Reasoning models may spend their completion allowance before producing an answer. Measure
-the chosen model with representative evidence before selecting explicit token and timeout
-limits; a larger allowance does not guarantee a usable answer. The response byte limit
-below applies independently.
+the chosen model with representative evidence before selecting explicit token, timeout and
+effort settings; neither a larger allowance nor a higher effort guarantees a usable answer.
+The response byte limit below applies independently.
 
 **Two measurements, one ceiling.** `max_prompt_bytes` means the whole serialised body, so it is
 checked twice before anything is sent. `budget.plan` measures the evidence itself and is handed only
