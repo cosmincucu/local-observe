@@ -17,6 +17,7 @@ const titles = {
   inventory: "Inventory",
   events: "Events",
   audit: "Audit",
+  investigations: "Investigations",
 };
 const icons = () => lucide.createIcons();
 const value = (item) =>
@@ -79,6 +80,8 @@ function signout() {
   names = {};
   setMode("");
   historyClear();
+  reviewClear();
+  cyclesClear();
   $("identity").textContent = "Disconnected";
   $("records").replaceChildren();
   for (const id of ["detail-fields", "commands", "evidence", "detail-error"])
@@ -102,6 +105,15 @@ function button(label, icon, handler) {
   return b;
 }
 function render() {
+  // `#status-filter` lists record statuses and says nothing about a cycle, while `#observer-summary` and
+  // `#observer-more` belong to the cycle list. `#list-panel` is one card both views share, so each view
+  // hides the other's controls rather than leaving a filter on screen that can only answer "nothing".
+  const listed = view === "investigations";
+  $("status-filter").hidden = listed;
+  $("status-filter").disabled = listed;
+  $("observer-summary").hidden = !listed || !$("observer-summary").textContent;
+  $("observer-more").hidden = !listed || !cycles.next;
+  if (listed) return renderCycles();
   const search = $("search").value.toLowerCase(),
     status = $("status-filter").value;
   const filtered = rows.filter(
@@ -162,6 +174,7 @@ function render() {
 }
 async function refresh() {
   if (!token) return;
+  if (view === "investigations") return refreshCycles();
   const mine = ++generation;
   $("refresh").disabled = true;
   $("error").hidden = true;
@@ -632,8 +645,644 @@ async function historySelect(id) {
   historyRenderRecord(record);
 }
 
+// --- Observer investigations --------------------------------------------------------------
+// One page of the observer's own cycles, the retained record of one cycle, and one append per explicit
+// human grade. `observer_review.py` decides every rule; this panel only echoes the digest and newest
+// review id it was shown, mints a review id once per intended review (so retrying the same review is
+// the same append, never a second one), and stops after a conflict until the operator reloads.
+// Nothing here is a verdict: an ungraded cycle says "not reviewed", the grade boxes start untouched,
+// and every retained word — a rationale, a label, an error — is data rendered as text, never markup.
+const OBSERVER_LIST = "/v1/observer/cycles";
+const OBSERVER_CYCLE = "/v1/observer/cycle";
+const OBSERVER_FEEDBACK = "/v1/observer/feedback";
+const OBSERVER_PAGE = 20; // under the route's 100 cap: a phone screen holds a page, not a journal
+const OBSERVER_ROWS = 25; // evidence rows or citations listed per item, with the cut stated in words
+const OBSERVER_ANSWER = 4000; // journal.feedback's own ceiling for `corrected_answer`
+const OBSERVER_SECONDS = 3600; // journal.feedback's own ceiling for `review_seconds`
+const REVIEW_ID_TEXT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/; // observer contract `name()`
+const OBSERVER_CHOICES = { usefulness: ["useful", "noise", "unsure"], correctness: ["correct", "incorrect", "unsure"] };
+const OBSERVER_LEGENDS = { usefulness: "Was this useful?", correctness: "Was the answer correct?" };
+// A retained cycle status, shown in the words the platform already uses for a record. An unlisted
+// status keeps its own word and the plain pill, because inventing a colour for it would be a claim.
+const OBSERVER_PILLS = { completed: "resolved", partial: "pending", failed: "error",
+  running: "running", skipped: "unknown" };
+const OBSERVER_QUEUES = { "quiet-sample": "quiet sample", "finding-or-coverage-gap": "finding or gap" };
+// The journal's own fixed refusal words. Only these may be named back — they are payload-free by that
+// module's contract, so naming one echoes no path, no credential and none of the caller's bytes.
+const OBSERVER_REQUEST_CODES = ["invalid_fields", "invalid_usefulness", "invalid_correctness",
+  "invalid_corrected_answer", "invalid_outcome_refs", "invalid_review_seconds", "invalid_export_approval",
+  "unknown_outcome_reference", "corrected_evidence_required_for_export"];
+const OBSERVER_STALE_CODES = new Set(["stale_review", "cycle_digest_changed"]);
+// Fixed sentences. Each is the whole answer this surface can give about one state, and a 404 is here
+// "this platform has no review journal" — never a healthy-looking page of nothing.
+const OBSERVER_STATES = {
+  idle: "",
+  loading: "Loading investigations.",
+  ready: (shown, total, older) => shown + " of " + total + " retained cycles, newest first"
+    + (older ? " \u2014 " + (total - shown) + " older cycle(s) available below." : "."),
+  unauthorised: "This sign-in may not read investigations, so nothing is shown.",
+  absent: "The observer journal has no record of this cycle, so there is nothing to grade.",
+  unavailable: "Investigation review is unavailable: this platform has no observer journal configured.",
+  busy: "The observer journal could not be read. Nothing was listed, and nothing was recorded.",
+  malformed: "The reply was not an investigation list this panel can vouch for, so nothing is listed.",
+  refused: "The platform refused this request. Nothing was listed, and nothing was recorded.",
+  unreachable: "The platform could not be reached. Nothing was listed, and nothing was recorded.",
+  "not-loaded": "Not loaded.",
+  reading: "Reading the retained investigation.",
+  reloading: "Loading this record again. What you already typed is kept.",
+  empty: "No evidence was retained for this cycle.",
+  answered: "The record below is what the observer retained. It is not a verdict, and nothing is "
+    + "graded until you submit.",
+  unreviewable: "This record cannot be graded \u2014 it is still running or left no answer. "
+    + "Everything above stays readable.",
+  mismatch: "The reply was about another cycle, so nothing is shown.",
+  broken: "The reply was not an investigation record this panel can vouch for, so nothing is shown.",
+  recorded: (reviewer) => OBSERVER_STATES.done + " Recorded by " + reviewer + ".",
+  done: "Review recorded. The observer's retained record of this cycle is unchanged.",
+  stale: "This review was refused: the cycle moved on, or another review became the newest. "
+    + "Nothing was recorded. Reload this record before grading it again.",
+  reused: "This review was refused: that review id already holds different contents. Nothing was "
+    + "recorded. Reload this record before grading it again.",
+  ungraded: "Refused: this cycle cannot be graded in the state the journal now holds it in. Nothing was recorded.",
+  conflict: "This review was refused by the journal. Nothing was recorded. Reload this record before grading it again.",
+  refusedCode: (code) => "Refused (" + code + "). Nothing was recorded.",
+  unknown: "The platform's answer did not arrive, so it is not known whether this review was "
+    + "recorded. Reload this record before trying again, and only send a different review after "
+    + "you have seen what the record holds.",
+  grade: "Choose a usefulness grade and a correctness grade. Nothing was sent.",
+  seconds: "Review seconds must be a whole number from 0 to 3600. Nothing was sent.",
+  answer: "A corrected answer must be at most 4000 characters. Nothing was sent.",
+  changed: "This is a different review from the one whose outcome is unknown. Nothing was sent: "
+    + "reload this record first.",
+  sent: "A review is already being sent. Wait for it before sending another.",
+};
+
+// The list page: the rows on screen, what the route said about the rest, and the one generation every
+// list answer is judged by. `readable`/`isObject`/`exactKeys` below are shared with the record panel.
+const cycles = { generation: 0, loading: false, rows: [], next: null, total: 0 };
+
+// One opened record. `digest` and `latest` are the preconditions the route demands back unchanged;
+// `reviewId`/`attempt` are what make a retry of one review the same append; `blocked` is the 409 latch.
+const observer = { generation: 0, cycle: "", digest: "", latest: null, reviewable: false, loading: false,
+  submitting: false, blocked: false, reviewId: "", attempt: null, grades: { usefulness: [], correctness: [] } };
+
+// One retained value, in words. An object or array reaching a field this panel expected a string in
+// is shown as the JSON it is, because `String({})` would print a lie about the record.
+const readable = (item) => (item === null || item === undefined ? "not recorded"
+  : typeof item === "object" ? JSON.stringify(item) : String(item));
+const isObject = (item) => !!item && typeof item === "object" && !Array.isArray(item);
+const exactKeys = (item, keys) =>
+  isObject(item) && Object.keys(item).sort().join() === keys.slice().sort().join();
+const isReviewId = (item) => typeof item === "string" && REVIEW_ID_TEXT.test(item);
+// One retained word, in the words this panel is allowed to use for it. Anything the panel does not
+// have a name for is shown as the journal wrote it, never guessed at.
+const word = (item) => OBSERVER_QUEUES[item] || readable(item);
+
+async function observerRequest(path, body) {
+  // Same-origin, `no-store`, credential in the header alone and never in the path. The status is kept:
+  // a 403, 404, 409 and 503 are four different facts for the person holding the phone.
+  try {
+    const response = await fetch(path, {
+      method: body ? "POST" : "GET",
+      cache: "no-store",
+      headers: {
+        Authorization: (authMode === "password" ? "Basic " : "Bearer ") + token,
+        Accept: "application/json",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    if (response.status === 401) return { answer: "session", status: 401 };
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch {
+      return { answer: "unreadable", status: response.status };
+    }
+    return { answer: response.ok ? "ok" : "refused", status: response.status, body: parsed };
+  } catch {
+    return { answer: "unreachable" };
+  }
+}
+
+// One answer, one sentence. A read that came back refused is judged by status alone; the body of a
+// refusal never reaches the screen, because the only words this panel repeats are its own.
+function readState(answer, forbidden, refused) {
+  if (answer.answer === "unreachable") return "unreachable";
+  if (answer.answer === "unreadable") return "malformed";
+  if (answer.status === 403) return "unauthorised";
+  if (answer.status === 404) return forbidden;
+  // 503 is the journal itself refusing, which is a different fact from a request this panel got wrong,
+  // and the two sentences say different things about what the operator can do next.
+  return answer.status === 503 ? "busy" : refused;
+}
+
+function listState(code, text) {
+  const line = $("observer-summary");
+  line.dataset.state = code;
+  line.textContent = text === undefined ? OBSERVER_STATES[code] : text;
+  line.hidden = !line.textContent;
+  $("observer-more").hidden = code !== "ready" || !cycles.next;
+}
+
+function cyclesClear() {
+  cycles.generation++;
+  cycles.loading = false;
+  cycles.rows = [];
+  cycles.next = null;
+  cycles.total = 0;
+  // An answer dropped by the generation guard returns early and never reaches the flags it would have
+  // cleared, so anything a wipe of the list owns has to be restored here: a signed-out or switched-away
+  // panel that can never be refreshed again is the bug this line exists to prevent.
+  $("refresh").disabled = false;
+  $("observer-next").disabled = false;
+  $("observer-more").hidden = true;
+  listState("idle");
+}
+
+// The five tests a list answer must pass before it may touch the screen: still the request this panel
+// is waiting for, still the sign-in that made it, still inside the same login, still signed in, and
+// still on the view that asked. A dropped answer performs no side effect at all.
+function cyclesCurrent(mine, session, login) {
+  return mine === cycles.generation && session === token && login === generation && !!token
+    && view === "investigations";
+}
+
+async function refreshCycles(older) {
+  if (cycles.loading) return;
+  const after = older ? cycles.next : null;
+  if (older && !after) return;
+  const mine = ++cycles.generation;
+  const session = token, login = generation;
+  cycles.loading = true;
+  $("refresh").disabled = true;
+  $("observer-next").disabled = true;
+  $("error").hidden = true;
+  if (!after) listState("loading");
+  const page_query = OBSERVER_LIST + "?limit=" + OBSERVER_PAGE + (after ? "&after=" + after : "");
+  const answer = await observerRequest(page_query);
+  if (!cyclesCurrent(mine, session, login)) return;
+  cycles.loading = false;
+  $("refresh").disabled = false;
+  $("observer-next").disabled = false;
+  if (answer.answer === "session") return signout();
+  const page = answer.answer === "ok" ? reviewPage(answer.body) : null;
+  const failed = answer.answer !== "ok" ? readState(answer, "unavailable", "refused")
+    : page === null ? "malformed" : null;
+  if (failed) {
+    if (!older) { cycles.rows = []; cycles.next = null; cycles.total = 0; render(); }
+    return listState(failed);
+  }
+  cycles.rows = older ? cycles.rows.concat(page.cycles) : page.cycles;
+  cycles.next = page.truncated ? page.next_after : null;
+  cycles.total = page.total_cycles;
+  render();
+  listState("ready", OBSERVER_STATES.ready(cycles.rows.length, cycles.total, Boolean(cycles.next)));
+}
+
+// A list page this panel can account for, or nothing at all: the seven keys the route names, a row for
+// every count it gives, and every identifier in the journal's own shape. One field out of place is a
+// refusal, never a shorter list to show anyway.
+function reviewPage(body) {
+  const keys = ["schema_version", "cycles", "limit", "returned", "total_cycles", "truncated", "next_after"];
+  if (!exactKeys(body, keys) || body.schema_version !== 1 || !Array.isArray(body.cycles)) return null;
+  if (!Number.isInteger(body.limit) || !Number.isInteger(body.returned)
+      || !Number.isInteger(body.total_cycles)) return null;
+  if (typeof body.truncated !== "boolean" || body.returned !== body.cycles.length) return null;
+  if (body.total_cycles < body.returned) return null;
+  if (body.next_after !== null && !isReviewId(body.next_after)) return null;
+  if (body.truncated && body.next_after === null) return null;
+  return body.cycles.every(reviewSummary) ? body : null;
+}
+
+function reviewSummary(row) {
+  const keys = ["cycle_id", "started_at", "ended_at", "status", "coverage", "decision", "mode",
+    "delivery_status", "review", "reviewable", "findings", "queue_reason", "latest_feedback_id"];
+  if (!exactKeys(row, keys) || !isReviewId(row.cycle_id)) return false;
+  if (!["status", "coverage", "mode", "delivery_status"].every((key) => typeof row[key] === "string")) return false;
+  if (["quiet", "watch", "tell", null].indexOf(row.decision) < 0) return false;  // the route's own set
+  if (["unknown", "reviewed"].indexOf(row.review) < 0 || typeof row.reviewable !== "boolean") return false;
+  if (!Number.isInteger(row.findings) || row.findings < 0) return false;
+  if (row.queue_reason !== null && !(row.queue_reason in OBSERVER_QUEUES)) return false;
+  if (row.latest_feedback_id !== null && !isReviewId(row.latest_feedback_id)) return false;
+  return [row.started_at, row.ended_at].every((item) => item === null || typeof item === "string");
+}
+
+function renderCycles() {
+  const search = $("search").value.toLowerCase().trim();
+  const filtered = cycles.rows.filter((row) =>
+    !search || [row.cycle_id, row.status, row.coverage, row.decision, row.review, row.queue_reason]
+      .map(readable).join(" ").toLowerCase().includes(search));
+  const head = document.createElement("tr");
+  for (const label of ["Cycle", "Outcome", "Human grade", ""]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    head.append(th);
+  }
+  $("columns").replaceChildren(head);
+  $("records").replaceChildren();
+  $("empty").hidden = filtered.length !== 0;
+  $("empty").textContent = filtered.length ? "" : token
+    ? search ? "No listed cycle matches this search." : "No investigations are listed."
+    : "Sign in to view records.";
+  for (const row of filtered) {
+    const grade = row.review === "reviewed" ? "reviewed" : "not reviewed";
+    const note = row.queue_reason ? word(row.queue_reason)
+      : row.reviewable ? "" : "cannot be graded yet";
+    const tr = document.createElement("tr");
+    [[row.cycle_id, ""], [[row.decision, row.coverage, row.status].map(word).join(" / "),
+        "pill " + (OBSERVER_PILLS[row.status] || "")],
+      [grade + (note ? " (" + note + ")" : ""), "pill " + (row.review === "reviewed" ? "resolved" : "pending")]]
+      .forEach(([text, className]) => {
+        const td = document.createElement("td");
+        td.textContent = text;
+        td.title = text;
+        if (className) td.className = className;
+        tr.append(td);
+      });
+    const action = document.createElement("td");
+    action.append(button("Inspect investigation", "chevron-right", () => inspectCycle(row)));
+    tr.append(action);
+    $("records").append(tr);
+  }
+  icons();
+}
+
+function reviewState(code, text) {
+  const line = $("observer-state");
+  line.dataset.state = code;
+  line.textContent = text === undefined ? OBSERVER_STATES[code] : text;
+}
+
+function reviewFeedback(code, text) {
+  const line = $("observer-feedback");
+  line.dataset.state = code;
+  line.textContent = text === undefined ? OBSERVER_STATES[code] : text;
+  line.hidden = !line.textContent;
+}
+
+// Wipes everything this panel put in the dialog, in-flight flags included: an answer on its way to a
+// closed dialog has nowhere to land, and a reopened record starts again with untouched grade boxes.
+function reviewClear() {
+  observer.generation++;
+  observer.cycle = "";
+  observer.digest = "";
+  observer.latest = null;
+  observer.reviewable = false;
+  observer.loading = false;
+  observer.submitting = false;
+  observer.blocked = false;
+  observer.reviewId = "";
+  observer.attempt = null;
+  observer.grades = { usefulness: [], correctness: [] };
+  $("observer").hidden = true;
+  $("observer-review").hidden = true;
+  $("observer-record").replaceChildren();
+  $("observer-history").replaceChildren();
+  $("observer-grades").replaceChildren();
+  $("observer-answer").value = "";
+  $("observer-seconds").value = "";
+  $("observer-export").checked = false;
+  reviewFeedback("idle");
+  reviewControls(false);
+  reviewState("not-loaded");
+}
+
+// Which controls are shut right now. A shut button is the cue, not the guard: `reviewSubmit` and
+// `cyclesCurrent`/`observerCurrent` are what actually drop a request.
+function reviewControls(enabled) {
+  for (const group of ["usefulness", "correctness"])
+    for (const input of observer.grades[group]) input.disabled = !enabled;
+  for (const id of ["observer-answer", "observer-seconds", "observer-export"]) $(id).disabled = !enabled;
+  reviewReady();
+}
+
+// The two grades as the journal wants them, or null. A group with nothing checked, or with something
+// checked that is not one of the three words the route accepts, reads as no grade at all.
+function reviewPicked() {
+  const one = (group) => {
+    const chosen = observer.grades[group].filter((input) => input.checked);
+    return chosen.length === 1 && OBSERVER_CHOICES[group].indexOf(chosen[0].value) >= 0 ? chosen[0].value : null;
+  };
+  return { usefulness: one("usefulness"), correctness: one("correctness") };
+}
+
+function reviewArmed() {
+  const picked = reviewPicked();
+  return observer.reviewable && !observer.loading && !observer.submitting && !observer.blocked
+    && !!picked.usefulness && !!picked.correctness;
+}
+
+function reviewReady() {
+  $("observer-submit").disabled = !reviewArmed();
+}
+
+// Built fresh for every record, so no earlier answer can survive into a later cycle: two untouched
+// radio groups whose only values are the journal's own words. No `checked` attribute is ever set here,
+// because an untouched form that reads as `useful`/`correct` would be a grade nobody gave.
+function reviewFields() {
+  const box = $("observer-grades");
+  box.replaceChildren();
+  observer.grades = { usefulness: [], correctness: [] };
+  for (const group of ["usefulness", "correctness"]) {
+    const field = document.createElement("fieldset");
+    field.className = "observer-grades";
+    const legend = document.createElement("legend");
+    legend.textContent = OBSERVER_LEGENDS[group];
+    field.append(legend);
+    for (const choice of OBSERVER_CHOICES[group]) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "observer-" + group;
+      input.value = choice;
+      input.onclick = reviewReady;
+      label.append(input, document.createTextNode(" " + choice));
+      field.append(label);
+      observer.grades[group].push(input);
+    }
+    box.append(field);
+  }
+}
+
+// The five tests a record answer must pass: still the request this panel waits for, still the sign-in
+// that made it, still inside the same login, still the record the operator opened, and still in a
+// dialog that is open. The last is not redundant with the counter — `close()` clears `open` before its
+// `close` event runs — so an answer landing in that gap has nowhere to write.
+function observerCurrent(mine, session, login, cycleId) {
+  return mine === observer.generation && session === token && login === generation && !!token
+    && cycleId === observer.cycle && $("detail").open;
+}
+
+function inspectCycle(row) {
+  detailGeneration++;
+  reviewClear();
+  historyClear();
+  const mine = observer.generation;
+  $("detail-title").textContent = "Investigation " + row.cycle_id;
+  $("detail-fields").replaceChildren();
+  $("commands").replaceChildren();
+  $("evidence").replaceChildren();
+  $("detail-error").textContent = "";
+  $("observer").hidden = false;
+  icons();
+  $("detail").showModal();
+  if (!isReviewId(row.cycle_id)) return reviewState("broken"); // not a cycle any route could name
+  observer.cycle = row.cycle_id;
+  loadRecord(row.cycle_id, mine, false);
+}
+
+function loadRecord(cycleId, mine, keepAnswers, keepMessage) {
+  const session = token, login = generation;
+  observer.loading = true;
+  observer.submitting = false;
+  observer.blocked = false;
+  reviewControls(false);
+  if (!keepAnswers) {
+    $("observer-answer").value = "";
+    $("observer-seconds").value = "";
+    $("observer-export").checked = false;
+  }
+  // What the panel last told the operator is theirs, not the record's: a reload under a refusal or a
+  // receipt keeps that line, because losing it would leave the screen claiming nothing about an action
+  // that was just taken in front of them.
+  if (!keepAnswers && !keepMessage) reviewFeedback("idle");
+  reviewState(keepAnswers ? "reloading" : "reading");
+  $("observer-reload").disabled = true;
+  observerRequest(OBSERVER_CYCLE + "?cycle_id=" + cycleId).then((answer) => {
+    if (!observerCurrent(mine, session, login, cycleId)) return;
+    observer.loading = false;
+    if (answer.answer === "session") return signout();
+    $("observer-reload").disabled = false; // whatever the answer was, reading the record again is the
+    // next thing an operator can do, and the only one this panel can offer after a failure
+    if (answer.answer !== "ok") return reviewState(readState(answer, "absent", "refused"));
+    const record = reviewRecord(answer.body, cycleId);
+    if (record === "mismatch") return reviewState("mismatch");
+    if (!record) return reviewState("broken");
+    renderRecord(record);
+  });
+}
+
+// One record, or nothing shown. The digest and newest review id are the two values a submission has to
+// answer back, so both are checked in the journal's own shape; the review versions must belong to this
+// cycle, and `latest_feedback_id` must name the last of them. A reply that fails any of that is a
+// refusal, not a record to render with holes.
+function reviewRecord(body, cycleId) {
+  const keys = ["schema_version", "cycle_sha256", "reviewable", "latest_feedback_id", "feedback_total",
+    "feedback_truncated", "replay"];
+  if (!exactKeys(body, keys) || body.schema_version !== 1) return null;
+  if (!isDigest(body.cycle_sha256) || typeof body.reviewable !== "boolean") return null;
+  if (!Number.isInteger(body.feedback_total) || body.feedback_total < 0) return null;
+  if (typeof body.feedback_truncated !== "boolean") return null;
+  if (body.latest_feedback_id !== null && !isReviewId(body.latest_feedback_id)) return null;
+  const replay = body.replay;
+  if (!isObject(replay) || replay.cycle_id !== cycleId) return "mismatch";
+  if (!["status", "coverage", "mode"].every((key) => typeof replay[key] === "string")) return null;
+  if (["unknown", "reviewed"].indexOf(replay.review) < 0) return null;
+  if (!Array.isArray(replay.evidence) || !Array.isArray(replay.feedback)) return null;
+  if (replay.feedback.length > body.feedback_total) return null;
+  if (!replay.feedback.every((item) => isObject(item) && isReviewId(item.feedback_id)
+      && item.cycle_id === cycleId)) return null;
+  const last = replay.feedback[replay.feedback.length - 1];
+  if (body.latest_feedback_id !== null
+      && (replay.feedback.length === 0 || last.feedback_id !== body.latest_feedback_id)) return null;
+  return { cycle: cycleId, digest: body.cycle_sha256, reviewable: body.reviewable, latest: body.latest_feedback_id,
+    total: body.feedback_total, truncated: body.feedback_truncated, replay };
+}
+
+function heading(text) {
+  const title = document.createElement("h4");
+  title.textContent = text;
+  return title;
+}
+
+function plain(text, className) {
+  const line = document.createElement("p");
+  line.textContent = text;
+  if (className) line.className = className;
+  return line;
+}
+
+function facts(target, entries) {
+  const list = document.createElement("dl");
+  for (const [name, text] of entries) {
+    const term = document.createElement("dt");
+    term.textContent = name;
+    const detail = document.createElement("dd");
+    detail.textContent = text;
+    list.append(term, detail);
+  }
+  target.append(list);
+  return list;
+}
+
+// Retained data, rendered as data. `labels` is a nested object or array and `rationale` is model prose
+// that may hold shell metacharacters or markup-looking bytes: both go through `textContent`, so what an
+// operator reads is exactly what the journal kept and nothing becomes a node.
+function renderRecord(record) {
+  const replay = record.replay;
+  const box = $("observer-record");
+  box.replaceChildren();
+  facts(box, [
+    ["Cycle", record.cycle], ["Status", readable(replay.status)], ["Coverage", readable(replay.coverage)],
+    ["Decision", readable(replay.decision)], ["Mode", readable(replay.mode)],
+    ["Delivery", isObject(replay.delivery) ? readable(replay.delivery.status) : "not recorded"],
+    ["Started", readable(replay.started_at)], ["Ended", readable(replay.ended_at)],
+    ["Interruption", readable(replay.error)],
+    ["Findings", String(Array.isArray(replay.answer?.findings) ? replay.answer.findings.length : 0)],
+    ["Human grade", replay.review === "reviewed" ? "reviewed" : "not reviewed"],
+    ["Reviews held", String(record.total)],
+  ]);
+  box.append(heading("What the observer said"));
+  if (!isObject(replay.answer)) box.append(plain("no answer was retained for this cycle", "observer-none"));
+  else {
+    facts(box, [["Rationale", readable(replay.answer.rationale)]]);
+    const citations = Array.isArray(replay.answer.citations) ? replay.answer.citations : [];
+    box.append(plain("Citations: " + citations.length, "observer-none"));
+    for (const citation of citations.slice(0, OBSERVER_ROWS)) box.append(plain(JSON.stringify(citation, null, 2)));
+    if (citations.length > OBSERVER_ROWS) box.append(plain(
+      citations.length - OBSERVER_ROWS + " more citation(s) retained, not listed.", "observer-none"));
+  }
+  box.append(heading("Evidence (" + replay.evidence.length + ")"));
+  if (!replay.evidence.length) box.append(plain(OBSERVER_STATES.empty, "observer-none"));
+  for (const [index, item] of replay.evidence.entries()) {
+    const rows = Array.isArray(item?.rows) ? item.rows : [];
+    const block = document.createElement("details");
+    const title = document.createElement("summary");
+    title.textContent = "Evidence " + (index + 1) + " \u00b7 " + readable(item?.source) + " \u00b7 "
+      + rows.length + " row(s)";
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(
+      isObject(item) ? { ...item, rows: rows.slice(0, OBSERVER_ROWS) } : {}, null, 2)
+      + (rows.length > OBSERVER_ROWS
+        ? "\n\u2026 " + (rows.length - OBSERVER_ROWS) + " more row(s) retained, not listed." : "");
+    block.append(title, pre);
+    box.append(block);
+  }
+  renderHistory(record);
+  const reviewable = record.reviewable && role === "human";
+  observer.digest = record.digest;
+  observer.latest = record.latest;
+  observer.reviewable = reviewable;
+  observer.reviewId = "";
+  observer.attempt = null;
+  $("observer-review").hidden = !reviewable;
+  if (reviewable) reviewFields();
+  reviewControls(reviewable);
+  reviewState(reviewable ? "answered" : record.reviewable ? "unauthorised" : "unreviewable");
+}
+
+function renderHistory(record) {
+  const box = $("observer-history");
+  box.replaceChildren();
+  box.append(heading("Review history"));
+  const reviews = record.replay.feedback.slice().reverse(); // newest first: the one question a reader asks
+  box.append(plain(record.total + " review(s) held" + (record.truncated
+    ? " \u2014 the newest " + reviews.length + " are listed; older ones stay in the journal." : "."), "observer-none"));
+  reviews.forEach((item, index) => {
+    box.append(plain(index === 0 && record.latest === item.feedback_id
+      ? "Latest review" : "Earlier review", "history-label"));
+    facts(box, [["By", readable(item.reviewer)], ["Recorded", readable(item.recorded_at)],
+      ["Usefulness", readable(item.usefulness)], ["Correctness", readable(item.correctness)],
+      ["Corrected answer", item.corrected_answer ? String(item.corrected_answer) : "none"],
+      ["Export approved", item.export_approved ? "yes" : "no"],
+      ["Review seconds", readable(item.review_seconds)], ["Review id", readable(item.feedback_id)]]);
+  });
+}
+
+// The identity of the review a retry must reproduce: cycle, digest, newest review and the answer. The
+// `feedback_id` is deliberately not part of it, and object key order is normalised so the same review
+// written the same way is one key. Changed bytes are a different review, and this panel never sends one
+// without a human choosing it.
+function reviewAttemptKey(cycleId, values) {
+  const stable = (item) => (Array.isArray(item)
+    ? item.map(stable)
+    : isObject(item) ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, stable(item[key])])) : item);
+  return JSON.stringify(stable({ cycle_id: cycleId, cycle_sha256: observer.digest,
+    previous_feedback_id: observer.latest, values }));
+}
+
+function newReviewId() {
+  return "review-" + Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function reviewSubmit() {
+  if (!reviewArmed())
+    return reviewFeedback(observer.submitting ? "sent" : Object.values(reviewPicked()).some((item) => !item)
+      ? "grade" : observer.blocked ? "stale" : "unreviewable");
+  const picked = reviewPicked();
+  const corrected = $("observer-answer").value;
+  if (corrected.length > OBSERVER_ANSWER) return reviewFeedback("answer");
+  const seconds = $("observer-seconds").value;
+  if (seconds !== "" && (!/^(0|[1-9][0-9]*)$/.test(seconds) || Number(seconds) > OBSERVER_SECONDS))
+    return reviewFeedback("seconds");
+  const values = { usefulness: picked.usefulness, correctness: picked.correctness,
+    corrected_answer: corrected === "" ? null : corrected,
+    export_approved: $("observer-export").checked === true,
+    review_seconds: seconds === "" ? null : Number(seconds) };
+  // `settled` means the journal answered in a way that proves nothing was appended, so the operator may
+  // fix the form and send a different review. `unknown` means it cannot be known, so a different review
+  // waits until the record has been read again; the identical one keeps the same id and is idempotent.
+  const key = reviewAttemptKey(observer.cycle, values);
+  if (observer.attempt && observer.attempt.key !== key && observer.attempt.outcome === "unknown")
+    return reviewFeedback("changed");
+  if (!observer.reviewId || (observer.attempt && observer.attempt.key !== key)) observer.reviewId = newReviewId();
+  observer.attempt = { key, outcome: "unknown" };
+  const body = { cycle_id: observer.cycle, feedback_id: observer.reviewId, cycle_sha256: observer.digest,
+    previous_feedback_id: observer.latest, values };
+  const cycleId = observer.cycle, mine = ++observer.generation;
+  const session = token, login = generation;
+  observer.submitting = true;
+  observer.loading = false;
+  reviewControls(false);
+  $("observer-reload").disabled = true;
+  reviewFeedback("idle");
+  const answer = await observerRequest(OBSERVER_FEEDBACK, body);
+  if (!observerCurrent(mine, session, login, cycleId)) return;
+  observer.submitting = false;
+  if (answer.answer === "session") return signout();
+  if (answer.answer === "ok") {
+    const receipt = answer.body?.feedback;
+    if (!isObject(answer.body) || !exactKeys(answer.body, ["schema_version", "feedback"])
+        || !isObject(receipt) || receipt.feedback_id !== body.feedback_id
+        || receipt.cycle_id !== cycleId || typeof receipt.reviewer !== "string") {
+      reviewControls(true);
+      return reviewFeedback("broken");
+    }
+    observer.attempt = null;
+    reviewFeedback("recorded", OBSERVER_STATES.recorded(receipt.reviewer));
+    loadRecord(cycleId, ++observer.generation, false, true);
+    return;
+  }
+  if (answer.status === 409) {
+    const detail = isObject(answer.body) ? answer.body.detail : null;
+    observer.attempt.outcome = "settled";
+    observer.blocked = true;
+    reviewControls(false);
+    $("observer-reload").disabled = false;
+    return reviewFeedback(detail === "feedback_id_reused" ? "reused" : detail === "cycle_not_reviewable"
+      ? "ungraded" : OBSERVER_STALE_CODES.has(detail) ? "stale" : "conflict");
+  }
+  const code = isObject(answer.body) ? answer.body.detail : null;
+  if (typeof code === "string" && OBSERVER_REQUEST_CODES.indexOf(code) >= 0) {
+    observer.attempt.outcome = "settled"; // refused on form, before the journal could append anything
+    reviewControls(true);
+    return reviewFeedback("refused", OBSERVER_STATES.refusedCode(code));
+  }
+  if (answer.answer === "unreachable" || answer.answer === "unreadable") {
+    // Whether the append landed genuinely cannot be known from here, so the exact review stays on
+    // screen with its own id: pressing Send again repeats it, which the journal answers with the
+    // first receipt. Only a *different* review is refused, and only until the record is read again.
+    reviewControls(true);
+    return reviewFeedback("unknown");
+  }
+  reviewControls(true);
+  return reviewFeedback(answer.status === 503 ? "busy" : "conflict");
+}
 function details(row) {
   detailGeneration++;
+  reviewClear();
   $("detail-title").textContent = row.display?.description || titles[view].replace(/s$/, "") + " record";
   $("detail-fields").replaceChildren();
   $("commands").replaceChildren();
@@ -765,6 +1414,7 @@ document.querySelectorAll("[data-view]").forEach(
       $("status-filter").value = "";
       $("search").value = "";
       rows = [];
+      cyclesClear(); // an answer about cycles has no business landing in incidents, or the reverse
       render();
       refresh();
     }),
@@ -775,6 +1425,9 @@ $("refresh").onclick = refresh;
 $("logout").onclick = signout;
 $("close-detail").onclick = () => $("detail").close();
 $("verification-load").onclick = historyLoad;
+$("observer-next").onclick = () => refreshCycles(true);
+$("observer-reload").onclick = () => observer.cycle && loadRecord(observer.cycle, ++observer.generation, true, true);
+$("observer-submit").onclick = reviewSubmit;
 // Escape and the browser's own cancel close a native dialog too, and `close` is the one event all three
 // paths (button, script, Escape) end with. `open` is re-tested here so the `close()` that follows a
 // command cannot clear a detail dialog that was already reopened for another record.
@@ -783,6 +1436,8 @@ $("detail").addEventListener("close", () => {
     detailGeneration++;
     if ($("confirm").open) $("confirm").close("cancel");
     historyClear();
+    reviewClear(); // a review on its way to a dialog that has gone has nowhere to land, and the
+    // grades of a closed record must not still be sitting in the form when the next one opens
   }
 });
 icons();
