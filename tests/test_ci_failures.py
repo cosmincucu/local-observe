@@ -28,6 +28,7 @@ import socket
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
 
 from local_observe.ci_failures import (ActionsSource, BoardClient, BoardOutlet, CiFailureError,
@@ -1401,10 +1402,11 @@ class CliTests(unittest.TestCase):
         captured = LogCapture()
         captured.install()
         try:
-            code, out, err = self._run(['--once', '--state', self.state, '--file-cards'], actions,
-                                       board, environ={'LO_CI_REPOSITORY': REPO,
-                                                       'LO_CI_ACTIONS_TOKEN': ACTIONS_TOKEN,
-                                                       'LO_CI_BOARD_TOKEN': BOARD_TOKEN})
+            with mock.patch.object(self.cli, '_moment', return_value=T0):
+                code, out, err = self._run(['--once', '--state', self.state, '--file-cards'], actions,
+                                           board, environ={'LO_CI_REPOSITORY': REPO,
+                                                           'LO_CI_ACTIONS_TOKEN': ACTIONS_TOKEN,
+                                                           'LO_CI_BOARD_TOKEN': BOARD_TOKEN})
         finally:
             captured.remove()
         self.assertEqual(self.cli.EXIT_OK, code, err)
