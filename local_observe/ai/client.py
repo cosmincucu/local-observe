@@ -66,6 +66,8 @@ MAX_RESPONSE_BYTES = 65_536
 MAX_MODEL_LABEL = 160
 MAX_INSTRUCTION_BYTES = 8_192
 SLOTS = ('model', 'model_fast')
+# Provider-controlled labels outside this vocabulary stay unknown.
+FINISH_REASONS = frozenset({'stop', 'length', 'tool_calls', 'function_call', 'content_filter'})
 
 
 class AiNotConfigured(AiError):
@@ -281,8 +283,10 @@ class AiClient:
                               code='response_too_large')
             content, finish, usage, response_model = parse_reply(body)
         except AiError as exc:
+            # Retain validated counters from truncated output, never provider text or reasoning.
             self._emit(data_class=decision['data_class'], model=model, slot=slot, status='refused',
-                       code=exc.code, plan=plan, counts=counts, began=began, instruction=instruction)
+                       code=exc.code, plan=plan, counts=counts, began=began, instruction=instruction,
+                       usage=usage_counts(body) if exc.code == 'incomplete_response' else None)
             raise
         if response_model and response_model != model:
             # The serve answered as a different model than the one asked for. llama.cpp reports the
@@ -337,6 +341,9 @@ def parse_reply(body: Any) -> tuple[str, str, dict[str, Any], str | None]:
     An absent or malformed reply is a refusal, never an empty success: `docs/CONTRACTS.md` §2 states
     that a failed query must not return the same envelope as an empty result, and a model that
     produced no text has produced no explanation.
+
+    Reasoning fields are ignored. An empty answer with a known truncation label is distinguished
+    from an empty answer with no indication of truncation.
     """
     if not isinstance(body, dict) or not isinstance(body.get('choices'), list) or not body['choices']:
         raise AiError('the model endpoint returned no choices; an explanation was not produced',
@@ -345,16 +352,33 @@ def parse_reply(body: Any) -> tuple[str, str, dict[str, Any], str | None]:
     if not isinstance(choice, dict) or not isinstance(choice.get('message'), dict):
         raise AiError('the model endpoint returned a choice with no message; an explanation was not '
                       'produced', code='malformed_response')
+    # Classify reported truncation before refusing missing answer text.
+    finish = finish_label(choice.get('finish_reason'))
+    usage = usage_counts(body)
     content = choice['message'].get('content')
     if not isinstance(content, str) or not content.strip():
+        if finish == 'length' and (content is None or isinstance(content, str)):
+            raise AiError('the model endpoint reported truncated output without answer text',
+                          code='incomplete_response')
         raise AiError('the model returned no content; an empty explanation is not an explanation',
                       code='empty_content')
-    finish = choice.get('finish_reason')
-    usage_raw = body.get('usage') if isinstance(body.get('usage'), dict) else {}
-    usage = {'input_tokens': token_count(usage_raw.get('prompt_tokens')),
-             'output_tokens': token_count(usage_raw.get('completion_tokens'))}
     response_model = body.get('model') if isinstance(body.get('model'), str) else None
-    return content, (finish if isinstance(finish, str) else 'unknown'), usage, response_model
+    return content, finish, usage, response_model
+
+
+def finish_label(value: Any) -> str:
+    """Return *value* as a known finish label, or `unknown` for a label this client does not define."""
+    return value if isinstance(value, str) and value in FINISH_REASONS else 'unknown'
+
+
+def usage_counts(body: Any) -> dict[str, int | None]:
+    """Return the two token counts of one reply; a missing or malformed usage block is unknown.
+
+    Only nonnegative integer counters are retained. Missing and invalid counters stay unknown.
+    """
+    raw = body.get('usage') if isinstance(body, dict) and isinstance(body.get('usage'), dict) else {}
+    return {'input_tokens': token_count(raw.get('prompt_tokens')),
+            'output_tokens': token_count(raw.get('completion_tokens'))}
 
 
 def token_count(value: Any) -> int | None:

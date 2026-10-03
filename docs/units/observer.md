@@ -95,6 +95,11 @@ The final observer JSON answer is limited to 16 KiB; reasoning tokens belong in 
 provider's separate reasoning field, never in the final answer. Known AI budget and
 transport refusals are retained as fixed `model_*` journal codes; provider error text
 and unrecognized codes are not persisted.
+A reply reporting truncated output without answer text is journalled as
+`model_incomplete_response`. Partial answers that contain text keep the
+`incomplete_model_response` code. Both are refused without retaining response or reasoning
+text. Failed calls keep null token counts in the journal; validated counters from answerless
+truncation are available in the AI component's call record.
 Unknown model cost remains null; reported input/output token counts and elapsed time are retained.
 Remote requests carry the fixed output contract in short structured fields, so the existing
 `no_free_text` policy does not erase the instructions or evidence IDs. If that policy withholds

@@ -33,6 +33,14 @@ REPLY = {'model': 'qwen3-30b', 'choices': [{'message': {'content': 'the volume f
                                            'finish_reason': 'stop'}],
          'usage': {'prompt_tokens': 44, 'completion_tokens': 48}}
 
+# One real-shaped reply from a reasoning serve: 200 OK, the whole completion allowance gone, and the
+# text field still empty because everything generated went into the private reasoning channel.
+REASONING_CANARY = 'PRIVATE-REASONING-CANARY'
+BUDGET_EXHAUSTED = {'choices': [{'finish_reason': 'length',
+                                 'message': {'content': '', 'reasoning_content': REASONING_CANARY}}],
+                    'usage': {'completion_tokens': 8192, 'prompt_tokens': 20933, 'total_tokens': 29125,
+                              'completion_tokens_details': {'reasoning_tokens': 8192, 'text_tokens': 0}}}
+
 
 class FakeTransport:
     """Counts requests and answers with *reply*; every refusal test asserts the count is zero."""
@@ -421,6 +429,108 @@ class ResponseTests(unittest.TestCase):
         self.assertIsNone(result['response_model'])
         self.assertEqual(client.token_count(True), None)
         self.assertEqual(client.token_count(7), 7)
+
+
+class IncompleteOutputTests(unittest.TestCase):
+    """What happens when the serve answers 200 and writes no answer, and what it must never be called.
+
+    A reasoning model that spends `max_completion_tokens` on its chain of thought returns an empty
+    `content` with a `finish_reason` that says the budget ran out. Reporting that as an empty reply
+    sends a consumer down the request-failure path, so these check three separate things: the refusal
+    names the unfinished output, the measured counts survive it, and the reasoning text does not.
+    """
+
+    def refused(self, reply):
+        """Return ``(error, telemetry line, transport)`` for one call that the endpoint ruined."""
+        transport = FakeTransport(reply=reply)
+        with self.assertLogs('local_observe.ai.telemetry', 'WARNING') as captured:
+            with self.assertRaises(AiError) as caught:
+                build(transport=transport).complete(instruction='why?', data_class='internal',
+                                                    evidence=[reference()], now=NOW)
+        return caught.exception, logged(captured.records), transport
+
+    def test_a_reply_cut_off_before_any_text_is_incomplete_output(self):
+        error, line, transport = self.refused(BUDGET_EXHAUSTED)
+        self.assertEqual(error.code, 'incomplete_response')
+        self.assertNotIn(error.code, ('empty_content', 'malformed_response', 'endpoint_unavailable',
+                                      'endpoint_status'), 'an unfinished answer is not a request failure')
+        self.assertEqual(len(transport.calls), 1, 'the refusal is not a reason to try again')
+
+    def test_the_measured_counts_survive_a_refusal_and_the_reasoning_text_does_not(self):
+        error, line, _transport = self.refused(BUDGET_EXHAUSTED)
+        self.assertIn('"refusal": "incomplete_response"', line)
+        self.assertIn('"gen_ai.usage.input_tokens": 20933', line)
+        self.assertIn('"gen_ai.usage.output_tokens": 8192', line)
+        self.assertIn('"capture": false', line)
+        self.assertNotIn(REASONING_CANARY, str(error))
+        self.assertNotIn(REASONING_CANARY, line)
+        # The exception carries the code and nothing else: no provider field rides into a log line or
+        # a journal document as an attribute a caller might copy.
+        self.assertEqual(set(vars(error)), {'code'})
+
+    def test_the_parser_refuses_the_same_reply_it_was_sent_over_the_wire(self):
+        with self.assertRaises(AiError) as caught:
+            client.parse_reply(BUDGET_EXHAUSTED)
+        self.assertEqual(caught.exception.code, 'incomplete_response')
+        self.assertEqual(client.usage_counts(BUDGET_EXHAUSTED),
+                         {'input_tokens': 20933, 'output_tokens': 8192})
+
+    def test_a_finished_reply_that_wrote_nothing_keeps_the_empty_content_refusal(self):
+        for finish in ('stop', 'content_filter', 'tool_calls', 'not_a_label_this_client_defines'):
+            reply = {'choices': [{'finish_reason': finish,
+                                  'message': {'content': '  ', 'reasoning_content': REASONING_CANARY}}],
+                     'usage': {'prompt_tokens': 12, 'completion_tokens': 300}}
+            with self.subTest(finish=finish):
+                error, line, _transport = self.refused(reply)
+                self.assertEqual(error.code, 'empty_content')
+                self.assertNotIn(REASONING_CANARY, str(error) + line)
+                # Only a truncated reply keeps its counts: nothing else here is a measured fact about
+                # output the client was refused, and an invented number is worse than a null.
+                self.assertIn('"gen_ai.usage.input_tokens": null', line)
+
+    def test_a_finish_reason_that_is_not_a_known_label_cannot_claim_anything(self):
+        for finish in ({'reason': 'length'}, ['length'], 42, True, None):
+            with self.subTest(finish=repr(finish)[:20]):
+                reply = {'choices': [{'finish_reason': finish, 'message': {'content': 'partial answer'}}]}
+                self.assertEqual(client.parse_reply(reply)[1], 'unknown')
+                error, _line, _transport = self.refused(
+                    {'choices': [{'finish_reason': finish, 'message': {'content': ''}}]})
+                self.assertEqual(error.code, 'empty_content',
+                                 'an unreadable finish label does not license claiming truncation')
+
+    def test_truncation_does_not_disguise_malformed_content(self):
+        for content in ({'text': REASONING_CANARY}, [REASONING_CANARY], 7, False):
+            with self.subTest(content_type=type(content).__name__):
+                error, line, _transport = self.refused(
+                    {'choices': [{'finish_reason': 'length', 'message': {'content': content}}]})
+                self.assertEqual(error.code, 'empty_content')
+                self.assertNotIn(REASONING_CANARY, str(error) + line)
+
+    def test_a_malformed_usage_block_is_unknown_never_zero_and_never_a_crash(self):
+        unknown = {'input_tokens': None, 'output_tokens': None}
+        for usage in ('not-a-usage-object', [1, 2], 5, None, {},
+                      {'prompt_tokens': True, 'completion_tokens': -1},
+                      {'prompt_tokens': '20933', 'completion_tokens': 8192.0},
+                      {'prompt_tokens': None, 'completion_tokens': False}):
+            with self.subTest(usage=repr(usage)[:24]):
+                self.assertEqual(client.usage_counts({'usage': usage}), unknown)
+        self.assertEqual(client.usage_counts('not-a-reply'), unknown)
+        self.assertEqual(client.usage_counts({}), unknown)
+        self.assertEqual(client.usage_counts({'usage': {'prompt_tokens': 20933, 'completion_tokens': True}}),
+                         {'input_tokens': 20933, 'output_tokens': None})
+        for value in (True, False, -1, 8192.0, '7', None, [7], {'n': 1}):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(client.token_count(value))
+        self.assertEqual(client.token_count(0), 0, 'a measured zero is a number, not a gap')
+
+    def test_the_client_hands_a_partial_answer_up_instead_of_deciding_the_consumer_is_satisfied(self):
+        """Acceptance belongs to the consumer: this fixture is refused in observer tests, not here."""
+        transport = FakeTransport(reply={'choices': [{'finish_reason': 'length',
+                                                     'message': {'content': '{"decision": '}}]})
+        result = build(transport=transport).complete(instruction='why?', data_class='internal',
+                                                    evidence=[reference()], now=NOW)
+        self.assertEqual(result['finish_reason'], 'length')
+        self.assertEqual(result['content'], '{"decision": ')
 
 
 class TelemetryTests(unittest.TestCase):

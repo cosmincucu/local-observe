@@ -222,6 +222,11 @@ carrying the OTLP GenAI *attribute names* (`gen_ai.operation.name`, `gen_ai.prov
 `gen_ai.usage.output_tokens`) plus status, refusal code, `data_class`, whether the endpoint was
 outside the LAN, evidence count and bytes, redaction counts and duration.
 
+For `incomplete_response`, the endpoint reported truncated output without answer text. Its
+validated `prompt_tokens` and `completion_tokens` are retained in the refusal record. Other
+refusals keep both counters `null`. Boolean, fractional, string and negative counters remain
+unknown; reasoning text is never recorded.
+
 **These are log records, not OTLP spans.** The product has no span
 exporter (no protobuf encoder in the standard library, and `pyproject.toml` may not gain a dependency
 without an entry in `docs/DECISIONS.md`). Accepting the substitution is the reviewer's call, recorded
@@ -284,3 +289,4 @@ to `stale` in `overview.py:54-55`, which is unchanged.
 | `expired_evidence` | an evidence reference is past `expires_at` | investigate why the explanation was asked for stale evidence; **do not** re-run the query to fill the gap |
 | `response_too_large` | the serve returned more than 64 KiB | lower `max_completion_tokens` in the budget |
 | `endpoint_unavailable` | nothing answered; nothing was retried | check the service, then the base URL and `LO_INTERNAL_ALLOW_HTTP` |
+| `incomplete_response` | the endpoint reported truncated output without answer text | inspect the recorded token counts and the model's behavior within the configured budget; narrow the request or evaluate a supported model configuration before retrying; unfinished output remains refused |

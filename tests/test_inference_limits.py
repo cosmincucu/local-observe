@@ -13,7 +13,8 @@ from local_observe.observer import Config, Journal, Observer
 from local_observe.observer.adapters import Model, Sources
 from local_observe.platform.query import open_reader
 from local_observe.store.backends import clickhouse as ch
-from tests.test_ai_client import FakeTransport, MEASURED, NOW as AI_NOW, POLICY, reference
+from tests.test_ai_client import (BUDGET_EXHAUSTED, FakeTransport, MEASURED, NOW as AI_NOW, POLICY,
+                                  REASONING_CANARY, reference)
 from tests.test_observer_runtime import FixtureModel, FixtureSources, NOW, SOURCE, WINDOW, envelope
 from tests.test_store_facade import RecordingOpener, recorded, RESOURCE, WINDOW as STORE_WINDOW
 
@@ -171,6 +172,7 @@ class RefusalDiagnostics(unittest.TestCase):
         config = Config((SOURCE,))
         for code, expected in (('prompt_bytes', 'model_prompt_bytes'),
                                ('endpoint_unavailable', 'model_endpoint_unavailable'),
+                               ('incomplete_response', 'model_incomplete_response'),
                                ('untrusted-code-canary', 'model_request_failed')):
             class RejectingClient:
                 capture = False
@@ -186,3 +188,50 @@ class RefusalDiagnostics(unittest.TestCase):
                     self.assertEqual(result['error'], expected)
                     self.assertEqual(result['model_calls'][0]['status'], 'failed')
                     self.assertNotIn('canary', json.dumps(journal.get('refused')))
+
+    def test_a_budget_exhausted_reply_is_journalled_as_incomplete_output(self):
+        """The serve answered, spent every completion token and wrote no answer: the cycle says so.
+
+        Before the parser read `finish_reason` first, this reply reached the journal as
+        ``model_request_failed``, which points an operator at the endpoint while the endpoint was
+        healthy and the allowance was the problem.
+        """
+        transport = FakeTransport(reply=BUDGET_EXHAUSTED)
+        config = Config((SOURCE,))
+        with tempfile.TemporaryDirectory() as directory:
+            with closing(Journal(Path(directory) / 'state')) as journal:
+                result = Observer(config, journal, sources=FixtureSources(),
+                                  model=Model(client=client(transport=transport)),
+                                  clock=lambda: NOW).run('truncated')
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['error'], 'model_incomplete_response')
+                self.assertNotIn(result['error'], ('model_request_failed', 'model_endpoint_unavailable',
+                                                   'model_endpoint_status', 'incomplete_model_response'))
+                self.assertEqual(result['model_calls'][0]['status'], 'failed')
+                # A failed call keeps unknown counts in the journal; the measured ones belong to the
+                # AI telemetry record, and are not re-derived here from a reply the client refused.
+                self.assertEqual(result['model_calls'][0]['usage'], {'input_tokens': None,
+                                                                    'output_tokens': None})
+                self.assertEqual(len(transport.calls), 1)
+                persisted = json.dumps(journal.get('truncated'))
+                self.assertNotIn(REASONING_CANARY, persisted)
+                self.assertNotIn('reasoning', persisted)
+
+    def test_a_partial_answer_is_still_refused_by_the_observer(self):
+        """Text that stopped mid-write is a different code and an equally refused cycle."""
+        transport = FakeTransport(reply={'choices': [{'finish_reason': 'length',
+                                                     'message': {'content': '{"decision": ',
+                                                                 'reasoning_content': REASONING_CANARY}}],
+                                          'usage': {'prompt_tokens': 20933, 'completion_tokens': 512}})
+        config = Config((SOURCE,))
+        with tempfile.TemporaryDirectory() as directory:
+            with closing(Journal(Path(directory) / 'state')) as journal:
+                result = Observer(config, journal, sources=FixtureSources(),
+                                  model=Model(client=client(transport=transport)),
+                                  clock=lambda: NOW).run('partial')
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['error'], 'incomplete_model_response')
+                persisted = json.dumps(journal.get('partial'))
+                self.assertNotIn(REASONING_CANARY, persisted)
+                self.assertIsNone(result['answer'], 'a half-written answer is not recorded as a finding')
+                self.assertNotIn('answer', result['model_calls'][0])
