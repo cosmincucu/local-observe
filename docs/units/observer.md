@@ -157,9 +157,51 @@ Human review JSON separates `usefulness` (`useful`, `noise`, `unsure`) and `corr
 from 0 through 3600). Review time is human self-report, not measured elapsed time; omitted
 values remain null. Each review version retains its own value. No response stays unknown.
 The CLI authenticates through the OS-owned private directory and derives reviewer identity
-from the OS UID. Do not expose it as a web service or run it from model-selected commands.
+from the OS UID. It is not a network listener and must not be run from model-selected
+commands; an installation that wants review from a browser enables the optional platform
+review routes below, which append to the same journal under the platform's own credential.
 Reviews are append-only, with idempotent review IDs. Reusing an ID with different content fails.
 Later reviews supersede earlier export eligibility without erasing review history.
+
+## Optional authenticated review API
+
+The observer service listens on nothing. An installation that also runs the platform API can set
+`LO_OBSERVER_REVIEW_STATE` to the observer's private state directory, which adds three routes to
+that API. Unset is the default: the three paths answer `404 not_found`, no journal is opened, and
+existing platform behavior continues. Blank, relative, missing, unsafe or invalid state refuses
+platform startup. The review surface only opens an existing versioned journal; it never creates
+a database, and reading reviews does not initialize or migrate state.
+
+| Route | Answer |
+|---|---|
+| `GET /v1/observer/cycles` | At most 100 newest cycle summaries, newest first, including quiet, failed and in-flight work. Optional `limit` (1-100) and `after=<cycle_id>` cursor. Reports `limit`, `returned`, `total_cycles`, `truncated` and `next_after`. `queue_reason` reuses the workload report's `quiet-sample` and `finding-or-coverage-gap` words per row, without its window-based sampling, and is absent for a cycle that cannot be graded yet. A summary carries no evidence, answer, rationale or grade, only the newest review's ID. |
+| `GET /v1/observer/cycle?cycle_id=ID` | Retained redacted evidence, rationale, activity and the latest 100 review versions, oldest first within that page. `feedback_total` and `feedback_truncated` disclose older retained reviews; full history remains available through local replay. Also returns `cycle_sha256`, `reviewable` and `latest_feedback_id`. The digest covers the stored cycle record and must be echoed by a review form. An unknown cycle is `404`. |
+| `POST /v1/observer/feedback` | Accepts exactly `cycle_id`, `feedback_id`, `cycle_sha256`, `previous_feedback_id` and `values`, where `values` is the same review document the CLI accepts. Returns the stored feedback record. |
+
+Every route requires a `human` bearer credential from the platform's mounted role list — the same
+credential the operator shell substitutes for a password login. `reader`, `proposer`, `executor` and
+`producer` tokens are answered `403 not_authorised`, a `summary` token `403 summary_only`, and a
+missing, wrong or duplicated `Authorization` header `401 authentication_required`. No request field
+names a reviewer, an identity or a role: the journal records `platform-human:<authenticated identity>`,
+while CLI reviews keep their `os-uid:<uid>` reviewer.
+
+A submission is refused with no append when the retained cycle's digest has changed
+(`409 cycle_digest_changed`) or the review it names is no longer the newest (`409 stale_review`, where
+`previous_feedback_id: null` means "this cycle has no review yet"). Repeating a review ID with the same
+reviewer and the same contents returns the original receipt, including after a later review arrived;
+changing a grade, a correction or the reviewer under an ID already in use is `409 feedback_id_reused`.
+Both judgements happen inside the journal's own write transaction. A review never rewrites a cycle
+record, its delivery state, its acceptance binding or its retention, and it cannot make an unreviewed
+`quiet`, failed or skipped result read as correct: such a cycle stays `review: unknown`.
+
+Inputs are bounded before the journal is opened, and refusals are fixed: 256 query bytes, 65536 body
+bytes, the journal's bounded identifier shape, one 64-character lowercase digest, and an exact field set
+on both the body and `values`. A duplicate JSON key, a non-object body, a non-finite number, an
+oversized document or undecodable UTF-8 is a `400 invalid_request` naming a public journal code. An
+unopenable, unowned, unversioned or unreadable journal, and any fault this process cannot judge, is one
+`503 observer_state_unavailable`. No path, exception text, credential or request value appears in any
+answer. This surface adds no service, no scheduler, no delivery and no grade of its own; automatic
+notification rules are unchanged.
 
 Retrieval and JSONL export require a nonempty independent correction, an explicit export
 approval, evidence, and a decided correctness grade. Scalar grades alone are insufficient.

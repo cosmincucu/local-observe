@@ -237,7 +237,8 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                overview_path: Path | str | None = None,
                intake_rules: Mapping[str, Any] | None = None, *,
                runner_handoff: Any | None = None,
-               guided_setup: Any | None = None) -> Callable[..., Awaitable[None]]:
+               guided_setup: Any | None = None,
+               observer_review: Path | str | None = None) -> Callable[..., Awaitable[None]]:
     validate_credentials(credentials)
     runner_ids = set(runner_handoff.runners) if runner_handoff is not None else set()
     if guided_setup is not None:
@@ -277,6 +278,17 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     # on its account. Its path census is the module's own `owns`, so no prefix in this file decides.
     from . import verification_api as verification_service
     verification = verification_service.VerificationAPI(store)
+
+    # The optional observer review seam: three routes over the observer's own private journal, built only
+    # when this installation names one (`observer_review.py` owns the rules, the bounds and the refusals).
+    # `None` is the off switch and costs nothing — no import, no path touched, and the three paths keep
+    # their old `404 not_found`. A named directory with no journal is a boot refusal raised here rather
+    # than a review surface that opens an empty database, so a caller that builds an app directly is
+    # refused exactly as a deployment that set the environment variable is.
+    review_api = None
+    if observer_review is not None:
+        from .observer_review import ObserverReview
+        review_api = ObserverReview(observer_review)
 
     def note_delivery_failure() -> int:
         """Count one failed delivery-loop iteration, stamp when it happened, return the tally."""
@@ -646,6 +658,20 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return
                 status, payload = handled
                 return await respond(status, payload)
+            if review_api is not None and review_api.owns(path):
+                # The observer review paths are handed over whole, for the reasons `verification_api`
+                # gives: the role test these three routes answer to is `human` alone (`reader` may read
+                # records elsewhere and still must not see a grade), and a POST body here is judged by
+                # the service — size, duplicate keys and UTF-8 belong ahead of its first journal call,
+                # not to the transport's generic parser, which keeps the last of two repeated keys.
+                # `None` is the one answer that is not a status: the caller disconnected mid-body, so
+                # nothing is owed and no review is written. No review path reaches an old branch, and a
+                # deployment without a configured journal never reaches this one.
+                handled = await review_api.handle(scope, receive, actor)
+                if handled is None:
+                    return
+                status, payload = handled
+                return await respond(status, payload)
             if method == 'GET':
                 require(actor, 'reader', 'human', 'proposer', 'executor', 'summary')
                 if actor.role == 'summary' and path not in ('/v1/me', '/v1/overview'):
@@ -907,6 +933,12 @@ def app_factory() -> Callable[..., Awaitable[None]]:
     # not a promise that every startup failure was ever IO-free. An unset `LO_VERIFICATION_POLICY` is the
     # off switch and costs nothing — `None`, no file opened, no second policy vocabulary.
     validate_credentials(credentials)
+    # The observer's review surface is opt-in and checked here, ahead of the state file: unset is the
+    # documented off switch, and a value that is blank, relative or pointed at a directory with no
+    # journal is a deployment that must be fixed, not a platform that boots with a review API over an
+    # empty database it just created. Only the variable's name appears in the refusal.
+    from .observer_review import state_path_from_environment
+    observer_state = state_path_from_environment()
     mounted_policy = verification_policy.policy_from_environment(credentials)
     definitions = json.loads(Path(os.environ['LO_ACTION_POLICY']).read_text())
     clients: dict[str, Any] = {}
@@ -972,4 +1004,5 @@ def app_factory() -> Callable[..., Awaitable[None]]:
     return create_app(store, credentials,
                       policy, clients or None,
                       os.environ['LO_INDEX_PATH'], display, os.environ.get('LO_OVERVIEW_PATH'),
-                      intake_rules, runner_handoff=handoff, guided_setup=setup)
+                      intake_rules, runner_handoff=handoff, guided_setup=setup,
+                      observer_review=observer_state)
