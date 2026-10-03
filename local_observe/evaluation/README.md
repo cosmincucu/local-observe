@@ -166,6 +166,15 @@ Real reports therefore contain private telemetry and labels and must stay in pro
 are not anonymized merely by an origin label. Generated CI reports remain synthetic. Truth enters the
 report after investigations; it never enters the investigator context.
 
+Use `origin: operator-held-out` for private independently labelled operator telemetry. The existing
+`anonymized-example` origin remains supported; neither spelling proves independence, anonymization
+or model quality. `generated-demo` inputs can exercise the evaluator but cannot authorize delivery.
+All origins retain the same input bounds and measurement checks. Real reports and corpus files stay
+outside source control, including when resource identifiers have been replaced. Keep incident/time
+windows disjoint from training and retrieval, freeze the corpus before comparing candidates, and
+record unavailable labels as unknown. Human acceptance still requires an explicit independent-label
+attestation after reviewing the report.
+
 `flip_rate.measurements` records each arm's explicit unit, status, units, missing decisions, disagreements and
 comparisons. `per_arm` and aggregate `rate` are null when the corresponding population is incomplete.
 Deployment review needs an independently held-out corpus, operator-supplied configuration, matching

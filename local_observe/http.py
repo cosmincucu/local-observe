@@ -2,6 +2,7 @@
 import email.message
 import http.client
 import json
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -22,6 +23,25 @@ class ResultTooLarge(TransportError):
     """The endpoint answered, but its result exceeded the bounded read."""
 
     code = 'source_result_too_large'
+
+
+_HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.0-9A-Za-z^_`|~]{1,64}")
+
+
+class ResponseHeader:
+    """Per-attempt slot for exactly one named response header; no other header can land in it.
+
+    The name is fixed at construction and `JsonClient.request` empties the slot before every attempt,
+    so a value read from one response cannot be reused as evidence about a later one. Values live only
+    here: nothing in this module logs, hashes or stores them.
+    """
+
+    __slots__ = ('name', 'values')
+
+    def __init__(self, name: str) -> None:
+        if not isinstance(name, str) or _HEADER_TOKEN.fullmatch(name) is None:
+            raise TransportError('Response header name must be a bounded token')
+        self.name, self.values = name.lower(), []
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -98,11 +118,22 @@ class JsonClient:
         return min(timeout, self.timeout)
 
     def request(self, method: str, path: str = '', payload: Any = None, *,
-                headers: dict[str, str] | None = None, timeout: int | None = None) -> tuple[int, Any]:
-        """Perform one bounded JSON request; failures are logged without credentials."""
+                headers: dict[str, str] | None = None, timeout: int | None = None,
+                response_header: ResponseHeader | None = None) -> tuple[int, Any]:
+        """Perform one bounded JSON request; failures are logged without credentials.
+
+        `response_header` is an optional single-name `ResponseHeader` slot. When given, it starts the
+        attempt empty and only that header of a 2xx answer is collected -- a few values at most, so a
+        repeated header still reads as the duplicate it is. An error status, a timeout or an
+        unreachable endpoint leaves it empty, and its content is never logged.
+        """
         if path and (not path.startswith('/') or path.startswith('//')
                      or '..' in urllib.parse.unquote(path).split('/')):
             raise _refused(method, path, TransportError('Invalid relative API path'))
+        if response_header is not None and not isinstance(response_header, ResponseHeader):
+            raise _refused(method, path, TransportError('Invalid response header slot'))
+        if response_header is not None:
+            response_header.values = []
         limit = self._attempt_timeout(method, path, timeout)
         request = urllib.request.Request(
             self.base + path,
@@ -116,6 +147,9 @@ class JsonClient:
                 if len(raw) > 4 * 1024 * 1024:
                     raise TransportError('HTTP response exceeds bound')
                 status = response.status
+                if response_header is not None:
+                    found = response.headers.get_all(response_header.name) or []
+                    response_header.values = [item for item in found if isinstance(item, str)][:4]
             try:
                 return status, json.loads(raw) if raw else None
             except ValueError:

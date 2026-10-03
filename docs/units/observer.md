@@ -112,15 +112,43 @@ Remote requests carry the fixed output contract in short structured fields, so t
 any evidence text, the cycle fails explicitly as `model_evidence_withheld`; it cannot become
 a quiet finding over data the model did not receive. Prefer local inference for prose-heavy logs.
 
+One gateway alias can front several distinct backends, so the name inside the response envelope
+cannot say which deployment answered. Where the operator declares the expected gateway deployment ID
+in `LO_OBSERVER_MODEL_DEPLOYMENT`, the observer wraps that client's transport and reads exactly one
+response header (`X-Litellm-Model-Id`) from the same successful response that produced the answer.
+A missing, folded, repeated or different ID fails the cycle as `model_deployment_mismatch` before the
+answer is used, and the observed value is compared only: never returned, logged, hashed or journalled.
+The slot is per attempt and one attempt is made per call, so neither an earlier match nor a call that
+timed out or answered with an error status can certify a later call; an error status keeps its existing
+refusal code. The AI client's existing `body.model` alias check is unchanged and still applies. When
+the variable is unset nothing is wrapped and no header is read, and a client whose transport cannot
+carry the single-header contract is refused as `model_deployment_unsupported` rather than left
+unchecked. The expected ID is a bounded single token (no URL, path separator, folding byte or space)
+and it must name one backend: point this at an endpoint that does not return the header, or at a pool
+whose ID moves, and every call is refused.
+
+Under that selection, provenance `model_version` becomes `route-sha256:<hex>`: the SHA-256 of the
+canonical pair `[declared LO_OBSERVER_MODEL_VERSION, expected deployment ID]`, so the field is a
+bounded label over two operator declarations and never a copy of either. A missing or unknown declared
+version stays null instead of becoming a digest that manufactures completeness. Changing the expected
+deployment or the declared version, or selecting and deselecting this contract, changes the provenance
+hash and therefore invalidates a previous quality acceptance and delivery authority -- at startup,
+before any new call, not only after one. Static provenance may already carry the derived label while
+`response_model` is still null, so `complete` stays false and only a successfully guarded call can
+complete a cycle. This is transport metadata about where a request went, not an attestation of loaded
+weights: no alias, response header or cache reference proves a historical weight revision, and
+provider and model version remain explicit operator metadata.
+
 `run` and `serve` accept `--environment /private/path/observer-environment.json`, including
 the JSON emitted by guided setup. This is an allowlisted mapping of environment names to
 strings, never a shell script. The file must be an owned, regular mode-0600 file within an
 owned mode-0700 directory, with no symlinks or hardlinks. It replaces ambient settings;
 it does not merge with them. Allowed settings are the ClickHouse URL, read user and password
 file; AI base URL, key file, model/fast model, out-of-LAN flag, capture flag, policy, capability
-and budget files; internal HTTP flag; and the nonsecret `LO_OBSERVER_MODEL_PROVIDER` and
-`LO_OBSERVER_MODEL_VERSION` labels. Raw credentials and other names are rejected. Capture
-is always disabled. Without this option, only the same allowlisted ambient names are used.
+and budget files; internal HTTP flag; and the nonsecret `LO_OBSERVER_MODEL_PROVIDER`,
+`LO_OBSERVER_MODEL_VERSION` and optional `LO_OBSERVER_MODEL_DEPLOYMENT` labels. Raw
+credentials and other names are rejected. Capture is always disabled. Without this option,
+only the same allowlisted ambient names are used.
 
 ## Running and reviewing
 
@@ -157,9 +185,56 @@ Human review JSON separates `usefulness` (`useful`, `noise`, `unsure`) and `corr
 from 0 through 3600). Review time is human self-report, not measured elapsed time; omitted
 values remain null. Each review version retains its own value. No response stays unknown.
 The CLI authenticates through the OS-owned private directory and derives reviewer identity
-from the OS UID. Do not expose it as a web service or run it from model-selected commands.
+from the OS UID. It is not a network listener and must not be run from model-selected
+commands; an installation that wants review from a browser enables the optional platform
+review routes below, which append to the same journal under the platform's own credential.
 Reviews are append-only, with idempotent review IDs. Reusing an ID with different content fails.
 Later reviews supersede earlier export eligibility without erasing review history.
+Withdrawing export approval excludes the correction from subsequent retrieval and exports. Existing
+export files and downstream training copies remain unchanged; retire those copies separately before
+training again. Keep held-out evaluation incidents and time windows out of the training journal.
+
+## Optional authenticated review API
+
+The observer service listens on nothing. An installation that also runs the platform API can set
+`LO_OBSERVER_REVIEW_STATE` to the observer's private state directory, which adds three routes to
+that API. Unset is the default: the three paths answer `404 not_found`, no journal is opened, and
+existing platform behavior continues. Blank, relative, missing, unsafe or invalid state refuses
+platform startup. The review surface only opens an existing versioned journal; it never creates
+a database, and reading reviews does not initialize or migrate state.
+
+| Route | Answer |
+|---|---|
+| `GET /v1/observer/cycles` | At most 100 newest cycle summaries, newest first, including quiet, failed and in-flight work. Optional `limit` (1-100) and `after=<cycle_id>` cursor. Reports `limit`, `returned`, `total_cycles`, `truncated` and `next_after`. `queue_reason` reuses the workload report's `quiet-sample` and `finding-or-coverage-gap` words per row, without its window-based sampling, and is absent for a cycle that cannot be graded yet. A summary carries no evidence, answer, rationale or grade, only the newest review's ID. |
+| `GET /v1/observer/cycle?cycle_id=ID` | Retained redacted evidence, rationale, activity and the latest 100 review versions, oldest first within that page. `feedback_total` and `feedback_truncated` disclose older retained reviews; full history remains available through local replay. Also returns `cycle_sha256`, `reviewable` and `latest_feedback_id`. The digest covers the stored cycle record and must be echoed by a review form. An unknown cycle is `404`. |
+| `POST /v1/observer/feedback` | Accepts exactly `cycle_id`, `feedback_id`, `cycle_sha256`, `previous_feedback_id` and `values`, where `values` is the same review document the CLI accepts. Returns the stored feedback record. |
+
+Every route requires a `human` bearer credential from the platform's mounted role list — the same
+credential the operator shell substitutes for a password login. `reader`, `proposer`, `executor` and
+`producer` tokens are answered `403 not_authorised`, a `summary` token `403 summary_only`, and a
+missing, wrong or duplicated `Authorization` header `401 authentication_required`. No request field
+names a reviewer, an identity or a role: the journal records `platform-human:<authenticated identity>`,
+while CLI reviews keep their `os-uid:<uid>` reviewer.
+
+A submission is refused with no append when the retained cycle's digest has changed
+(`409 cycle_digest_changed`) or the review it names is no longer the newest (`409 stale_review`, where
+`previous_feedback_id: null` means "this cycle has no review yet"). Repeating a review ID with the same
+reviewer and the same contents returns the original receipt, including after a later review arrived;
+changing a grade, a correction or the reviewer under an ID already in use is `409 feedback_id_reused`.
+Both judgements happen inside the journal's own write transaction. A review never rewrites a cycle
+record, its delivery state, its acceptance binding or its retention, and it cannot make an unreviewed
+`quiet`, failed or skipped result read as correct: such a cycle stays `review: unknown`.
+
+Inputs are bounded before the journal is opened, and refusals are fixed: 256 query bytes, 65536 body
+bytes, the journal's bounded identifier shape, one 64-character lowercase digest, and an exact field set
+on both the body and `values`. A duplicate JSON key, a non-object body, a non-finite number, an
+oversized document or undecodable UTF-8 is a `400 invalid_request` naming a public journal code. An
+unopenable, unowned, unversioned or unreadable journal, and any fault this process cannot judge, is one
+`503 observer_state_unavailable`. No path, exception text, credential or request value appears in any
+refusal response. Journal work runs off the serving loop with four concurrent operations and no waiting
+queue; excess requests receive `503 observer_review_busy`. Cancellation does not release capacity until
+the underlying operation ends. This surface adds no service, no scheduler, no delivery and no grade of its own; automatic
+notification rules are unchanged.
 
 Retrieval and JSONL export require a nonempty independent correction, an explicit export
 approval, evidence, and a decided correctness grade. Scalar grades alone are insufficient.
@@ -198,7 +273,9 @@ relevant shared source files; policy, capability and budget hash effective docum
 The configured model and actual provider response model are separate identities. Missing
 metadata remains null and makes `complete` false; shadow observation can still proceed.
 Mixed provenance within a cycle fails it. Provider/version labels are explicit operator
-metadata, not independently verified provider claims. No endpoints, credential references,
+metadata, not independently verified provider claims. Where the optional gateway deployment ID
+is selected, `model_version` is the derived `route-sha256:` label described above and the
+observed header value never appears in this object. No endpoints, credential references,
 prompt bodies or evidence bodies appear in this object.
 
 Credential-named fields, recognizable credential assignments, URL credentials and known

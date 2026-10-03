@@ -9,6 +9,8 @@ import os
 from dataclasses import asdict
 from pathlib import Path
 
+from local_observe.evaluation.model import HELD_OUT_ORIGINS
+
 from .contract import Config, ObserverError, digest, encoded, fields, instant, require, strict_json, utc
 from .environment import protected_bytes
 from .provenance import build_provenance, is_digest, validate_provenance
@@ -211,7 +213,8 @@ def validate_report(report: dict, *, config_sha256: str, provenance: dict, confi
             'quality_not_measured_pass')
     require(isinstance(manifest, dict) and type(manifest.get('schema_version')) is int
             and manifest['schema_version'] == 2 and manifest.get('origin') == quality.get('corpus_origin')
-            == 'anonymized-example' and is_digest(manifest.get('corpus_sha256')), 'independent_corpus_required')
+            and manifest.get('origin') in HELD_OUT_ORIGINS
+            and is_digest(manifest.get('corpus_sha256')), 'independent_corpus_required')
     require(type(quality.get('truth_incidents')) is int and quality['truth_incidents'] > 0, 'quality_truth_unknown')
     novel = quality.get('novel_classes')
     require(isinstance(novel, list) and 1 <= len(novel) <= 6

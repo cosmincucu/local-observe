@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": {"const": 1, "type": "integer"},
     "id": {"type": "string", "minLength": 1, "maxLength": 64},
-    "origin": {"enum": ["generated-demo", "anonymized-example"]},
+    "origin": {"enum": ["generated-demo", "anonymized-example", "operator-held-out"]},
     "evaluation": {"$ref": "#/$defs/window"},
     "incidents": {"type": "array", "minItems": 0, "maxItems": 128, "items": {
       "type": "object", "additionalProperties": false,
