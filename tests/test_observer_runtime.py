@@ -47,6 +47,13 @@ def answer(evidence, *, decision='watch', follow_up=None):
                            'value': item['rows'][0][key]}], 'follow_up': follow_up or []}
 
 
+def check_expectation(**overrides):
+    """The exact seven fields `check` returns; a test names only the values it expects to differ."""
+    return {'schema_version': 1, 'healthy': False, 'cycle_id': None, 'status': 'never_run',
+            'coverage': 'unknown', 'ended_at': None,
+            'meaning': 'execution_and_coverage_only; human_review_is_separate', **overrides}
+
+
 class FixtureSources:
     def __init__(self, transform=None):
         self.calls = []
@@ -106,6 +113,103 @@ class ObserverTests(unittest.TestCase):
         with sqlite3.connect(self.journal.path) as db:
             persisted = json.loads(db.execute('SELECT document FROM cycles').fetchone()[0])
         self.assertEqual(persisted, result)
+
+    def start_cycle(self, cycle_id: str, at: dt.datetime) -> dict:
+        """Persist only the running row of a cycle, exactly as the runtime does before any work."""
+        record, created = self.journal.begin(cycle_id, at, WINDOW, self.config.mode)
+        self.assertTrue(created)
+        return record
+
+    def check_on_disk(self, *, now: dt.datetime, max_age_seconds: int) -> dict:
+        """Read freshness through a new handle, so the answer comes from the file and not this process."""
+        reopened = Journal(self.state)
+        try:
+            return reopened.check(now=now, max_age_seconds=max_age_seconds)
+        finally:
+            reopened.close()
+
+    def test_a_running_cycle_keeps_a_fresh_completion_healthy(self):
+        completed = self.run_cycle('cycle-1')
+        self.start_cycle('cycle-2', NOW + dt.timedelta(minutes=59))
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=59), max_age_seconds=3600),
+                         check_expectation(healthy=True, cycle_id='cycle-1', status='completed',
+                                           coverage='complete', ended_at=completed['ended_at']))
+
+    def test_a_running_cycle_preserves_the_newest_unsuccessful_completion(self):
+        self.run_cycle('older-complete')
+        missing = replace(SOURCE, id='missing')
+        partial = self.run_cycle('newest-partial', config=replace(self.config, sources=(SOURCE, missing)),
+                                 sources=FixtureSources(lambda d: {**d, 'rows': []} if d['source'] == 'missing' else d),
+                                 model=FixtureModel(lambda a: {**a, 'decision': 'quiet'}))
+        self.start_cycle('running-partial', NOW + dt.timedelta(minutes=58))
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=58), max_age_seconds=3600),
+                         check_expectation(cycle_id='newest-partial', status='partial', coverage='partial',
+                                           ended_at=partial['ended_at']))
+        failed = self.run_cycle('newest-failed', sources=FixtureSources(lambda d: {**d, 'rows': []}))
+        self.start_cycle('running-failed', NOW + dt.timedelta(minutes=59))
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=59), max_age_seconds=3600),
+                         check_expectation(cycle_id='newest-failed', status='failed', coverage='failed',
+                                           ended_at=failed['ended_at']))
+        blocking = Journal(self.state)
+        try:
+            with blocking.lock():
+                skipped = self.run_cycle('newest-skipped')
+        finally:
+            blocking.close()
+        self.assertEqual((skipped['status'], skipped['coverage']), ('skipped', 'skipped'))
+        self.start_cycle('running-skipped', NOW + dt.timedelta(minutes=57))
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=57), max_age_seconds=3600),
+                         check_expectation(cycle_id='newest-skipped', status='skipped', coverage='skipped',
+                                           ended_at=skipped['ended_at']))
+
+    def test_a_running_cycle_does_not_hide_a_stale_or_future_completion(self):
+        completed = self.run_cycle('cycle-1')
+        self.start_cycle('cycle-2', NOW + dt.timedelta(minutes=59))
+        for now in (NOW + dt.timedelta(hours=2), NOW - dt.timedelta(minutes=1)):
+            with self.subTest(now=utc(now)):
+                self.assertEqual(self.check_on_disk(now=now, max_age_seconds=3600),
+                                 check_expectation(cycle_id='cycle-1', status='completed', coverage='complete',
+                                                   ended_at=completed['ended_at']))
+
+    def test_journal_without_a_finished_completion_has_no_freshness(self):
+        self.assertEqual(self.check_on_disk(now=NOW, max_age_seconds=3600), check_expectation())
+        self.start_cycle('cycle-1', NOW)
+        self.assertEqual(self.check_on_disk(now=NOW, max_age_seconds=3600),
+                         check_expectation(cycle_id='cycle-1', status='running', coverage='unknown'))
+
+    def test_finished_current_cycle_becomes_the_described_completion(self):
+        first = self.run_cycle('cycle-1')
+        running = self.start_cycle('cycle-2', NOW + dt.timedelta(minutes=1))
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=1), max_age_seconds=3600),
+                         check_expectation(healthy=True, cycle_id='cycle-1', status='completed',
+                                           coverage='complete', ended_at=first['ended_at']))
+        ended = utc(NOW + dt.timedelta(minutes=2))
+        running.update(status='partial', coverage='partial', decision=None, error='cycle_deadline', ended_at=ended)
+        self.journal.save(running)
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=2), max_age_seconds=3600),
+                         check_expectation(cycle_id='cycle-2', status='partial', coverage='partial', ended_at=ended))
+        current = self.start_cycle('cycle-3', NOW + dt.timedelta(minutes=3))
+        ended = utc(NOW + dt.timedelta(minutes=4))
+        current.update(status='completed', coverage='complete', decision='watch', ended_at=ended)
+        self.journal.save(current)
+        self.assertEqual(self.check_on_disk(now=NOW + dt.timedelta(minutes=4), max_age_seconds=3600),
+                         check_expectation(healthy=True, cycle_id='cycle-3', status='completed',
+                                           coverage='complete', ended_at=ended))
+
+    def test_cli_check_reports_the_completion_behind_a_running_cycle(self):
+        completed = self.run_cycle('cycle-1')
+        self.start_cycle('cycle-2', NOW + dt.timedelta(minutes=1))
+        with patch('local_observe.observer.cli.dt') as clock:
+            clock.datetime.now.return_value = NOW + dt.timedelta(minutes=1)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(['--state', str(self.state), 'check']), 0)
+            self.assertEqual(json.loads(output.getvalue()),
+                             check_expectation(healthy=True, cycle_id='cycle-1', status='completed',
+                                               coverage='complete', ended_at=completed['ended_at']))
+            clock.datetime.now.return_value = NOW + dt.timedelta(seconds=7201)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(['--state', str(self.state), 'check']), 2)
+            self.assertFalse(json.loads(output.getvalue())['healthy'])
 
     def test_duplicates_after_reopen_do_not_read_call_or_record_again(self):
         original = self.run_cycle()

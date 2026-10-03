@@ -141,6 +141,11 @@ python -m local_observe.observer --state /var/lib/local-observe/observer backup 
 
 `run` exits 0 only for complete execution/coverage, 2 for partial/failed/skipped work.
 `check` reports independent execution freshness, not a model assurance or human endorsement.
+It describes the newest finished cycle while the next cycle runs. That result keeps its original
+completion time: active work cannot refresh it or hide a newer failed, partial or skipped result.
+Only complete coverage within `--max-age-seconds` is healthy; stale or future completions fail.
+With no finished cycle, a running attempt remains unhealthy and an empty journal reports
+`never_run`. Once the active cycle finishes, its result replaces the previous observation.
 A fresh, complete `tell` can be a healthy *observer execution*. A quiet result remains
 unreviewed until a human grades it. An external scheduler can monitor `check` without
 depending on the observer model or notification channel. `serve` defaults to hourly UTC

@@ -275,7 +275,12 @@ class Journal:
         return result
 
     def check(self, *, now: dt.datetime, max_age_seconds: int) -> dict:
-        row = self.db.execute('SELECT document FROM cycles ORDER BY rowid DESC LIMIT 1').fetchone()
+        """Freshness of the newest finished cycle; a running cycle never refreshes or hides it."""
+        # A running row carries no completion, so the newest finished row keeps deciding health with
+        # its own unchanged ended_at. Only a journal without any finished row describes the attempt.
+        finished = "SELECT document FROM cycles WHERE status<>'running' ORDER BY rowid DESC LIMIT 1"
+        row = (self.db.execute(finished).fetchone()
+               or self.db.execute('SELECT document FROM cycles ORDER BY rowid DESC LIMIT 1').fetchone())
         latest = strict_json(row[0], 524288, max_depth=20) if row else None
         healthy = bool(latest and latest['status'] == 'completed' and latest['coverage'] == 'complete'
                        and latest['ended_at'] and 0 <= (now - instant(latest['ended_at'])).total_seconds()
