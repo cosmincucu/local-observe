@@ -190,6 +190,9 @@ commands; an installation that wants review from a browser enables the optional 
 review routes below, which append to the same journal under the platform's own credential.
 Reviews are append-only, with idempotent review IDs. Reusing an ID with different content fails.
 Later reviews supersede earlier export eligibility without erasing review history.
+Withdrawing export approval excludes the correction from subsequent retrieval and exports. Existing
+export files and downstream training copies remain unchanged; retire those copies separately before
+training again. Keep held-out evaluation incidents and time windows out of the training journal.
 
 ## Optional authenticated review API
 

@@ -112,7 +112,7 @@ def answered_as(status):
 
 def refused_by_transport():
     """An opener that fails before an answer exists: the same OSError path a timeout takes."""
-    return socket.timeout('no answer')
+    return TimeoutError('no answer')
 
 
 class GuardTestCase(unittest.TestCase):
@@ -370,7 +370,8 @@ class TransportTests(GuardTestCase):
                                                              DEPLOYMENT_HEADER: 'backend-a'})),
         }
         for name, response in cases.items():
-            self.expect(self.model(response), 'model_deployment_mismatch')
+            with self.subTest(case=name):
+                self.expect(self.model(response), 'model_deployment_mismatch')
         duplicated = FakeResponse(completion_body()).duplicate(DEPLOYMENT_HEADER, ['backend-a', 'backend-a'])
         self.expect(self.model(duplicated), 'model_deployment_mismatch')
 
@@ -513,4 +514,3 @@ class JournalTests(GuardTestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

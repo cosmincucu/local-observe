@@ -130,7 +130,7 @@ def _no_git_marker(directory_fd: int) -> None:
 
 
 class Journal:
-    """One OS account owns state and human feedback; there is no network feedback listener."""
+    """Private state owned by one OS account; authenticated surfaces supply verified reviewer identity."""
 
     def __init__(self, directory: str | Path, *, create: bool = True):
         self.directory = Path(directory).absolute()

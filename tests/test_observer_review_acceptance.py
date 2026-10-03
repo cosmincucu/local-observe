@@ -1,17 +1,79 @@
 """Independent acceptance of review concurrency, bounded reads and existing-state opens."""
 from concurrent.futures import ThreadPoolExecutor
+import contextlib
+import datetime as dt
 import hashlib
+import io
+import json
 import sqlite3
 import threading
 from unittest.mock import patch
 
-from local_observe.observer.contract import ObserverError, digest
+from local_observe.observer.cli import main
+from local_observe.observer.contract import ObserverError, digest, instant
 from local_observe.observer.journal import Journal
-from local_observe.platform.observer_review import CYCLE_ROUTE, CYCLES_ROUTE
-from test_observer_review_api import ReviewFixture
+from local_observe.platform.observer_review import CYCLE_ROUTE, CYCLES_ROUTE, FEEDBACK_ROUTE
+from test_observer_review_api import HUMAN_A, ReviewFixture, submission
 
 
 class ReviewAcceptanceTests(ReviewFixture):
+    def test_human_correction_retrieval_export_and_withdrawal_across_restart(self):
+        self.seeded()
+        original = self.journal.get('quiet-1')
+        fingerprint = digest(original)
+        body = submission('quiet-1', 'correction-1', fingerprint, correctness='incorrect',
+                          corrected_answer='CPU remained quiet; password=synthetic-correction-secret',
+                          export_approved=True, review_seconds=31)
+        status, saved = self.post(FEEDBACK_ROUTE, body)
+        self.assertEqual(status, 200)
+        feedback = saved['feedback']
+        self.assertEqual(feedback['reviewer'], 'platform-human:' + HUMAN_A['identity'])
+        self.assertNotIn('synthetic-correction-secret', feedback['corrected_answer'])
+        self.assertEqual(self.post(FEEDBACK_ROUTE, body), (status, saved))
+        self.assertEqual(self.feedback_count(), 1)
+        before = instant(feedback['recorded_at']) + dt.timedelta(seconds=1)
+        retrieve = {'before': before, 'limit': 10, 'max_bytes': 65536, 'exclude': 'next-cycle'}
+        reopened = Journal(self.state, create=False)
+        self.addCleanup(reopened.close)
+        history = reopened.retrieve(**retrieve)
+        self.assertEqual([row['cycle_id'] for row in history], ['quiet-1'])
+        self.assertEqual(history[0]['trust'], 'untrusted_historical_example')
+        self.assertEqual(reopened.retrieve(**{**retrieve, 'exclude': 'quiet-1'}), [])
+        self.assertEqual(reopened.retrieve(**{**retrieve, 'before': instant(feedback['recorded_at'])}), [])
+        export = self.state / 'approved.jsonl'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['--state', str(self.state), 'export', '--output', str(export)]), 0)
+        exported = [json.loads(line) for line in export.read_text(encoding='utf-8').splitlines()]
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]['feedback'], feedback)
+        self.assertEqual(export.stat().st_mode & 0o777, 0o600)
+        exported_digest = hashlib.sha256(export.read_bytes()).hexdigest()
+        withdrawn = submission('quiet-1', 'correction-withdrawn', fingerprint, 'correction-1',
+                               correctness='incorrect', corrected_answer='Do not reuse this correction.',
+                               export_approved=False)
+        self.assertEqual(self.post(FEEDBACK_ROUTE, withdrawn)[0], 200)
+        self.assertEqual(reopened.examples(), [])
+        self.assertEqual(reopened.retrieve(**retrieve), [])
+        after = self.state / 'withdrawn.jsonl'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['--state', str(self.state), 'export', '--output', str(after)]), 0)
+        self.assertEqual(after.read_bytes(), b'')
+        self.assertEqual(hashlib.sha256(export.read_bytes()).hexdigest(), exported_digest)
+        self.assertEqual(reopened.get('quiet-1'), original)
+        self.assertEqual(len(reopened.replay('quiet-1')['feedback']), 2)
+
+    def test_scalar_grade_and_uncertain_correction_never_become_training_examples(self):
+        self.seeded()
+        fingerprint = digest(self.journal.get('quiet-1'))
+        scalar = submission('quiet-1', 'scalar', fingerprint)
+        self.assertEqual(self.post(FEEDBACK_ROUTE, scalar)[0], 200)
+        self.assertEqual(self.journal.examples(), [])
+        uncertain = submission('quiet-1', 'uncertain', fingerprint, 'scalar', correctness='unsure',
+                               corrected_answer='Independent answer is still unknown.', export_approved=True)
+        self.assertEqual(self.post(FEEDBACK_ROUTE, uncertain)[0], 400)
+        self.assertEqual(self.journal.examples(), [])
+        self.assertEqual(self.feedback_count(), 1)
+
     def test_simultaneous_reviews_have_one_winner_and_one_stale_refusal(self):
         self.seeded()
         barrier = threading.Barrier(2)
