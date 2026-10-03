@@ -42,8 +42,18 @@ class BudgetLimits(unittest.TestCase):
         for value in (0, 121, True, '90', None, 90.0):
             with self.subTest(value=value), self.assertRaises(budget.BudgetError):
                 budget.validate({'request_timeout_seconds': value})
-        with self.assertRaises(budget.BudgetError):
-            budget.validate({'max_completion_tokens': 8193})
+        for value in (1, 512, 8192, 16384):
+            with self.subTest(value=value):
+                self.assertEqual(budget.validate({'max_completion_tokens': value})['max_completion_tokens'], value)
+        for value in (0, -1, 16385, True, '16384', None, 16384.0):
+            with self.subTest(value=value), self.assertRaises(budget.BudgetError):
+                budget.validate({'max_completion_tokens': value})
+
+    def test_an_oversized_completion_allowance_refuses_before_any_request(self):
+        transport = FakeTransport()
+        with self.assertRaises(AiError):
+            client(transport=transport, budget={'max_completion_tokens': 16385})
+        self.assertEqual(transport.calls, [])
 
     def test_configured_timeout_reaches_transport_without_expanding_overrides(self):
         self.assertEqual(client().transport.timeout, 10)
@@ -61,12 +71,14 @@ class BudgetLimits(unittest.TestCase):
                 client(budget=limits, timeout=value)
 
     def test_model_request_uses_explicit_completion_allowance(self):
-        transport = FakeTransport()
-        instance = client(transport=transport, budget={'max_completion_tokens': 8192})
-        instance.complete(instruction='Review these samples.', data_class='internal',
-                          evidence=[reference()], now=AI_NOW)
-        self.assertEqual(len(transport.calls), 1)
-        self.assertEqual(transport.calls[0]['payload']['max_tokens'], 8192)
+        for allowance in (512, 8192, 16384):
+            transport = FakeTransport()
+            instance = client(transport=transport, budget={'max_completion_tokens': allowance})
+            instance.complete(instruction='Review these samples.', data_class='internal',
+                              evidence=[reference()], now=AI_NOW)
+            with self.subTest(allowance=allowance):
+                self.assertEqual(len(transport.calls), 1)
+                self.assertEqual(transport.calls[0]['payload']['max_tokens'], allowance)
 
     def test_shared_http_callers_keep_their_shorter_default_ceiling(self):
         generic = JsonClient('https://service.example.test', 't' * 32)

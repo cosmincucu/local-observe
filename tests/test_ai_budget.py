@@ -43,6 +43,26 @@ class BudgetFileTests(unittest.TestCase):
                 with self.assertRaises(BudgetError):
                     budget.validate(bad)
 
+    def test_explicit_completion_boundaries_preserve_defaults(self):
+        self.assertEqual(budget.DEFAULTS['max_completion_tokens'], 512)
+        self.assertEqual(budget.CEILINGS['max_completion_tokens'], (1, 16_384))
+        for value in (1, 512, 8_192, 16_384):
+            with self.subTest(value=value):
+                validated = budget.validate({'max_completion_tokens': value})
+                self.assertEqual(validated['max_completion_tokens'], value,
+                                 'an accepted figure is returned unchanged, never clamped')
+                self.assertEqual({key: limit for key, limit in validated.items()
+                                  if key != 'max_completion_tokens'},
+                                 {key: limit for key, limit in budget.DEFAULTS.items()
+                                  if key != 'max_completion_tokens'},
+                                 'a longer allowance moves no other limit')
+        for value in (0, -1, 16_385, 100_000, True, False, '16384', 16384.0, None):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(BudgetError) as caught:
+                    budget.validate({'max_completion_tokens': value})
+                self.assertIn('max_completion_tokens', str(caught.exception))
+                self.assertIn('1..16384', str(caught.exception), 'the refusal names the bound it applied')
+
     def test_a_budget_file_is_bounded_and_must_be_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -195,6 +215,20 @@ class BudgetPlanTests(unittest.TestCase):
                                      sample={'sample_id': 's-1', 'observed_at': WINDOW['start'],
                                              'ok': True, 'value': 91.4})])
         self.assertEqual(result['status'], 'ok')
+
+    def test_larger_completion_allowance_preserves_evidence_bounds(self):
+        roomier = self.plan([reference()], max_completion_tokens=16_384)
+        self.assertEqual(roomier['max_completion_tokens'], 16_384,
+                         'the figure the operator named is the figure the client is told to send')
+        self.assertEqual({key: value for key, value in roomier.items() if key != 'max_completion_tokens'},
+                         {key: value for key, value in self.plan([reference()]).items()
+                          if key != 'max_completion_tokens'},
+                         'the same bundle fits, whatever the completion ceiling allows')
+        with self.assertRaises(BudgetError) as caught:
+            self.plan([reference()], max_completion_tokens=16_384, max_evidence_bytes=1_024,
+                      max_prompt_bytes=1_024, prompt_bytes=600)
+        self.assertEqual(caught.exception.code, 'prompt_bytes',
+                         'the byte ceiling still refuses the body this call would have written')
 
     def test_payload_bytes_uses_the_canonical_form(self):
         self.assertEqual(budget.payload_bytes({'b': 1, 'a': 2}),

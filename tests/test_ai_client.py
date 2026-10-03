@@ -714,6 +714,20 @@ class FromEnvironmentTests(unittest.TestCase):
         with self.assertRaises(AiError):
             AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
 
+    def test_budget_file_can_name_the_largest_completion_allowance(self):
+        path = self.root / 'long.json'
+        path.write_text(json.dumps({'max_completion_tokens': 16384}), encoding='utf-8')
+        built = AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+        self.assertEqual(built.budget['max_completion_tokens'], 16384)
+        self.assertEqual(built.budget['max_prompt_bytes'], budget_module.DEFAULTS['max_prompt_bytes'],
+                         'a longer answer allowance leaves the request-size ceiling where it was')
+        self.assertEqual(built.transport.timeout, 10, 'and the socket timeout keeps its short default')
+        for over in (16385, '16384', True, 0):
+            with self.subTest(value=repr(over)):
+                path.write_text(json.dumps({'max_completion_tokens': over}), encoding='utf-8')
+                with self.assertRaises(AiError):
+                    AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+
     def test_budget_file_can_name_the_effort_an_operator_measured(self):
         """The spelling travels from the file to the validated document, or the client is not built."""
         path = self.root / 'effort.json'
