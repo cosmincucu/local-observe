@@ -180,7 +180,7 @@ consumer that renders `content` instead of `display_text` has removed the indica
 `LO_AI_BUDGET` names an optional JSON file; its limits replace the shipped defaults within
 hard ceilings: `max_evidence_items` 20 (the same twenty `platform/state.py:778` allows on one
 event), `max_evidence_bytes` 16 KiB (ceiling 64 KiB), `max_prompt_bytes` 24 KiB (ceiling 64 KiB),
-`max_completion_tokens` 512 (ceiling 8 192). A bundle that does not fit is **refused whole, never
+`max_completion_tokens` 512 (ceiling 16 384). A bundle that does not fit is **refused whole, never
 truncated** — a truncated bundle is an explanation whose missing half nobody can see.
 
 An optional `request_timeout_seconds` integer from 1 to 120 sets the AI transport timeout.
@@ -202,6 +202,8 @@ it; the product does not remap values or retry an unsupported request.
 Reasoning models may spend their completion allowance before producing an answer. Measure
 the chosen model with representative evidence before selecting explicit token, timeout and
 effort settings; neither a larger allowance nor a higher effort guarantees a usable answer.
+The completion allowance covers reasoning and final text together. It does not extend the
+configured timeout or permit partial answers.
 The response byte limit below applies independently.
 
 **Two measurements, one ceiling.** `max_prompt_bytes` means the whole serialised body, so it is

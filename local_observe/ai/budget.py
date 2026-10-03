@@ -16,6 +16,9 @@ item is the last word, and the refusal says so in as many words.
 
 The optional `reasoning_effort` request setting is validated with the budget so it participates
 in provenance and drift checks. It has no default and requires backend-specific measurement.
+
+Completion tokens cover reasoning and final text together. A larger explicit allowance may still
+produce no complete answer or exceed the configured timeout.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ DEFAULTS: dict[str, int] = {'max_evidence_items': 20, 'max_evidence_bytes': 16_3
 # A budget file may replace defaults only within these hard bounds. The timeout is optional so
 # legacy validated documents (and their provenance digests) keep exactly their existing shape.
 CEILINGS: dict[str, tuple[int, int]] = {'max_evidence_items': (1, 20), 'max_evidence_bytes': (256, 65_536),
-                                        'max_prompt_bytes': (1_024, 65_536), 'max_completion_tokens': (1, 8_192),
+                                        'max_prompt_bytes': (1_024, 65_536), 'max_completion_tokens': (1, 16_384),
                                         'request_timeout_seconds': (1, 120)}
 # Optional request setting; the vocabulary does not imply backend support.
 REASONING_EFFORT = 'reasoning_effort'

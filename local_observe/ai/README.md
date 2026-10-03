@@ -28,6 +28,10 @@ An HTTP200 reply with `finish_reason: length` and empty or absent answer text is
 record. Empty replies with other finish labels keep the `empty_content` refusal. Consumers
 still decide whether an answer containing partial text satisfies their contract.
 
+An explicit completion budget may allow up to 16,384 tokens; the default remains 512.
+Reasoning and final text share that allowance. Measure representative requests before increasing
+it: a larger allowance may still produce no complete answer or exceed the configured timeout.
+
 Reasoning fields are ignored and never included in results, exceptions or telemetry. Unknown
 finish labels become `unknown`; consumers must not accept them as completed answers.
 
