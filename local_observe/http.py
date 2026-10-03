@@ -18,6 +18,12 @@ class TransportError(ValueError):
     pass
 
 
+class ResultTooLarge(TransportError):
+    """The endpoint answered, but its result exceeded the bounded read."""
+
+    code = 'source_result_too_large'
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: urllib.request.Request, fp: http.client.HTTPResponse, code: int,
                          msg: str, headers: email.message.Message,
@@ -53,7 +59,7 @@ class JsonClient:
     """
 
     def __init__(self, base, token, *, scheme='Bearer', allow_http=False, timeout=10, ca_file=None,
-                 accept_non_json=False):
+                 accept_non_json=False, max_timeout=20):
         parsed = urllib.parse.urlsplit(base)
         if (parsed.scheme not in (('https', 'http') if allow_http else ('https',))
                 or not parsed.hostname or parsed.username or parsed.password or parsed.query
@@ -64,9 +70,12 @@ class JsonClient:
             raise TransportError('A separate bounded credential is required')
         if accept_non_json not in (False, True):
             raise TransportError('accept_non_json must be a boolean')
-        if not 1 <= timeout <= 20:
+        if type(max_timeout) is not int or not 1 <= max_timeout <= 120:
+            raise TransportError('Invalid HTTP timeout ceiling')
+        if type(timeout) is not int or not 1 <= timeout <= max_timeout:
             raise TransportError('Invalid HTTP timeout')
         self.base, self.token, self.scheme, self.timeout = base.rstrip('/'), token, scheme, timeout
+        self.max_timeout = max_timeout
         self.accept_non_json = accept_non_json is True
         handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
         if ca_file is not None:
@@ -79,7 +88,8 @@ class JsonClient:
         """Return the timeout for one request: the caller's shorter bound, never a longer one.
 
         A notification transport holds an outbox lease while it waits, so the ceiling is the client's own
-        bound (1..20 s, checked at construction) whichever way a caller asks to move it.
+        bound (20 s by default, with explicit constructor opt-in up to 120 s) whichever way a
+        caller asks to move it. Per-request overrides can only shorten the configured timeout.
         """
         if timeout is None:
             return self.timeout

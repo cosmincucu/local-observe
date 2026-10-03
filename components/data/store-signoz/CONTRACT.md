@@ -152,8 +152,11 @@ arrives with **no new mount, no new variable and no wider grant** than the runne
 `max_memory_usage = 134217728`, `result_overflow_mode = throw`, `read_overflow_mode = throw`, plus
 `max_result_rows` = the kind's row bound **plus one**. That extra row is what makes a cut detectable:
 a page that filled its bound is reported as `truncated` rather than read as a whole answer. The
-response itself is read at 65 537 bytes and anything larger is refused, the socket timeout is 10
-seconds, and no proxy and no redirect is installed on the request's opener.
+response defaults to a 65 536-byte limit, read with one extra byte to detect overflow. The
+observer explicitly permits up to 131 072 wire bytes for ClickHouse JSON formatting while
+retaining its separate 65 536-byte normalized evidence limit. Other callers retain the default;
+an oversized response raises a typed refusal without copying its contents into diagnostics.
+The socket timeout is 10 seconds, and no proxy and no redirect is installed on the opener.
 
 One coupling to know before editing either side: the profile pins `max_result_rows` to **1**, so
 without the `changeable_in_readonly` entries a 2 000-row read is refused by the server. Removing one

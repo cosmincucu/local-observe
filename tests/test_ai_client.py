@@ -78,6 +78,17 @@ def logged(records):
     return '\n'.join(JsonLinesFormatter().format(record) for record in records)
 
 
+def wire_bytes(value):
+    """One request body sized here, in the form `JsonClient` writes, never by the code under test."""
+    return len(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+                          allow_nan=False).encode())
+
+
+def framing_bytes(instruction):
+    """The bytes the caller adds around a bundle: its own text, the header and their separators."""
+    return len(f'{instruction}\n\n{client.EVIDENCE_HEADER}\n'.encode())
+
+
 class ConstructionTests(unittest.TestCase):
     def test_a_base_url_with_a_path_a_credential_or_plaintext_is_refused(self):
         for url in ('http://ai:8080/v1', 'https://user:pw@ai:8080', 'https://ai:8080?x=1',
@@ -264,6 +275,43 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'prompt_bytes')
         self.assertEqual(transport.calls, [])
 
+    def test_a_bundle_that_fits_is_not_refused_for_the_size_of_two_bundles(self):
+        """The budget counts the evidence once, so a ~30 KB bundle fits a 40 KB request."""
+        limits = dict(budget_module.DEFAULTS, max_evidence_bytes=32_768, max_prompt_bytes=40_960)
+        transport = FakeTransport()
+        instruction = 'why is this volume full?'
+        bundle = [reference(parameters={'probe': 'x' * 1_300})
+                  for _ in range(budget_module.DEFAULTS['max_evidence_items'])]
+        evidence_bytes = budget_module.payload_bytes(bundle)
+        result = build(transport=transport, budget=limits).complete(instruction=instruction,
+                                                                   data_class='internal',
+                                                                   evidence=bundle, now=NOW)
+        self.assertEqual(len(transport.calls), 1)
+        body = wire_bytes(transport.calls[0]['payload'])
+        self.assertGreater(evidence_bytes, 30_000)
+        self.assertLessEqual(body, limits['max_prompt_bytes'])
+        self.assertEqual(result['evidence_bytes'], evidence_bytes)
+        # Counting the bundle twice put a request that fits over the same ceiling; the caller owes
+        # `plan` only the framing, because `plan` measures the bundle itself.
+        self.assertGreater(evidence_bytes + evidence_bytes + framing_bytes(instruction)
+                           + budget_module.ENVELOPE_ALLOWANCE_BYTES, limits['max_prompt_bytes'])
+        self.assertLessEqual(evidence_bytes + framing_bytes(instruction)
+                             + budget_module.ENVELOPE_ALLOWANCE_BYTES, limits['max_prompt_bytes'])
+
+    def test_escaping_that_overflows_the_written_body_refuses_before_transport(self):
+        """Quotes, backslashes and non-ASCII grow again when the content is serialised into the body."""
+        limits = dict(budget_module.DEFAULTS, max_evidence_bytes=32_768, max_prompt_bytes=32_768)
+        transport = FakeTransport()
+        instruction = 'why is this volume full?'
+        bundle = [reference(parameters={'probe': 'ä"\\' * 3_000})]
+        admitted = budget_module.plan(limits, bundle, prompt_bytes=framing_bytes(instruction), now=NOW)
+        self.assertLessEqual(admitted['body_bytes'], limits['max_prompt_bytes'])
+        with self.assertRaises(AiError) as caught:
+            build(transport=transport, budget=limits).complete(instruction=instruction,
+                                                               data_class='internal', evidence=bundle, now=NOW)
+        self.assertEqual(caught.exception.code, 'prompt_bytes')
+        self.assertEqual(transport.calls, [])
+
 
 class RemoteOutputTests(unittest.TestCase):
     def test_a_bundle_that_may_have_left_the_lan_is_labelled_in_the_output(self):
@@ -441,6 +489,18 @@ class FromEnvironmentTests(unittest.TestCase):
         self.assertEqual(built.model_fast, 'qwen3-30b-small')
         self.assertTrue(built.capture)
         self.assertIn('LO_AI_CAPTURE', logged(captured.records))
+
+    def test_budget_file_selects_bounded_longer_inference(self):
+        path = self.root / 'budget.json'
+        path.write_text(json.dumps({'request_timeout_seconds': 90, 'max_completion_tokens': 8192}),
+                        encoding='utf-8')
+        built = AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+        self.assertEqual(built.transport.timeout, 90)
+        self.assertEqual(built.budget['max_completion_tokens'], 8192)
+        self.assertFalse(built.capture)
+        path.write_text('{"request_timeout_seconds": 121}', encoding='utf-8')
+        with self.assertRaises(AiError):
+            AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
 
     def test_a_missing_variable_names_the_variable_and_says_generation_is_unavailable(self):
         for name in ('LO_AI_BASE_URL', 'LO_AI_MODEL', 'LO_AI_CAPABILITY', 'LO_AI_POLICY'):

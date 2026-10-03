@@ -14,7 +14,7 @@ import unittest
 import urllib.parse
 import urllib.request
 
-from local_observe.http import TransportError
+from local_observe.http import ResultTooLarge, TransportError
 from local_observe.platform.detections import event
 from local_observe.platform.state import Actor, Store, StateError
 from local_observe.platform.sigma_runner import ClickHouse, SERIES_MAX_POINTS
@@ -113,6 +113,16 @@ class RecordingOpener:
     def open(self, request, timeout):
         self.requests.append((request, timeout))
         return FakeResponse(self.body)
+
+
+def padded_body(size: int, *, canary: str = '') -> bytes:
+    """One ``FORMAT JSON`` answer padded to exactly *size* bytes, so a bound is tested at cap and cap+1."""
+    prefix, suffix = '{"data":[{"note":"', '"}]}'
+    filler = max(0, size - len(prefix) - len(suffix) - len(canary))
+    body = (prefix + canary + 'p' * filler + suffix).encode()
+    if len(body) != size:
+        raise AssertionError(f'no {size}-byte answer fits this shape')
+    return body
 
 
 class TimestampContract(unittest.TestCase):
@@ -416,6 +426,40 @@ class Transport(unittest.TestCase):
         self.patch(b'{"data": ["' + b'y' * 70_000 + b'"]}')
         with self.assertRaises(TransportError):
             self.client().series('SELECT 1 FORMAT JSON', {})
+
+    def test_the_read_bound_is_the_byte_that_separates_an_answer_from_an_overflow(self):
+        """Exactly 64 KiB is an answer; one byte more is `ResultTooLarge`, never a truncated result."""
+        self.patch(padded_body(65_536, canary='ANSWER-CANARY'))
+        self.assertEqual(len(self.client().series('SELECT 1 FORMAT JSON', {})), 1)
+        self.patch(padded_body(65_537, canary='ANSWER-CANARY'))
+        with self.assertRaises(ResultTooLarge) as caught:
+            self.client().series('SELECT 1 FORMAT JSON', {})
+        self.assertEqual(caught.exception.code, 'source_result_too_large')
+        self.assertIsInstance(caught.exception, TransportError)
+        self.assertEqual([type(opener).__name__ for opener in Transport.openers], ['RecordingOpener'])
+        self.assertEqual(len(Transport.openers[0].requests), 1, 'an overflow is not retried')
+
+    def test_an_overflow_names_its_own_failure_and_a_broken_answer_keeps_the_sanitised_one(self):
+        """The two bounded failures stay tellable apart, and neither carries the answer or the key."""
+        def store():
+            return ch.ClickHouseStore(self.client())
+
+        for overflow in (lambda: store().read_logs('log-records', window=WINDOW,
+                                                   parameters={'resource_id': RESOURCE}),
+                         lambda: store().describe('describe-metrics', window=WINDOW,
+                                                  selectors={'metric_name': 'lo_process_running'})):
+            self.patch(padded_body(65_537, canary='ANSWER-CANARY'))
+            with self.assertRaises(ResultTooLarge) as caught:
+                overflow()
+            self.assertNotIn('ANSWER-CANARY', str(caught.exception))
+            self.assertNotIn('secret-credential-value', str(caught.exception))
+            self.assertNotIn('SELECT', str(caught.exception))
+        self.patch(b'{"data": [not json ANSWER-CANARY')
+        with self.assertRaises(TransportError) as unknown:
+            store().read_logs('log-records', window=WINDOW, parameters={'resource_id': RESOURCE})
+        self.assertNotIsInstance(unknown.exception, ResultTooLarge)
+        self.assertNotIn('ANSWER-CANARY', str(unknown.exception))
+        self.assertNotIn('secret-credential-value', str(unknown.exception))
 
     def test_http_is_refused_until_the_operator_asks_for_it(self):
         for url in ('http://clickhouse:8123', 'https://clickhouse:8123?param_readonly=0',

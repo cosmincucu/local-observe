@@ -115,7 +115,7 @@ class AiClient:
     def __init__(self, *, base_url: str, api_key: str, model: str, capability: dict[str, Any],
                  policy: dict[str, Any], budget: dict[str, int], model_fast: str | None = None,
                  out_of_lan: bool = True, capture: bool = False, allow_http: bool = False,
-                 timeout: int = 10, provider: str = telemetry.PROVIDER, transport: Any = None) -> None:
+                 timeout: int | None = None, provider: str = telemetry.PROVIDER, transport: Any = None) -> None:
         """Bind the four contract values plus the two documents; refuse a shape that cannot be honest.
 
         *capability* and *budget* are documents, not paths, and this re-validates them rather than
@@ -129,17 +129,22 @@ class AiClient:
                 or parsed.path not in ('', '/')):
             raise AiNotConfigured(f'{BASE_URL_VARIABLE} must be a scheme://host[:port] endpoint with no '
                                   f'path, no query and no embedded credential')
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 20:
-            raise AiNotConfigured('The AI request timeout must be an integer between 1 and 20 seconds')
+        self.budget = budget_module.validate(budget)
+        configured_timeout = self.budget.get('request_timeout_seconds')
+        ceiling = configured_timeout if configured_timeout is not None else 20
+        if timeout is None:
+            timeout = configured_timeout if configured_timeout is not None else 10
+        if type(timeout) is not int or not 1 <= timeout <= ceiling:
+            raise AiNotConfigured(f'The AI request timeout must be an integer between 1 and {ceiling} seconds')
         self.model = model_label(model, MODEL_VARIABLE)
         self.model_fast = model_label(model_fast, MODEL_FAST_VARIABLE) if model_fast else self.model
         self.capability = capability_module.validate(capability)
         self.policy = policy_module.validate(policy)
-        self.budget = budget_module.validate(budget)
         self.out_of_lan = bool(out_of_lan)
         self.capture = bool(capture)
         self.provider = provider
-        self.transport = transport or JsonClient(base_url, api_key, allow_http=allow_http, timeout=timeout)
+        self.transport = transport or JsonClient(base_url, api_key, allow_http=allow_http,
+                                                 timeout=timeout, max_timeout=max(20, ceiling))
 
     @classmethod
     def from_environment(cls, environ: Any = os.environ) -> AiClient:
@@ -173,8 +178,9 @@ class AiClient:
 
         *instruction* is the caller's framing text; *evidence* is a bundle of canonical evidence
         references, optionally carrying the `status`/`sample` fields `Store.get_evidence` returns. The
-        bundle is redacted per the class's policy before it is measured, and the measured body is what
-        is sent: no later step enlarges what the budget already read.
+        bundle is redacted per the class's policy before it is measured. `budget.plan` measures the
+        bundle and is handed only the framing this caller wraps around it; the exact serialised body
+        is then checked against the same ceiling, so every byte that goes on the wire is counted once.
         """
         if slot not in SLOTS:
             raise AiError(f'slot {slot!r} is not one of {list(SLOTS)}', code='invalid_slot')
@@ -197,9 +203,13 @@ class AiClient:
             self._emit(data_class=data_class, model=self.model_for(slot), slot=slot, status='refused',
                        code=exc.code, plan=None, counts={}, began=began)
             raise
-        content = f'{text}\n\n{EVIDENCE_HEADER}\n{canonical(bundle)}'
+        framing = f'{text}\n\n{EVIDENCE_HEADER}\n'
+        content = f'{framing}{canonical(bundle)}'
         try:
-            plan = budget_module.plan(self.budget, bundle, prompt_bytes=len(content.encode()),
+            # The budget measures the bundle, so the caller owes it only the bytes it adds around that
+            # bundle. Passing the whole content charged the evidence twice and refused a request at
+            # roughly twice the body it would actually have made.
+            plan = budget_module.plan(self.budget, bundle, prompt_bytes=len(framing.encode()),
                                       now=now or started)
             payload: dict[str, Any] = {'model': self.model if slot == 'model' else self.model_fast,
                                        'messages': [{'role': 'user', 'content': content}],

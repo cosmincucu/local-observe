@@ -33,14 +33,15 @@ OPTIONAL_FIELDS: frozenset[str] = frozenset({'status', 'sample'})
 EVIDENCE_STATUSES = ('available', 'expired', 'unavailable')
 DEFAULTS: dict[str, int] = {'max_evidence_items': 20, 'max_evidence_bytes': 16_384,
                             'max_prompt_bytes': 24_576, 'max_completion_tokens': 512}
-# Ceilings on the ceilings. A budget file may lower a limit to anything inside these bounds and may
-# not raise one past them: the response bound in `client.py` is 64 KiB, so a request ceiling above it
-# would describe a call the client then refuses on the way back.
+# A budget file may replace defaults only within these hard bounds. The timeout is optional so
+# legacy validated documents (and their provenance digests) keep exactly their existing shape.
 CEILINGS: dict[str, tuple[int, int]] = {'max_evidence_items': (1, 20), 'max_evidence_bytes': (256, 65_536),
-                                        'max_prompt_bytes': (1_024, 65_536), 'max_completion_tokens': (1, 4_096)}
+                                        'max_prompt_bytes': (1_024, 65_536), 'max_completion_tokens': (1, 8_192),
+                                        'request_timeout_seconds': (1, 120)}
 MAX_BUDGET_BYTES = 4_096
 # The serialised envelope around the payload text: model name, flags, JSON syntax. Measured as an
-# allowance so `max_prompt_bytes` means "the whole body", not "the part of it you remembered".
+# allowance so `max_prompt_bytes` means "the whole body", not "the part of it you remembered". The
+# caller that writes the body checks the exact figure too; this one is what refuses before one exists.
 ENVELOPE_ALLOWANCE_BYTES = 512
 
 
@@ -72,17 +73,16 @@ def validate(document: Any) -> dict[str, int]:
     """Merge *document* over `DEFAULTS` after checking every key and bound, refusing a stray key."""
     if not isinstance(document, dict):
         raise BudgetError('A budget file must be a JSON object')
-    stray = sorted(set(document) - set(DEFAULTS))
+    stray = sorted(set(document) - set(CEILINGS))
     if stray:
         raise BudgetError(f'budget file names unknown limits {stray}; this product reads '
-                          f'{sorted(DEFAULTS)}')
+                          f'{sorted(CEILINGS)}')
     merged = dict(DEFAULTS)
     merged.update(document)
     for name, value in merged.items():
         low, high = CEILINGS[name]
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
-            raise BudgetError(f'budget limit {name} must be an integer in {low}..{high} '
-                              f'(default {DEFAULTS[name]})')
+            raise BudgetError(f'budget limit {name} must be an integer in {low}..{high}')
     if merged['max_prompt_bytes'] < merged['max_evidence_bytes']:
         raise BudgetError('max_prompt_bytes must be at least max_evidence_bytes: the evidence is part '
                           'of the prompt, and a smaller ceiling there hides which one refused')
@@ -99,8 +99,11 @@ def plan(budget: dict[str, int], items: Sequence[Any], *, prompt_bytes: int,
     """Return the admitted bundle, or raise `BudgetError` naming the limit or the stale reference.
 
     *items* are evidence references in the canonical shape (see `REFERENCE_FIELDS`), optionally
-    carrying `status`/`sample` as `Store.get_evidence` returned them. An empty bundle is refused: an
-    explanation with nothing behind it is the failure this whole component exists to make loud.
+    carrying `status`/`sample` as `Store.get_evidence` returned them. *prompt_bytes* is only the
+    framing the caller wraps around them — its instruction and header text. The evidence is measured
+    here, so a caller that hands over the whole request text charges the bundle twice and refuses a
+    body that would have fitted. An empty bundle is refused: an explanation with nothing behind it is
+    the failure this whole component exists to make loud.
     """
     if not isinstance(items, (list, tuple)):
         raise BudgetError('An evidence bundle must be a list of evidence references')

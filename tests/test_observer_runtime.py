@@ -512,7 +512,8 @@ class RealAdapterTests(unittest.TestCase):
                 return build_outcome(describe_query(query), parameters, window,
                     [MetricSample('cpu.utilization', 0.8, '2026-01-01T11:59:00Z', {}, RESOURCE)])
         constructed = []
-        def open_reader(*, environ):
+        def open_reader(*, environ, max_response_bytes):
+            self.assertEqual(max_response_bytes, 131072)
             constructed.append(environ)
             return Store()
         with tempfile.TemporaryDirectory() as root:
@@ -530,6 +531,69 @@ class RealAdapterTests(unittest.TestCase):
             self.assertEqual(constructed[0]['LO_CLICKHOUSE_READ_PASSWORD_FILE'], str(key))
             self.assertNotIn('LO_CLICKHOUSE_READ_PASSWORD', constructed[0])
             self.assertEqual(adapter.secrets, ('x' * 32,))
+
+    def test_a_bounded_store_overflow_reaches_the_journal_as_its_own_code_and_nothing_else(self):
+        """The journal may say `source_result_too_large` and may say nothing else about the answer."""
+        import urllib.request
+        from local_observe.store.backends import clickhouse as ch
+        answer_canary = 'SERVER-ANSWER-CANARY'
+        read_credential_value = 'read-credential-not-logged'
+
+        class Answer:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read(self, limit):
+                return self.payload[:limit]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class Opener:
+            def __init__(self, payload):
+                self.payload, self.requests = payload, []
+
+            def open(self, request, timeout):
+                self.requests.append((request, timeout))
+                return Answer(self.payload)
+
+        def cycle(payload: bytes):
+            temp = tempfile.TemporaryDirectory()
+            self.addCleanup(temp.cleanup)
+            journal = Journal(Path(temp.name) / 'state')
+            self.addCleanup(journal.close)
+            opener = Opener(payload)
+            original = urllib.request.build_opener
+            urllib.request.build_opener = lambda *handlers: opener
+            config = Config((SOURCE,))
+            model = FixtureModel()
+            try:
+                store = ch.ClickHouseStore(ch.ClickHouse('https://store.example.invalid', 'lo-query',
+                                                        read_credential_value))
+                result = Observer(config, journal, sources=Sources(config, store=store), model=model,
+                                  clock=lambda: NOW).run('overflow')
+            finally:
+                urllib.request.build_opener = original
+            return result, journal, opener, model
+
+        oversized = ('{"data":[{"note":"' + answer_canary + 'p' * 70_000 + '"}]}').encode()
+        result, journal, opener, model = cycle(oversized)
+        self.assertEqual((result['status'], result['error']), ('failed', 'no_usable_evidence'))
+        self.assertEqual((result['activity'][0]['status'], result['activity'][0]['error']),
+                         ('failed', 'source_result_too_large'))
+        self.assertEqual(len(opener.requests), 1, 'an overflow is not retried')
+        self.assertEqual(model.calls, [])
+        stored = journal.path.read_bytes()
+        self.assertIn(b'source_result_too_large', stored)
+        for secret in (answer_canary, read_credential_value, 'SELECT', 'FORMAT JSON'):
+            self.assertNotIn(secret.encode(), stored)
+
+        broken, journal, _opener, _model = cycle(b'{"data": [not json ' + answer_canary.encode())
+        self.assertEqual(broken['activity'][0]['error'], 'source_unavailable')
+        self.assertNotIn(answer_canary.encode(), journal.path.read_bytes())
 
     def test_http_adapter_has_fixed_operator_url_parameters_and_no_ambient_proxy(self):
         with tempfile.TemporaryDirectory() as root:

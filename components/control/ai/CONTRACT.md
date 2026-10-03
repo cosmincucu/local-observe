@@ -177,18 +177,41 @@ consumer that renders `content` instead of `display_text` has removed the indica
 
 ## 6. The evidence budget
 
-`LO_AI_BUDGET` names an optional JSON file; its limits can only lower the shipped defaults, each
-inside a hard ceiling: `max_evidence_items` 20 (the same twenty `platform/state.py:778` allows on one
+`LO_AI_BUDGET` names an optional JSON file; its limits replace the shipped defaults within
+hard ceilings: `max_evidence_items` 20 (the same twenty `platform/state.py:778` allows on one
 event), `max_evidence_bytes` 16 KiB (ceiling 64 KiB), `max_prompt_bytes` 24 KiB (ceiling 64 KiB),
-`max_completion_tokens` 512 (ceiling 4 096). A bundle that does not fit is **refused whole, never
+`max_completion_tokens` 512 (ceiling 8 192). A bundle that does not fit is **refused whole, never
 truncated** — a truncated bundle is an explanation whose missing half nobody can see.
 
+An optional `request_timeout_seconds` integer from 1 to 120 sets the AI transport timeout.
+When absent, the timeout remains 10 seconds and an explicit client override may be at most
+20 seconds. When present, a client override may only shorten it. Existing budget documents
+retain their validated shape and provenance digest. Other HTTP clients keep their existing
+defaults. This is a socket timeout, not a total elapsed-time guarantee; the observer also
+checks its cycle deadline. Each generation still makes one attempt, without retries.
+
+Reasoning models may spend their completion allowance before producing an answer. Measure
+the chosen model with representative evidence before selecting explicit token and timeout
+limits; a larger allowance does not guarantee a usable answer. The response byte limit
+below applies independently.
+
+**Two measurements, one ceiling.** `max_prompt_bytes` means the whole serialised body, so it is
+checked twice before anything is sent. `budget.plan` measures the evidence itself and is handed only
+the bytes the caller wraps around it (the instruction and the evidence header) plus a fixed envelope
+allowance; the client then measures the exact serialised request against the same ceiling. The two
+gates cannot be collapsed into one number: JSON escaping grows the text a second time — a quote, a
+backslash and a non-ASCII character each cost more bytes once the canonical evidence is embedded as a
+string inside the body — and an allowance is an allowance. A request sized only by the estimate either
+refuses a bundle that would have fitted or sends a body over the ceiling. Both refusals report
+`prompt_bytes`, and neither builds a request.
+
 **Response bound, honestly stated.** `client.py` refuses a reply whose parsed body exceeds
-`MAX_RESPONSE_BYTES` = 65 536 (the 64 KiB idiom used across this repository). The transport underneath
-— `local_observe/http.py:74-76`, shared by every client here — reads up to 4 MiB before returning it,
-so 4 MiB is this process's real memory bound and 64 KiB is the bound on what the AI layer will accept
-and parse. Raising the smaller number to match the larger would be the wrong direction; a dedicated
-bounded transport is not worth one component and `DEPENDENCIES.md` forbids a second HTTP client.
+`MAX_RESPONSE_BYTES` = 65 536 (the 64 KiB idiom used across this repository). The transport
+underneath — `JsonClient.request`, `local_observe/http.py:120-122`, shared by every client here —
+reads up to 4 MiB before returning it, so 4 MiB is this process's real memory bound and 64 KiB is the
+bound on what the AI layer will accept and parse. Raising the smaller number to match the larger
+would be the wrong direction; a dedicated bounded transport is not worth one component and
+`DEPENDENCIES.md` forbids a second HTTP client.
 
 ## 7. Telemetry, and what payload capture actually does
 
