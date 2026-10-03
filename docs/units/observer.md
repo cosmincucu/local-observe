@@ -91,6 +91,10 @@ tokens and a `request_timeout_seconds` of at most 120. Defaults remain 512 token
 10-second socket timeout. Test representative observation windows before selecting limits:
 reasoning may consume the token allowance without producing a final answer. The full
 serialized prompt and model response must still fit their independent byte bounds.
+The final observer JSON answer is limited to 16 KiB; reasoning tokens belong in the
+provider's separate reasoning field, never in the final answer. Known AI budget and
+transport refusals are retained as fixed `model_*` journal codes; provider error text
+and unrecognized codes are not persisted.
 Unknown model cost remains null; reported input/output token counts and elapsed time are retained.
 Remote requests carry the fixed output contract in short structured fields, so the existing
 `no_free_text` policy does not erase the instructions or evidence IDs. If that policy withholds

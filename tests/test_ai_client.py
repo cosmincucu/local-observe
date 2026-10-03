@@ -306,11 +306,14 @@ class RequestTests(unittest.TestCase):
         bundle = [reference(parameters={'probe': 'ä"\\' * 3_000})]
         admitted = budget_module.plan(limits, bundle, prompt_bytes=framing_bytes(instruction), now=NOW)
         self.assertLessEqual(admitted['body_bytes'], limits['max_prompt_bytes'])
-        with self.assertRaises(AiError) as caught:
+        with self.assertLogs('local_observe.ai.telemetry', 'WARNING') as logs, self.assertRaises(AiError) as caught:
             build(transport=transport, budget=limits).complete(instruction=instruction,
                                                                data_class='internal', evidence=bundle, now=NOW)
         self.assertEqual(caught.exception.code, 'prompt_bytes')
         self.assertEqual(transport.calls, [])
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].evidence_count, 1)
+        self.assertEqual(logs.records[0].evidence_bytes, admitted['evidence_bytes'])
 
 
 class RemoteOutputTests(unittest.TestCase):

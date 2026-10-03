@@ -445,6 +445,8 @@ class ClickHouseStore(StoreClient):
         try:
             return presence_row(probe, self.client.query(
                 probe.sql, bound_values(probe, window, probe_parameters, narrowing))).row_count > 0
+        except ResultTooLarge:
+            raise
         except (TransportError, ValueError, KeyError, TypeError):
             return False
 

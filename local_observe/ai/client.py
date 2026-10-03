@@ -205,6 +205,7 @@ class AiClient:
             raise
         framing = f'{text}\n\n{EVIDENCE_HEADER}\n'
         content = f'{framing}{canonical(bundle)}'
+        plan = None
         try:
             # The budget measures the bundle, so the caller owes it only the bytes it adds around that
             # bundle. Passing the whole content charged the evidence twice and refused a request at
@@ -221,7 +222,8 @@ class AiClient:
                               'bundle is refused whole, never truncated', code='prompt_bytes')
         except AiError as exc:
             self._emit(data_class=decision['data_class'], model=self.model_for(slot), slot=slot,
-                       status='refused', code=exc.code, plan=None, counts=counts, began=began)
+                       status='refused', code=exc.code, plan=plan, counts=counts, began=began,
+                       instruction=text)
             raise
         return self._attempt(payload, plan, decision=decision, counts=counts, slot=slot,
                               instruction=text, started=started, began=began)
@@ -269,14 +271,14 @@ class AiClient:
                        instruction=instruction, endpoint_status=status)
             raise AiError(f'the model endpoint answered {status}; nothing was retried',
                           code='endpoint_status')
-        if budget_module.payload_bytes(body) > MAX_RESPONSE_BYTES:
-            self._emit(data_class=decision['data_class'], model=model, slot=slot, status='refused',
-                       code='response_too_large', plan=plan, counts=counts, began=began,
-                       instruction=instruction)
-            raise AiError(f'a response larger than {MAX_RESPONSE_BYTES} bytes is refused unread; an '
-                          f'explanation that size is not grounded in the bundle that was sent',
-                          code='response_too_large')
         try:
+            try:
+                response_bytes = budget_module.payload_bytes(body)
+            except (ValueError, TypeError):
+                raise AiError('the model endpoint returned malformed JSON', code='malformed_response') from None
+            if response_bytes > MAX_RESPONSE_BYTES:
+                raise AiError(f'a response larger than {MAX_RESPONSE_BYTES} bytes is refused',
+                              code='response_too_large')
             content, finish, usage, response_model = parse_reply(body)
         except AiError as exc:
             self._emit(data_class=decision['data_class'], model=model, slot=slot, status='refused',

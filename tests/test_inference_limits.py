@@ -7,15 +7,15 @@ import unittest
 from unittest.mock import patch
 
 from local_observe.ai import budget
-from local_observe.ai.client import AiClient, AiNotConfigured
+from local_observe.ai.client import AiClient, AiError, AiNotConfigured
 from local_observe.http import JsonClient, ResultTooLarge, TransportError
 from local_observe.observer import Config, Journal, Observer
-from local_observe.observer.adapters import Sources
+from local_observe.observer.adapters import Model, Sources
 from local_observe.platform.query import open_reader
 from local_observe.store.backends import clickhouse as ch
 from tests.test_ai_client import FakeTransport, MEASURED, NOW as AI_NOW, POLICY, reference
-from tests.test_observer_runtime import FixtureModel, NOW, SOURCE, WINDOW, envelope
-from tests.test_store_facade import RecordingOpener
+from tests.test_observer_runtime import FixtureModel, FixtureSources, NOW, SOURCE, WINDOW, envelope
+from tests.test_store_facade import RecordingOpener, recorded, RESOURCE, WINDOW as STORE_WINDOW
 
 
 def client(**overrides):
@@ -79,6 +79,15 @@ class BudgetLimits(unittest.TestCase):
 
 
 class ReaderLimits(unittest.TestCase):
+    def test_oversized_presence_probe_is_not_mistaken_for_absence(self):
+        def answer(sql, limit):
+            if limit == 1:
+                raise ResultTooLarge('untrusted-response-text')
+            return []
+
+        with self.assertRaises(ResultTooLarge):
+            recorded(answer).read('log-records', window=STORE_WINDOW, parameters={'resource_id': RESOURCE})
+
     def test_wire_allowance_is_explicit_and_keeps_native_query_constraints(self):
         body = json.dumps({'data': [{'value': 1}]}).encode() + b' ' * 66000
         opener = RecordingOpener([], body)
@@ -142,3 +151,38 @@ class ReaderLimits(unittest.TestCase):
                               model=FixtureModel(), clock=lambda: NOW).run('safe-code')
             self.assertEqual(result['activity'][0]['error'], 'source_result_too_large')
             self.assertNotIn(canary, json.dumps(result))
+
+
+class RefusalDiagnostics(unittest.TestCase):
+    def test_nonfinite_model_responses_emit_one_safe_refusal(self):
+        for value in (float('nan'), float('inf'), float('-inf')):
+            transport = FakeTransport(reply={'untrusted': 'response-canary', 'nested': [{'value': value}]})
+            with self.subTest(value=value), self.assertLogs('local_observe.ai.telemetry', 'WARNING') as logs:
+                with self.assertRaises(AiError) as caught:
+                    client(transport=transport).complete(instruction='Review.', data_class='internal',
+                                                        evidence=[reference()], now=AI_NOW)
+            self.assertEqual(caught.exception.code, 'malformed_response')
+            self.assertEqual(len(logs.records), 1)
+            self.assertEqual(logs.records[0].refusal, 'malformed_response')
+            self.assertNotIn('response-canary', str(vars(logs.records[0])))
+            self.assertEqual(len(transport.calls), 1)
+
+    def test_model_error_codes_are_allowlisted_before_persistence(self):
+        config = Config((SOURCE,))
+        for code, expected in (('prompt_bytes', 'model_prompt_bytes'),
+                               ('endpoint_unavailable', 'model_endpoint_unavailable'),
+                               ('untrusted-code-canary', 'model_request_failed')):
+            class RejectingClient:
+                capture = False
+                out_of_lan = False
+
+                def complete(self, **_kwargs):
+                    raise AiError('untrusted-error-text-canary', code=code)
+
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                with closing(Journal(Path(directory) / 'state')) as journal:
+                    result = Observer(config, journal, sources=FixtureSources(),
+                                      model=Model(client=RejectingClient()), clock=lambda: NOW).run('refused')
+                    self.assertEqual(result['error'], expected)
+                    self.assertEqual(result['model_calls'][0]['status'], 'failed')
+                    self.assertNotIn('canary', json.dumps(journal.get('refused')))
