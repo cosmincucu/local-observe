@@ -112,15 +112,43 @@ Remote requests carry the fixed output contract in short structured fields, so t
 any evidence text, the cycle fails explicitly as `model_evidence_withheld`; it cannot become
 a quiet finding over data the model did not receive. Prefer local inference for prose-heavy logs.
 
+One gateway alias can front several distinct backends, so the name inside the response envelope
+cannot say which deployment answered. Where the operator declares the expected gateway deployment ID
+in `LO_OBSERVER_MODEL_DEPLOYMENT`, the observer wraps that client's transport and reads exactly one
+response header (`X-Litellm-Model-Id`) from the same successful response that produced the answer.
+A missing, folded, repeated or different ID fails the cycle as `model_deployment_mismatch` before the
+answer is used, and the observed value is compared only: never returned, logged, hashed or journalled.
+The slot is per attempt and one attempt is made per call, so neither an earlier match nor a call that
+timed out or answered with an error status can certify a later call; an error status keeps its existing
+refusal code. The AI client's existing `body.model` alias check is unchanged and still applies. When
+the variable is unset nothing is wrapped and no header is read, and a client whose transport cannot
+carry the single-header contract is refused as `model_deployment_unsupported` rather than left
+unchecked. The expected ID is a bounded single token (no URL, path separator, folding byte or space)
+and it must name one backend: point this at an endpoint that does not return the header, or at a pool
+whose ID moves, and every call is refused.
+
+Under that selection, provenance `model_version` becomes `route-sha256:<hex>`: the SHA-256 of the
+canonical pair `[declared LO_OBSERVER_MODEL_VERSION, expected deployment ID]`, so the field is a
+bounded label over two operator declarations and never a copy of either. A missing or unknown declared
+version stays null instead of becoming a digest that manufactures completeness. Changing the expected
+deployment or the declared version, or selecting and deselecting this contract, changes the provenance
+hash and therefore invalidates a previous quality acceptance and delivery authority -- at startup,
+before any new call, not only after one. Static provenance may already carry the derived label while
+`response_model` is still null, so `complete` stays false and only a successfully guarded call can
+complete a cycle. This is transport metadata about where a request went, not an attestation of loaded
+weights: no alias, response header or cache reference proves a historical weight revision, and
+provider and model version remain explicit operator metadata.
+
 `run` and `serve` accept `--environment /private/path/observer-environment.json`, including
 the JSON emitted by guided setup. This is an allowlisted mapping of environment names to
 strings, never a shell script. The file must be an owned, regular mode-0600 file within an
 owned mode-0700 directory, with no symlinks or hardlinks. It replaces ambient settings;
 it does not merge with them. Allowed settings are the ClickHouse URL, read user and password
 file; AI base URL, key file, model/fast model, out-of-LAN flag, capture flag, policy, capability
-and budget files; internal HTTP flag; and the nonsecret `LO_OBSERVER_MODEL_PROVIDER` and
-`LO_OBSERVER_MODEL_VERSION` labels. Raw credentials and other names are rejected. Capture
-is always disabled. Without this option, only the same allowlisted ambient names are used.
+and budget files; internal HTTP flag; and the nonsecret `LO_OBSERVER_MODEL_PROVIDER`,
+`LO_OBSERVER_MODEL_VERSION` and optional `LO_OBSERVER_MODEL_DEPLOYMENT` labels. Raw
+credentials and other names are rejected. Capture is always disabled. Without this option,
+only the same allowlisted ambient names are used.
 
 ## Running and reviewing
 
@@ -240,7 +268,9 @@ relevant shared source files; policy, capability and budget hash effective docum
 The configured model and actual provider response model are separate identities. Missing
 metadata remains null and makes `complete` false; shadow observation can still proceed.
 Mixed provenance within a cycle fails it. Provider/version labels are explicit operator
-metadata, not independently verified provider claims. No endpoints, credential references,
+metadata, not independently verified provider claims. Where the optional gateway deployment ID
+is selected, `model_version` is the derived `route-sha256:` label described above and the
+observed header value never appears in this object. No endpoints, credential references,
 prompt bodies or evidence bodies appear in this object.
 
 Credential-named fields, recognizable credential assignments, URL credentials and known
