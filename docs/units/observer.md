@@ -271,57 +271,30 @@ remote redaction still applies. Models cannot grant export approval or create hu
 
 ## Reviewing from the operator UI
 
-The operator shell gains one more view, `Investigations`, alongside incidents, approvals and
-inventory. It asks the three review routes and nothing else, so it appears wherever the shell is
-already served — no second service, port, cookie or credential. The sign-in decides what it can do: a
-`human` sign-in reads and grades, any other role is told that it may not read investigations, and an
-installation with `LO_OBSERVER_REVIEW_STATE` unset is told that investigation review is unavailable.
-None of those three states is presented as an empty list, because an empty list would read as a quiet
-platform.
+Sign in to the existing platform interface with a human operator account and choose **Investigations**.
+The optional review API above must be configured. The list shows the newest cycles, including quiet
+results, and offers **Load older investigations** when more are retained. Unanswered cycles stay
+**not reviewed**. Unavailable state and denied access have explicit messages.
 
-The list is one page of the route's own answer, newest first, with its counts in words: how many cycles
-are listed out of how many are retained, and a `Load older investigations` control when the route said a
-row was cut. `Outcome` is the cycle's decision, coverage and status as the journal stored them. `Human
-grade` is `not reviewed` until somebody grades it. A cycle that is still running, or one the journal
-recorded as `skipped`, says `cannot be graded yet` and opens no form: neither left an answer a grade could
-be about. A cycle that `failed`, or that stopped `partial` with coverage short of `complete`, does open a
-form, because that result is exactly what a person may want to call wrong or unhelpful — and the record
-keeps showing its own status, coverage and interruption words, so a review of a failed run stays visibly a
-review of a failed run. Nothing is presented as a correct outcome because it was graded, and export approval
-on a cycle with no retained evidence is refused by name rather than quietly allowed. The status filter means
-record statuses and so is not shown here.
+1. Inspect a cycle and read its outcome, coverage, rationale and citations. Expand its retained evidence
+   to check the observations. The interface displays up to 25 citations and 25 rows per evidence item,
+   with a notice when more remain in local replay.
+2. Choose usefulness and correctness separately. Neither answer is preselected; use **unsure** when the
+   evidence does not support a judgement.
+3. Optionally enter a corrected answer (up to 4000 characters) and your review time (0–3600 seconds).
+   Review time is self-reported, not inferred from how long the page was open.
+4. Select **Approve the corrected answer for export** only when it is suitable for later reuse.
+   This requires a correction, a decided correctness grade and retained evidence.
+5. Submit the review and check the history for its recorded identity and contents.
 
-Opening a row reads one cycle and shows what was retained — status, coverage, decision, mode, delivery,
-its start and end, any interruption, the number of findings, the answer with its rationale and citations,
-and every retained evidence item with its rows, nested labels included. The first 25 citations and the
-first 25 rows of each evidence item are listed; each cut is stated in words rather than left for the
-reader to notice. All of it is rendered as text, so a rationale that contains shell metacharacters or
-markup-shaped bytes is read as the observer's own words and becomes no element on the page. Below the
-record sits the review history, newest first, each entry naming the reviewer that recorded it. The 64-character
-digest that a submission has to answer is not shown: it is a precondition the route hands back, not something
-a person reads to grade an investigation.
+Failed and partial cycles can receive feedback while retaining their original status and incomplete
+coverage. Running and skipped cycles have no grading form. Reading or grading an investigation does
+not enable notifications or authorize an action.
 
-The form asks the two questions the journal asks — usefulness and correctness — and offers only the
-journal's own answers. Both groups start untouched, so an opened form is never silently a grade, and the
-submit control stays off until one answer in each group is chosen. A corrected answer is optional and
-limited to 4000 characters; review seconds are optional, whole and limited to 3600, and are only ever
-what the reviewer reports about their own time. `Approve the corrected answer for export` is a separate,
-deliberate act: the journal records it only with a corrected answer, a correctness grade of `correct` or
-`incorrect`, and retained evidence on that cycle, and it says so by name when it refuses. A refusal keeps
-everything on screen; so does a `409`, which shuts the form until the record is reloaded, because the
-cycle it was opened against is no longer the one the answer describes.
-
-Two rules keep a phone review from becoming two appends or one invented one. The page mints one review ID
-per intended review and repeats it for a retry of the same review, so a send whose answer never arrived
-can be pressed again without writing a second review — while a *different* answer under that outcome is
-refused until the record has been read again. And the page sends only the two preconditions the route handed
-it — the cycle digest kept in the page's own state and the newest review ID, which is what makes another human's review arriving meanwhile
-a conflict rather than a silent overwrite. What the journal records as reviewer is the sign-in's identity,
-prefixed `platform-human:`; nothing in the page names a reviewer, and a body that tried to is refused
-before the journal is opened.
-
-This view links to no other view: a record is reached from its row in the list, and the list always
-starts from the newest retained cycle.
+If a response is lost, retrying the unchanged submission uses the same review ID. Reload before
+changing an uncertain submission or after a conflict with a newer review. Signing out clears the
+displayed evidence and form; credentials and drafts are kept only in page memory. Retained evidence
+and model text are displayed as text, never executed as markup.
 
 ## Durable states and safety boundaries
 
