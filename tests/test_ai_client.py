@@ -33,6 +33,14 @@ REPLY = {'model': 'qwen3-30b', 'choices': [{'message': {'content': 'the volume f
                                            'finish_reason': 'stop'}],
          'usage': {'prompt_tokens': 44, 'completion_tokens': 48}}
 
+# One real-shaped reply from a reasoning serve: 200 OK, the whole completion allowance gone, and the
+# text field still empty because everything generated went into the private reasoning channel.
+REASONING_CANARY = 'PRIVATE-REASONING-CANARY'
+BUDGET_EXHAUSTED = {'choices': [{'finish_reason': 'length',
+                                 'message': {'content': '', 'reasoning_content': REASONING_CANARY}}],
+                    'usage': {'completion_tokens': 8192, 'prompt_tokens': 20933, 'total_tokens': 29125,
+                              'completion_tokens_details': {'reasoning_tokens': 8192, 'text_tokens': 0}}}
+
 
 class FakeTransport:
     """Counts requests and answers with *reply*; every refusal test asserts the count is zero."""
@@ -316,6 +324,105 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(logs.records[0].evidence_bytes, admitted['evidence_bytes'])
 
 
+class ReasoningEffortTests(unittest.TestCase):
+    """The one request-side parameter the budget can carry, checked as a spelling on the wire.
+
+    The claim is deliberately narrow: a configured effort reaches the body unchanged, an absent key
+    changes nothing, and every other value refuses while the transport is still untouched. What a
+    given serve *does* with `xhigh` — honours it, ignores it, answers 400 — is that serve's behaviour,
+    unmeasured by this repository, and no fixture here can turn a spelling into a guarantee. The
+    operator who sets the key has measured one model behind one gateway; the product's job is to lose
+    neither the measurement nor the byte count on the way out.
+    """
+
+    def asked(self, *, budget=None):
+        """Send one explanation with *budget* and return the transport that saw it."""
+        transport = FakeTransport()
+        build(transport=transport, budget=budget or dict(budget_module.DEFAULTS)).complete(
+            instruction='why?', data_class='internal', evidence=[reference()], now=NOW)
+        return transport
+
+    def test_an_omitted_key_sends_the_request_this_client_always_wrote(self):
+        transport = self.asked()
+        payload = transport.calls[0]['payload']
+        self.assertNotIn('reasoning_effort', payload)
+        self.assertEqual(sorted(payload), ['max_tokens', 'messages', 'model', 'stream'],
+                         'no placeholder, no empty string, no extra key')
+
+    def test_a_configured_effort_is_in_the_exact_body_and_changes_nothing_else(self):
+        for effort in budget_module.REASONING_EFFORTS:
+            with self.subTest(effort=effort):
+                transport = self.asked(budget=dict(budget_module.DEFAULTS, reasoning_effort=effort))
+                payload = transport.calls[0]['payload']
+                self.assertEqual(payload['reasoning_effort'], effort)
+                body = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+                self.assertIn(f'"reasoning_effort":"{effort}"', body)
+                self.assertEqual(len(transport.calls), 1,
+                                 'naming a mode is not a reason to send a second request')
+                self.assertEqual({key: value for key, value in payload.items()
+                                  if key != 'reasoning_effort'},
+                                 self.asked().calls[0]['payload'],
+                                 'the same model, the same evidence and the same allowance asked')
+
+    def test_the_slot_asks_the_spelling_configured_because_the_budget_is_one_document(self):
+        """There is no per-slot effort: a client built from one budget asks one way."""
+        transport = FakeTransport(reply={'model': 'qwen3-30b-small', 'choices': [
+            {'message': {'content': 'summary'}, 'finish_reason': 'stop'}]})
+        build(transport=transport, model_fast='qwen3-30b-small',
+              budget=dict(budget_module.DEFAULTS, reasoning_effort='low')).complete(
+            instruction='summarise', data_class='internal', evidence=[reference()], slot='model_fast',
+            now=NOW)
+        self.assertEqual(transport.calls[0]['payload']['reasoning_effort'], 'low')
+        self.assertEqual(transport.calls[0]['payload']['model'], 'qwen3-30b-small')
+
+    def test_a_value_outside_the_accepted_list_refuses_before_the_endpoint_is_reached(self):
+        for value in (None, True, False, 1, 8192, 'xhigh ', 'XHIGH', 'x-high', 'highest', '', 'null',
+                      ['xhigh'], {'spelling': 'xhigh'}):
+            transport = FakeTransport()
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(AiError) as caught:
+                    build(transport=transport,
+                          budget=dict(budget_module.DEFAULTS, reasoning_effort=value))
+                self.assertEqual(transport.calls, [],
+                                 'a spelling this product cannot name must never leave as one')
+                self.assertIn('reasoning_effort', str(caught.exception))
+
+    def test_the_optional_field_is_counted_where_the_written_body_is_measured(self):
+        """`plan` admits the bundle; the body it wrote is what has to make room for the parameter.
+
+        The ceiling below is the exact size of the body *without* the parameter, so the estimate —
+        which never sees it — still admits the request and only the second measurement can refuse it.
+        A field charged nowhere would be a ceiling quietly exceeded on every measured call.
+        """
+        instruction = 'why is this volume full?'
+        bundle = [reference(parameters={'probe': '\\"' * 1_200})]
+
+        def send(transport, limits):
+            build(transport=transport, budget=limits).complete(instruction=instruction,
+                                                              data_class='internal', evidence=bundle,
+                                                              now=NOW)
+            return transport.calls[0]['payload']
+
+        plain_bytes = wire_bytes(send(FakeTransport(), dict(budget_module.DEFAULTS)))
+        effort_bytes = wire_bytes(send(FakeTransport(),
+                                       dict(budget_module.DEFAULTS, reasoning_effort='xhigh')))
+        self.assertGreater(effort_bytes, plain_bytes, 'the spelling is bytes on the wire, not a free hint')
+
+        limits = dict(budget_module.DEFAULTS, max_evidence_bytes=budget_module.payload_bytes(bundle),
+                      max_prompt_bytes=plain_bytes)
+        admitted = budget_module.plan(limits, bundle, prompt_bytes=framing_bytes(instruction), now=NOW)
+        self.assertLessEqual(admitted['body_bytes'], limits['max_prompt_bytes'],
+                             'the estimate never sees the parameter, so it is not what refuses')
+        fits = FakeTransport()
+        send(fits, limits)
+        self.assertEqual(len(fits.calls), 1, 'the body without the parameter fits exactly')
+        over = FakeTransport()
+        with self.assertRaises(AiError) as caught:
+            send(over, dict(limits, reasoning_effort='xhigh'))
+        self.assertEqual(caught.exception.code, 'prompt_bytes')
+        self.assertEqual(over.calls, [], 'the oversized body was never handed over')
+
+
 class RemoteOutputTests(unittest.TestCase):
     def test_a_bundle_that_may_have_left_the_lan_is_labelled_in_the_output(self):
         transport = FakeTransport()
@@ -423,6 +530,108 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(client.token_count(7), 7)
 
 
+class IncompleteOutputTests(unittest.TestCase):
+    """What happens when the serve answers 200 and writes no answer, and what it must never be called.
+
+    A reasoning model that spends `max_completion_tokens` on its chain of thought returns an empty
+    `content` with a `finish_reason` that says the budget ran out. Reporting that as an empty reply
+    sends a consumer down the request-failure path, so these check three separate things: the refusal
+    names the unfinished output, the measured counts survive it, and the reasoning text does not.
+    """
+
+    def refused(self, reply):
+        """Return ``(error, telemetry line, transport)`` for one call that the endpoint ruined."""
+        transport = FakeTransport(reply=reply)
+        with self.assertLogs('local_observe.ai.telemetry', 'WARNING') as captured:
+            with self.assertRaises(AiError) as caught:
+                build(transport=transport).complete(instruction='why?', data_class='internal',
+                                                    evidence=[reference()], now=NOW)
+        return caught.exception, logged(captured.records), transport
+
+    def test_a_reply_cut_off_before_any_text_is_incomplete_output(self):
+        error, line, transport = self.refused(BUDGET_EXHAUSTED)
+        self.assertEqual(error.code, 'incomplete_response')
+        self.assertNotIn(error.code, ('empty_content', 'malformed_response', 'endpoint_unavailable',
+                                      'endpoint_status'), 'an unfinished answer is not a request failure')
+        self.assertEqual(len(transport.calls), 1, 'the refusal is not a reason to try again')
+
+    def test_the_measured_counts_survive_a_refusal_and_the_reasoning_text_does_not(self):
+        error, line, _transport = self.refused(BUDGET_EXHAUSTED)
+        self.assertIn('"refusal": "incomplete_response"', line)
+        self.assertIn('"gen_ai.usage.input_tokens": 20933', line)
+        self.assertIn('"gen_ai.usage.output_tokens": 8192', line)
+        self.assertIn('"capture": false', line)
+        self.assertNotIn(REASONING_CANARY, str(error))
+        self.assertNotIn(REASONING_CANARY, line)
+        # The exception carries the code and nothing else: no provider field rides into a log line or
+        # a journal document as an attribute a caller might copy.
+        self.assertEqual(set(vars(error)), {'code'})
+
+    def test_the_parser_refuses_the_same_reply_it_was_sent_over_the_wire(self):
+        with self.assertRaises(AiError) as caught:
+            client.parse_reply(BUDGET_EXHAUSTED)
+        self.assertEqual(caught.exception.code, 'incomplete_response')
+        self.assertEqual(client.usage_counts(BUDGET_EXHAUSTED),
+                         {'input_tokens': 20933, 'output_tokens': 8192})
+
+    def test_a_finished_reply_that_wrote_nothing_keeps_the_empty_content_refusal(self):
+        for finish in ('stop', 'content_filter', 'tool_calls', 'not_a_label_this_client_defines'):
+            reply = {'choices': [{'finish_reason': finish,
+                                  'message': {'content': '  ', 'reasoning_content': REASONING_CANARY}}],
+                     'usage': {'prompt_tokens': 12, 'completion_tokens': 300}}
+            with self.subTest(finish=finish):
+                error, line, _transport = self.refused(reply)
+                self.assertEqual(error.code, 'empty_content')
+                self.assertNotIn(REASONING_CANARY, str(error) + line)
+                # Only a truncated reply keeps its counts: nothing else here is a measured fact about
+                # output the client was refused, and an invented number is worse than a null.
+                self.assertIn('"gen_ai.usage.input_tokens": null', line)
+
+    def test_a_finish_reason_that_is_not_a_known_label_cannot_claim_anything(self):
+        for finish in ({'reason': 'length'}, ['length'], 42, True, None):
+            with self.subTest(finish=repr(finish)[:20]):
+                reply = {'choices': [{'finish_reason': finish, 'message': {'content': 'partial answer'}}]}
+                self.assertEqual(client.parse_reply(reply)[1], 'unknown')
+                error, _line, _transport = self.refused(
+                    {'choices': [{'finish_reason': finish, 'message': {'content': ''}}]})
+                self.assertEqual(error.code, 'empty_content',
+                                 'an unreadable finish label does not license claiming truncation')
+
+    def test_truncation_does_not_disguise_malformed_content(self):
+        for content in ({'text': REASONING_CANARY}, [REASONING_CANARY], 7, False):
+            with self.subTest(content_type=type(content).__name__):
+                error, line, _transport = self.refused(
+                    {'choices': [{'finish_reason': 'length', 'message': {'content': content}}]})
+                self.assertEqual(error.code, 'empty_content')
+                self.assertNotIn(REASONING_CANARY, str(error) + line)
+
+    def test_a_malformed_usage_block_is_unknown_never_zero_and_never_a_crash(self):
+        unknown = {'input_tokens': None, 'output_tokens': None}
+        for usage in ('not-a-usage-object', [1, 2], 5, None, {},
+                      {'prompt_tokens': True, 'completion_tokens': -1},
+                      {'prompt_tokens': '20933', 'completion_tokens': 8192.0},
+                      {'prompt_tokens': None, 'completion_tokens': False}):
+            with self.subTest(usage=repr(usage)[:24]):
+                self.assertEqual(client.usage_counts({'usage': usage}), unknown)
+        self.assertEqual(client.usage_counts('not-a-reply'), unknown)
+        self.assertEqual(client.usage_counts({}), unknown)
+        self.assertEqual(client.usage_counts({'usage': {'prompt_tokens': 20933, 'completion_tokens': True}}),
+                         {'input_tokens': 20933, 'output_tokens': None})
+        for value in (True, False, -1, 8192.0, '7', None, [7], {'n': 1}):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(client.token_count(value))
+        self.assertEqual(client.token_count(0), 0, 'a measured zero is a number, not a gap')
+
+    def test_the_client_hands_a_partial_answer_up_instead_of_deciding_the_consumer_is_satisfied(self):
+        """Acceptance belongs to the consumer: this fixture is refused in observer tests, not here."""
+        transport = FakeTransport(reply={'choices': [{'finish_reason': 'length',
+                                                     'message': {'content': '{"decision": '}}]})
+        result = build(transport=transport).complete(instruction='why?', data_class='internal',
+                                                    evidence=[reference()], now=NOW)
+        self.assertEqual(result['finish_reason'], 'length')
+        self.assertEqual(result['content'], '{"decision": ')
+
+
 class TelemetryTests(unittest.TestCase):
     def test_a_successful_call_logs_no_payload(self):
         transport = FakeTransport()
@@ -502,6 +711,21 @@ class FromEnvironmentTests(unittest.TestCase):
         self.assertEqual(built.budget['max_completion_tokens'], 8192)
         self.assertFalse(built.capture)
         path.write_text('{"request_timeout_seconds": 121}', encoding='utf-8')
+        with self.assertRaises(AiError):
+            AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+
+    def test_budget_file_can_name_the_effort_an_operator_measured(self):
+        """The spelling travels from the file to the validated document, or the client is not built."""
+        path = self.root / 'effort.json'
+        path.write_text(json.dumps({'request_timeout_seconds': 90, 'max_completion_tokens': 8192,
+                                    'reasoning_effort': 'xhigh'}), encoding='utf-8')
+        built = AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
+        self.assertEqual(built.budget['reasoning_effort'], 'xhigh')
+        self.assertEqual({key: value for key, value in built.budget.items()
+                          if key != 'reasoning_effort'},
+                         budget_module.validate({'request_timeout_seconds': 90,
+                                                 'max_completion_tokens': 8192}))
+        path.write_text('{"reasoning_effort": "maximum"}', encoding='utf-8')
         with self.assertRaises(AiError):
             AiClient.from_environment({**self.environ, 'LO_AI_BUDGET': str(path)})
 

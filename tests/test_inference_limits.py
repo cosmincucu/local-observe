@@ -11,9 +11,11 @@ from local_observe.ai.client import AiClient, AiError, AiNotConfigured
 from local_observe.http import JsonClient, ResultTooLarge, TransportError
 from local_observe.observer import Config, Journal, Observer
 from local_observe.observer.adapters import Model, Sources
+from local_observe.observer.contract import ObserverError, digest
 from local_observe.platform.query import open_reader
 from local_observe.store.backends import clickhouse as ch
-from tests.test_ai_client import FakeTransport, MEASURED, NOW as AI_NOW, POLICY, reference
+from tests.test_ai_client import (BUDGET_EXHAUSTED, FakeTransport, MEASURED, NOW as AI_NOW, POLICY,
+                                  REASONING_CANARY, reference)
 from tests.test_observer_runtime import FixtureModel, FixtureSources, NOW, SOURCE, WINDOW, envelope
 from tests.test_store_facade import RecordingOpener, recorded, RESOURCE, WINDOW as STORE_WINDOW
 
@@ -153,6 +155,56 @@ class ReaderLimits(unittest.TestCase):
             self.assertNotIn(canary, json.dumps(result))
 
 
+class ReasoningEffortProvenance(unittest.TestCase):
+    """The spelling is part of the document that gets hashed, so it is part of what got reproduced.
+
+    `budget_sha256` is how a later reader tells which request this cycle made, and the drift gate is
+    how the runtime tells that the document it is about to use is the document it hashed. Both read
+    the validated budget, so an optional key has to move both: an operator who edits the effort in one
+    place only is refused, never quietly served a different request than the provenance describes.
+    """
+
+    def ask(self, *, client, environ):
+        """One adapter-level model call, in the shape the observer hands the adapter."""
+        model = Model(environ=environ, client=client)
+        evidence = [{'source': SOURCE.id, 'query_type': SOURCE.query_type,
+                     'resource_id': SOURCE.resource_id, 'window': dict(WINDOW)}]
+        return model, model.complete(evidence, {SOURCE.id}, Config((SOURCE,)), NOW)
+
+    def test_each_spelling_is_a_different_budget_document(self):
+        digests = {'omitted': digest(budget.validate(dict(budget.DEFAULTS)))}
+        for effort in budget.REASONING_EFFORTS:
+            digests[effort] = digest(budget.validate(dict(budget.DEFAULTS, reasoning_effort=effort)))
+        self.assertEqual(len(set(digests.values())), 5,
+                         'a changed effort that no digest noticed cannot be reproduced by anyone')
+        self.assertEqual(digests['omitted'], digest(budget.load(None)),
+                         'the unnamed case keeps the legacy document, so legacy digests stand')
+
+    def test_the_adapter_sends_and_hashes_the_spelling_the_file_named(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'budget.json'
+            path.write_text(json.dumps({'max_completion_tokens': 8_192, 'request_timeout_seconds': 90,
+                                        'reasoning_effort': 'xhigh'}), encoding='utf-8')
+            transport = FakeTransport()
+            instance = client(transport=transport,
+                              budget={**budget.DEFAULTS, 'max_completion_tokens': 8_192,
+                                      'request_timeout_seconds': 90, 'reasoning_effort': 'xhigh'})
+            model, result = self.ask(client=instance, environ={'LO_AI_BUDGET': str(path)})
+            self.assertEqual(transport.calls[0]['payload']['reasoning_effort'], 'xhigh')
+            self.assertEqual(transport.calls[0]['payload']['max_tokens'], 8_192)
+            self.assertEqual(result['status'], 'ok')
+            self.assertEqual(model.provenance()['budget_sha256'], digest(instance.budget))
+
+            # The same client, the file edited under it: the runtime refuses rather than generating a
+            # request its own provenance does not describe.
+            path.write_text(json.dumps({'max_completion_tokens': 8_192, 'request_timeout_seconds': 90}),
+                            encoding='utf-8')
+            with self.assertRaises(ObserverError) as caught:
+                self.ask(client=instance, environ={'LO_AI_BUDGET': str(path)})
+            self.assertEqual(str(caught.exception), 'model_configuration_drift')
+            self.assertEqual(len(transport.calls), 1, 'the drift gate ran before a second request')
+
+
 class RefusalDiagnostics(unittest.TestCase):
     def test_nonfinite_model_responses_emit_one_safe_refusal(self):
         for value in (float('nan'), float('inf'), float('-inf')):
@@ -171,6 +223,7 @@ class RefusalDiagnostics(unittest.TestCase):
         config = Config((SOURCE,))
         for code, expected in (('prompt_bytes', 'model_prompt_bytes'),
                                ('endpoint_unavailable', 'model_endpoint_unavailable'),
+                               ('incomplete_response', 'model_incomplete_response'),
                                ('untrusted-code-canary', 'model_request_failed')):
             class RejectingClient:
                 capture = False
@@ -186,3 +239,50 @@ class RefusalDiagnostics(unittest.TestCase):
                     self.assertEqual(result['error'], expected)
                     self.assertEqual(result['model_calls'][0]['status'], 'failed')
                     self.assertNotIn('canary', json.dumps(journal.get('refused')))
+
+    def test_a_budget_exhausted_reply_is_journalled_as_incomplete_output(self):
+        """The serve answered, spent every completion token and wrote no answer: the cycle says so.
+
+        Before the parser read `finish_reason` first, this reply reached the journal as
+        ``model_request_failed``, which points an operator at the endpoint while the endpoint was
+        healthy and the allowance was the problem.
+        """
+        transport = FakeTransport(reply=BUDGET_EXHAUSTED)
+        config = Config((SOURCE,))
+        with tempfile.TemporaryDirectory() as directory:
+            with closing(Journal(Path(directory) / 'state')) as journal:
+                result = Observer(config, journal, sources=FixtureSources(),
+                                  model=Model(client=client(transport=transport)),
+                                  clock=lambda: NOW).run('truncated')
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['error'], 'model_incomplete_response')
+                self.assertNotIn(result['error'], ('model_request_failed', 'model_endpoint_unavailable',
+                                                   'model_endpoint_status', 'incomplete_model_response'))
+                self.assertEqual(result['model_calls'][0]['status'], 'failed')
+                # A failed call keeps unknown counts in the journal; the measured ones belong to the
+                # AI telemetry record, and are not re-derived here from a reply the client refused.
+                self.assertEqual(result['model_calls'][0]['usage'], {'input_tokens': None,
+                                                                    'output_tokens': None})
+                self.assertEqual(len(transport.calls), 1)
+                persisted = json.dumps(journal.get('truncated'))
+                self.assertNotIn(REASONING_CANARY, persisted)
+                self.assertNotIn('reasoning', persisted)
+
+    def test_a_partial_answer_is_still_refused_by_the_observer(self):
+        """Text that stopped mid-write is a different code and an equally refused cycle."""
+        transport = FakeTransport(reply={'choices': [{'finish_reason': 'length',
+                                                     'message': {'content': '{"decision": ',
+                                                                 'reasoning_content': REASONING_CANARY}}],
+                                          'usage': {'prompt_tokens': 20933, 'completion_tokens': 512}})
+        config = Config((SOURCE,))
+        with tempfile.TemporaryDirectory() as directory:
+            with closing(Journal(Path(directory) / 'state')) as journal:
+                result = Observer(config, journal, sources=FixtureSources(),
+                                  model=Model(client=client(transport=transport)),
+                                  clock=lambda: NOW).run('partial')
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['error'], 'incomplete_model_response')
+                persisted = json.dumps(journal.get('partial'))
+                self.assertNotIn(REASONING_CANARY, persisted)
+                self.assertIsNone(result['answer'], 'a half-written answer is not recorded as a finding')
+                self.assertNotIn('answer', result['model_calls'][0])

@@ -187,9 +187,11 @@ class Model:
             # Only these product-defined codes may enter a persisted cycle; never copy provider text.
             safe_codes = {'prompt_bytes', 'evidence_bytes', 'too_many_references', 'expired_evidence',
                           'unavailable_evidence', 'endpoint_unavailable', 'endpoint_status',
-                          'response_too_large', 'malformed_response', 'model_mismatch'}
+                          'response_too_large', 'malformed_response', 'model_mismatch',
+                          'incomplete_response'}
             code = exc.code if isinstance(exc.code, str) and exc.code in safe_codes else 'request_failed'
             raise ObserverError('model_' + code) from None
+        # Preserve the published refusal code for partial answers that contain text.
         require(result.get('finish_reason') == 'stop', 'incomplete_model_response')
         require(not result.get('redaction_counts', {}).get('no_free_text'), 'model_evidence_withheld')
         return result

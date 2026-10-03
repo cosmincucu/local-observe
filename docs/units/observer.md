@@ -88,13 +88,23 @@ requires `LO_AI_API_KEY_FILE` and forces payload capture off. A configured local
 API remains subject to the existing policy, capability and per-call token/byte budgets.
 For reasoning models, the optional AI budget can explicitly allow up to 8 192 completion
 tokens and a `request_timeout_seconds` of at most 120. Defaults remain 512 tokens and a
-10-second socket timeout. Test representative observation windows before selecting limits:
+10-second socket timeout. An optional `reasoning_effort` (`low`, `medium`, `high` or
+`xhigh`) is sent unchanged within the same request bounds. Omission leaves the parameter
+unset. The budget provenance hash and configuration-drift check include an explicit value.
+Verify support against the configured gateway/model; this setting does not guarantee
+completion or cause the observer to retain reasoning text.
+Test representative observation windows before selecting limits:
 reasoning may consume the token allowance without producing a final answer. The full
 serialized prompt and model response must still fit their independent byte bounds.
 The final observer JSON answer is limited to 16 KiB; reasoning tokens belong in the
 provider's separate reasoning field, never in the final answer. Known AI budget and
 transport refusals are retained as fixed `model_*` journal codes; provider error text
 and unrecognized codes are not persisted.
+A reply reporting truncated output without answer text is journalled as
+`model_incomplete_response`. Partial answers that contain text keep the
+`incomplete_model_response` code. Both are refused without retaining response or reasoning
+text. Failed calls keep null token counts in the journal; validated counters from answerless
+truncation are available in the AI component's call record.
 Unknown model cost remains null; reported input/output token counts and elapsed time are retained.
 Remote requests carry the fixed output contract in short structured fields, so the existing
 `no_free_text` policy does not erase the instructions or evidence IDs. If that policy withholds

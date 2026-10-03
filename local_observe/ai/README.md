@@ -7,7 +7,7 @@ Four decisions, one module each, plus the client that applies them in order:
 | `capability.py` | has anything *measured* this model doing that? | `capability_unknown` |
 | `policy.py` | may this `data_class` be generated at all, and may it leave the LAN (remote inference policy)? | `policy_refused`, `remote_refused` |
 | `budget.py` | does the bundle fit, and is it still fresh? | `budget_exceeded`, `expired_evidence`, `unavailable_evidence` |
-| `client.py` | one OpenAI-compatible call, bounded, labelled, never retried | `endpoint_unavailable`, `response_too_large`, `malformed_response` |
+| `client.py` | one OpenAI-compatible call, bounded, labelled, never retried | `endpoint_unavailable`, `response_too_large`, `malformed_response`, `incomplete_response` |
 | `telemetry.py` | what a caller may say about a call when payload capture is off (chat integration) | — |
 
 The operator-facing contract — every `LO_AI_*` variable, the weight directory, the pinned serve,
@@ -22,6 +22,19 @@ certify that result. A returned identifier that differs from the configured mode
 still refused by the client.
 Rejected provider identifiers are omitted from errors and telemetry: an untrusted
 metadata field must not bypass the payload capture policy.
+
+An HTTP200 reply with `finish_reason: length` and empty or absent answer text is refused as
+`incomplete_response`. Validated input/output token counters are retained in the AI refusal
+record. Empty replies with other finish labels keep the `empty_content` refusal. Consumers
+still decide whether an answer containing partial text satisfies their contract.
+
+Reasoning fields are ignored and never included in results, exceptions or telemetry. Unknown
+finish labels become `unknown`; consumers must not accept them as completed answers.
+
+An optional budget `reasoning_effort` (`low`, `medium`, `high` or `xhigh`) is validated and
+copied unchanged into the measured request body. Omission preserves the previous request and
+budget digest. An explicit value participates in budget provenance and drift checks. Backend
+support requires measurement; the client never remaps the setting or retries a refusal.
 
 ## The two rules that hold the package together
 
