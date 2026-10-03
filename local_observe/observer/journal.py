@@ -40,7 +40,7 @@ def reviewer_identity(value: Any) -> str:
 
     Raises:
         ObserverError: ``invalid_reviewer`` for any other shape; ``invalid_identifier`` for a
-            `platform-human` local part outside the bounded identifier every other journal id obeys.
+            `platform-human` local part outside the platform's bounded identity vocabulary.
     """
     require(isinstance(value, str), 'invalid_reviewer')
     prefix, separator, local = value.partition(':')
@@ -48,7 +48,11 @@ def reviewer_identity(value: Any) -> str:
     if prefix == 'os-uid':
         require(local.isdigit(), 'invalid_reviewer')
     else:
-        name(local)
+        from local_observe.platform.state import StateError, label
+        try:
+            label(local)
+        except StateError:
+            raise ObserverError('invalid_reviewer') from None
     return value
 
 

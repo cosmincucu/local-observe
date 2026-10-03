@@ -1,5 +1,6 @@
 """Independent acceptance of review concurrency, bounded reads and existing-state opens."""
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import contextlib
 import datetime as dt
 import hashlib
@@ -12,11 +13,60 @@ from unittest.mock import patch
 from local_observe.observer.cli import main
 from local_observe.observer.contract import ObserverError, digest, instant
 from local_observe.observer.journal import Journal
-from local_observe.platform.observer_review import CYCLE_ROUTE, CYCLES_ROUTE, FEEDBACK_ROUTE
-from test_observer_review_api import HUMAN_A, ReviewFixture, submission
+from local_observe.platform.observer_review import CYCLE_ROUTE, CYCLES_ROUTE, FEEDBACK_ROUTE, ObserverReview
+from test_observer_review_api import HUMAN_A, ReviewFixture, request, submission
 
 
 class ReviewAcceptanceTests(ReviewFixture):
+    def test_all_valid_platform_identifier_shapes_retain_the_authenticated_identity(self):
+        self.seeded()
+        for index, identity in enumerate(('operator:reviewer', '_' + 'r' * 127)):
+            app = self.app(credentials=[{**HUMAN_A, 'identity': identity}])
+            status, body = self.post(FEEDBACK_ROUTE,
+                submission('quiet-1', f'identity-{index}', digest(self.journal.get('quiet-1')),
+                           None if index == 0 else 'identity-0'), app=app)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body['feedback']['reviewer'], 'platform-human:' + identity)
+
+    def test_review_contention_is_bounded_and_does_not_block_runtime_or_release_on_cancel(self):
+        self.seeded()
+        app = self.app()
+        release, admitted = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        entered = []
+        original = ObserverReview._cycles
+
+        def blocked(service, query):
+            with lock:
+                entered.append(threading.get_ident())
+                if len(entered) == 4:
+                    admitted.set()
+            if not release.wait(timeout=3):
+                raise AssertionError('review operation ran on the serving loop or never completed')
+            return original(service, query)
+
+        async def run():
+            with patch.object(ObserverReview, '_cycles', blocked):
+                tasks = [asyncio.create_task(request(app, 'GET', CYCLES_ROUTE, token=HUMAN_A['token']))
+                         for _ in range(4)]
+                try:
+                    self.assertTrue(await asyncio.to_thread(admitted.wait, 2))
+                    tasks[0].cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await tasks[0]
+                    runtime = await asyncio.wait_for(request(app, 'GET', '/v1/runtime',
+                                                            token=HUMAN_A['token']), timeout=.5)
+                    self.assertEqual(runtime[0], 200)
+                    refused = await request(app, 'GET', CYCLES_ROUTE, token=HUMAN_A['token'])
+                    self.assertEqual(refused, (503, {'error': 'observer_review_busy'}))
+                    self.assertEqual(len(entered), 4)
+                finally:
+                    release.set()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            self.assertEqual((await request(app, 'GET', CYCLES_ROUTE, token=HUMAN_A['token']))[0], 200)
+
+        asyncio.run(run())
+
     def test_human_correction_retrieval_export_and_withdrawal_across_restart(self):
         self.seeded()
         original = self.journal.get('quiet-1')

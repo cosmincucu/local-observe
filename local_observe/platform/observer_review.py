@@ -18,16 +18,14 @@ The invariants, each with the reason it is shaped this way:
    an identity, a role or a reviewer, so a `reader`, `producer`, `proposer`, `executor` or `summary`
    token can neither read review data nor become a reviewer.
 3. **The journal is opened per call and closed before the answer is sent.** Nothing here keeps a
-   connection open across requests, so a long-lived platform process cannot hold the observer's file
-   against the scheduler that owns it. Synchronous journal work runs on the serving loop, as the existing
-   `Store`-reading GET routes already do; one request is a bounded read (at most 100 stored cycles) or one
-   short append.
-4. **A refusal costs no I/O, and an answer carries no caller data.** Method, authority, query bytes,
+   connection open across requests. Journal operations run off the serving loop with at most four
+   admitted operations and no waiting queue; database contention cannot block authentication or health.
+4. **Malformed input is refused before journal access.** Method, authority, query bytes,
    identifier shape, body size, JSON shape and exact field names are decided before the journal opens.
-   Every body is a fixed vocabulary: `api.py`'s existing shapes plus `journal.py`'s own payload-free
+   Every refusal body is a fixed vocabulary: `api.py`'s existing shapes plus `journal.py`'s own payload-free
    codes. An unopenable journal, an unexpected exception or a stored record this build cannot project is
    one 503 body that names nothing; the reason goes to the log alone. No path, exception text, credential
-   or request value is ever echoed.
+   or request value is echoed in a refusal.
 5. **Nothing here writes a cycle.** The seam appends to the append-only `feedback` table and never
    modifies `cycles`, delivery, acceptance or expiry. A `quiet`, unanswered, failed or in-flight cycle is
    reported as `review: unknown` and `reviewable` only when the journal would accept a grade for it —
@@ -43,16 +41,18 @@ so it is not applied here and no row claims a queue position.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 from typing import Any
 
 from local_observe.log import get_logger
 from local_observe.observer.contract import ObserverError, digest, name, strict_json
 
-from .state import Actor, StateError, require
+from .state import Actor, StateError, label, require
 
 log = get_logger(__name__)
 
@@ -331,6 +331,8 @@ class ObserverReview:
                 directly is refused exactly as a deployment through the environment is.
         """
         self.state = existing_state(state)
+        self._capacity = threading.BoundedSemaphore(4)
+        self._jobs: set[asyncio.Future] = set()
         try:
             journal = _open(self.state)
             journal.close()
@@ -353,9 +355,9 @@ class ObserverReview:
         try:
             self._authorise(actor)
             if method == 'GET' and path == CYCLES_ROUTE:
-                return 200, self._cycles(scope.get('query_string', b''))
+                return 200, await self._offloop(self._cycles, scope.get('query_string', b''))
             if method == 'GET' and path == CYCLE_ROUTE:
-                return 200, self._cycle(scope.get('query_string', b''))
+                return 200, await self._offloop(self._cycle, scope.get('query_string', b''))
             if method == 'POST' and path == FEEDBACK_ROUTE:
                 if scope.get('query_string'):
                     # A review submission is a body. A query parameter on this route could only ever be
@@ -365,13 +367,39 @@ class ObserverReview:
                 raw = await _body(receive)
                 if raw is None:
                     return None
-                return 200, self._append(raw, actor)
+                return 200, await self._offloop(self._append, raw, actor)
             if method in ('GET', 'POST'):
                 # An owned path with the other method: the path is ours, the verb is not.
                 return 405, METHOD_NOT_ALLOWED
         except _Refusal as refusal:
             return refusal.status, refusal.body
         return 405, METHOD_NOT_ALLOWED
+
+    async def _offloop(self, operation, *args):
+        if not self._capacity.acquire(blocking=False):
+            raise _Refusal(503, {'error': 'observer_review_busy'})
+
+        def run():
+            try:
+                return operation(*args)
+            finally:
+                # Cancellation is not completion: only the actual operation returns capacity.
+                self._capacity.release()
+
+        try:
+            job = asyncio.get_running_loop().run_in_executor(None, run)
+        except BaseException:
+            self._capacity.release()
+            raise
+        self._jobs.add(job)
+
+        def finished(future):
+            self._jobs.discard(future)
+            if not future.cancelled():
+                future.exception()
+
+        job.add_done_callback(finished)
+        return await asyncio.shield(job)
 
     def _authorise(self, actor: Actor | None) -> None:
         """Refuse every credential that is not an authenticated human, before any journal is opened."""
@@ -486,8 +514,8 @@ class ObserverReview:
         values = document['values']
         identity = actor.identity
         try:
-            _identifier(identity)
-        except _Refusal:
+            label(identity)
+        except StateError:
             # The mounted credential set named an identity this journal cannot retain. That is a
             # deployment fact, not something the caller can correct.
             log.warning('Observer reviewer identity is unusable', extra={'refusal_code': 'invalid_identifier'})

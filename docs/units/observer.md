@@ -231,7 +231,9 @@ on both the body and `values`. A duplicate JSON key, a non-object body, a non-fi
 oversized document or undecodable UTF-8 is a `400 invalid_request` naming a public journal code. An
 unopenable, unowned, unversioned or unreadable journal, and any fault this process cannot judge, is one
 `503 observer_state_unavailable`. No path, exception text, credential or request value appears in any
-answer. This surface adds no service, no scheduler, no delivery and no grade of its own; automatic
+refusal response. Journal work runs off the serving loop with four concurrent operations and no waiting
+queue; excess requests receive `503 observer_review_busy`. Cancellation does not release capacity until
+the underlying operation ends. This surface adds no service, no scheduler, no delivery and no grade of its own; automatic
 notification rules are unchanged.
 
 Retrieval and JSONL export require a nonempty independent correction, an explicit export
