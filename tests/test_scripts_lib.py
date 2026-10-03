@@ -145,7 +145,9 @@ class RunTests(unittest.TestCase):
     def test_stderr_tail_is_bounded_when_not_redacted(self) -> None:
         with self.assertRaises(RuntimeError) as caught:
             run_module.run(self.child(5, 'q' * (run_module.STDERR_TAIL + 500)), timeout=60, redact_stderr=False)
-        self.assertEqual(str(caught.exception).count('q'), run_module.STDERR_TAIL)
+        # Count only stderr; the interpreter path can also contain the chosen character.
+        detail = str(caught.exception).split('\n', 1)[1]
+        self.assertEqual(detail, 'q' * run_module.STDERR_TAIL)
 
     def test_stdin_is_written_and_the_timeout_bounds_the_child(self) -> None:
         echo = [sys.executable, '-B', '-c', 'import sys; sys.stdout.write(sys.stdin.read().strip())']

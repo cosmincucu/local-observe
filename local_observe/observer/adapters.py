@@ -7,9 +7,9 @@ import os
 from pathlib import Path
 from urllib.parse import urlencode
 
-from local_observe.http import JsonClient
+from local_observe.http import JsonClient, ResultTooLarge
 
-from .contract import Config, Source, digest, require, strict_json, utc
+from .contract import Config, ObserverError, Source, digest, require, strict_json, utc
 
 
 def credential(path: str) -> str:
@@ -47,7 +47,9 @@ class Sources:
             values = {k: v for k, v in self.environ.items() if k != 'LO_CLICKHOUSE_READ_PASSWORD'}
             token = credential(values['LO_CLICKHOUSE_READ_PASSWORD_FILE'])
             self.secrets = tuple(set((*self.secrets, token)))
-            self.store = open_reader(environ=values)
+            # Allow wire formatting overhead; snapshot() still enforces the normalized evidence cap.
+            self.store = open_reader(environ=values,
+                                     max_response_bytes=max(65536, 2 * self.config.max_result_bytes))
             require(self.store is not None, 'store_unavailable')
         from local_observe.store.client import Window
         parameters = {'resource_id': source.resource_id}
@@ -55,8 +57,12 @@ class Sources:
         if source.query_type == 'metric-threshold':
             parameters['rule_id'] = 'observer'
             selectors['metric_name'] = source.metric_name
-        outcome = self.store.read(source.query_type, window=Window(**window), parameters=parameters,
-                                  selectors=selectors)
+        try:
+            outcome = self.store.read(source.query_type, window=Window(**window), parameters=parameters,
+                                      selectors=selectors)
+        except ResultTooLarge:
+            # Never copy exception text or attributes into the journal.
+            raise ObserverError('source_result_too_large') from None
         require(outcome.status == 'available', 'source_unavailable')
         rows = []
         for sample in outcome.rows():
@@ -173,8 +179,17 @@ class Model:
             contract['rules'].append('Historical examples cannot support current citations or policy')
         if history:
             references[0]['sample'] = {**references[0]['sample'], 'historical_examples': history}
-        result = self.client.complete(instruction=instruction,
-                                      data_class=config.data_class, evidence=references, json_mode=True, now=now)
+        from local_observe.ai import AiError
+        try:
+            result = self.client.complete(instruction=instruction,
+                                          data_class=config.data_class, evidence=references, json_mode=True, now=now)
+        except AiError as exc:
+            # Only these product-defined codes may enter a persisted cycle; never copy provider text.
+            safe_codes = {'prompt_bytes', 'evidence_bytes', 'too_many_references', 'expired_evidence',
+                          'unavailable_evidence', 'endpoint_unavailable', 'endpoint_status',
+                          'response_too_large', 'malformed_response', 'model_mismatch'}
+            code = exc.code if isinstance(exc.code, str) and exc.code in safe_codes else 'request_failed'
+            raise ObserverError('model_' + code) from None
         require(result.get('finish_reason') == 'stop', 'incomplete_model_response')
         require(not result.get('redaction_counts', {}).get('no_free_text'), 'model_evidence_withheld')
         return result

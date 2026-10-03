@@ -195,7 +195,8 @@ def refusal(source: str, query_type: str, *, window: Window | Mapping[str, str],
                    (), error.strip())
 
 
-def open_reader(*, environ: Mapping[str, str] | None = None) -> ClickHouseStore | None:
+def open_reader(*, environ: Mapping[str, str] | None = None,
+                max_response_bytes: int | None = None) -> ClickHouseStore | None:
     """Return the analysis reader the environment configures, or ``None`` after one log line.
 
     Never raises: a producer that starts without a query path must still emit coverage events
@@ -221,7 +222,8 @@ def open_reader(*, environ: Mapping[str, str] | None = None) -> ClickHouseStore 
     if not password.strip():
         return _reads_off(f'{READ_PASSWORD_VARIABLE} is set and blank')
     try:
-        client = ClickHouse(url, user, password, allow_http=values.get(ALLOW_HTTP_VARIABLE) == '1')
+        bounds = {} if max_response_bytes is None else {'max_response_bytes': max_response_bytes}
+        client = ClickHouse(url, user, password, allow_http=values.get(ALLOW_HTTP_VARIABLE) == '1', **bounds)
     except ValueError as exc:
         return _reads_off(f'{READ_URL_VARIABLE} is an endpoint this bounded client will not post to '
                           f'(plaintext http needs {ALLOW_HTTP_VARIABLE}=1)', error=exc)

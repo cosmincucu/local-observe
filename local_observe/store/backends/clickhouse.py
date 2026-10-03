@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from local_observe.http import NoRedirect, TransportError
+from local_observe.http import NoRedirect, ResultTooLarge, TransportError
 from local_observe.log import get_logger
 from local_observe.store.client import (MAX_ROWS, BoundQuery, LogRecord, MetricSample, PROBES, QUERY_KINDS,
                                         QueryKind, ReadOutcome, SignalPresence, StoreClient, TraceSpan,
@@ -44,6 +44,8 @@ log = get_logger(__name__)
 # rather than truncating a baseline into silence. One number for the whole package: it is
 # ``client.MAX_ROWS``, so a facade kind can never be sized above what this transport will read.
 SERIES_MAX_POINTS = MAX_ROWS
+DEFAULT_MAX_RESPONSE_BYTES = 65_536
+MAX_RESPONSE_BYTES_CEILING = 131_072
 
 # The store's own table names, spelled out here rather than hidden in a builder: clickstack / hyperdx binds this
 # repository to these tables, so a SigNoz schema change is a compatibility event, not a rename.
@@ -128,13 +130,18 @@ class ClickHouse:
     is sent, which is what makes it different from a caller's string. Platform code that only wants
     data goes through :class:`ClickHouseStore`, which takes a query kind instead of a statement.
     """
-    def __init__(self, url, user, password, *, allow_http=False):
+    def __init__(self, url, user, password, *, allow_http=False,
+                 max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES):
         parsed = urllib.parse.urlsplit(url)
         if (parsed.scheme not in (('https', 'http') if allow_http else ('https',))
                 or not parsed.hostname or parsed.username or parsed.password or parsed.query
                 or parsed.fragment):
             raise ValueError('Explicit trusted ClickHouse endpoint required')
         self.url, self.user, self.password = url, user, password
+        if (type(max_response_bytes) is not int
+                or not DEFAULT_MAX_RESPONSE_BYTES <= max_response_bytes <= MAX_RESPONSE_BYTES_CEILING):
+            raise ValueError('ClickHouse response bound must be an integer in 65536..131072 bytes')
+        self.max_response_bytes = max_response_bytes
 
     def _rows(self, sql: str, parameters: dict[str, Any], *, max_result_rows: int,
               expected_rows: int | None = None) -> list[Any]:
@@ -142,8 +149,11 @@ class ClickHouse:
 
         Every bound is set here rather than trusted to the caller: server-side `readonly`, a query
         time and read/write row limits that throw instead of truncating, a capped result size and a
-        64 KiB response read. `expected_rows` is asserted inside the wrapped block so a wrong-shaped
-        answer reaches the caller as one `TransportError`, never as a partial result.
+        response read (64 KiB by default, at most 128 KiB). `expected_rows` is asserted so a wrong-shaped
+        answer reaches the caller as one `TransportError`, never as a partial result. An answer that
+        overflowed the read bound keeps its own `ResultTooLarge` type: it is the one bounded failure
+        an operator can act on by narrowing the window, so it is re-raised ahead of the collapse and
+        carries only the bound, never the bytes that were read.
 
         The leading underscore is kept from the runner's use of this class; ``ClickHouseStore`` is in
         this module and calls it on purpose, because the public ``series`` path carries the runner's
@@ -161,14 +171,18 @@ class ClickHouse:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         try:
             with opener.open(request, timeout=10) as response:
-                raw = response.read(65537)
-                if len(raw) > 65536:
-                    raise ValueError('Oversized result')
+                raw = response.read(self.max_response_bytes + 1)
+                if len(raw) > self.max_response_bytes:
+                    raise ResultTooLarge('Bounded ClickHouse result exceeds the response byte limit')
                 result = json.loads(raw)
                 rows = result['data']
                 if expected_rows is not None and len(rows) != expected_rows:
                     raise ValueError('Unexpected aggregate result')
                 return rows
+        except ResultTooLarge:
+            log.debug('Bounded ClickHouse result exceeded the read bound',
+                      extra={'error_class': 'ResultTooLarge'})
+            raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.debug('Bounded ClickHouse query failed', extra={'error_class': type(exc).__name__})
             raise TransportError('Bounded ClickHouse query failed') from None
@@ -368,6 +382,8 @@ class ClickHouseStore(StoreClient):
         try:
             row = self.client.query(query.sql, bound_values(query, window, {}, checked))
             return presence_row(query, row)
+        except ResultTooLarge:
+            raise
         except (TransportError, ValueError, KeyError, TypeError) as exc:
             log.debug('Store describe refused', extra={'query_type': query_type,
                                                        'error_class': type(exc).__name__})
@@ -383,7 +399,9 @@ class ClickHouseStore(StoreClient):
         that comes back empty asks its probe, so "nothing here" is the store's answer and not an
         assumption. Mapping failures become one `TransportError`: a store that answers in a shape the
         pinned schema does not have is unavailable, and neither the row text nor the credential ever
-        reaches a log line.
+        reaches a log line. One failure is kept distinct: an answer that overflowed the transport's
+        read bound re-raises as `ResultTooLarge`, because a read too wide for the bound is a query to
+        narrow, not a store to restart, and only its type crosses this layer.
         """
         kind = prepare(query_type, 'read', parameters, selectors)
         if kind.signal != signal:
@@ -401,6 +419,8 @@ class ClickHouseStore(StoreClient):
                 raw = self.client._rows(query.sql, values, max_result_rows=kind.max_rows + 1)
                 rows = [ROW_MAPS[query_type](item) for item in raw[:kind.max_rows]]
                 series_exists = bool(rows) or self._selector_present(kind, window, checked, narrowing)
+        except ResultTooLarge:
+            raise
         except (TransportError, ValueError, KeyError, TypeError) as exc:
             log.debug('Bounded store read refused', extra={'query_type': query_type,
                                                            'error_class': type(exc).__name__})
@@ -425,6 +445,8 @@ class ClickHouseStore(StoreClient):
         try:
             return presence_row(probe, self.client.query(
                 probe.sql, bound_values(probe, window, probe_parameters, narrowing))).row_count > 0
+        except ResultTooLarge:
+            raise
         except (TransportError, ValueError, KeyError, TypeError):
             return False
 

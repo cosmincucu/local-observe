@@ -75,10 +75,26 @@ rows must fall inside `[start, end)`. Both observation time and the newest sampl
 meet the freshness limit. Empty rows, truncation, failed reads and budget skips are
 coverage gaps, never invented measurements. Unknown fields, versions and query names fail.
 
+The observer allows ClickHouse wire responses up to twice `max_result_bytes`, with a minimum
+of 64 KiB and a hard maximum of 128 KiB, to accommodate JSON formatting. Normalized evidence
+still has its configured limit, at most 64 KiB. An oversized wire response records
+`source_result_too_large`; oversized normalized evidence records `result_too_large`. Both
+refuse the whole result without truncating evidence or including response text in errors.
+Narrow the window or selector if the result cannot fit.
+
 The model adapter lazily uses `AiClient.from_environment`, including the existing
 `LO_AI_BASE_URL`, model, measured capability, policy and budget settings. It additionally
 requires `LO_AI_API_KEY_FILE` and forces payload capture off. A configured local or remote
 API remains subject to the existing policy, capability and per-call token/byte budgets.
+For reasoning models, the optional AI budget can explicitly allow up to 8 192 completion
+tokens and a `request_timeout_seconds` of at most 120. Defaults remain 512 tokens and a
+10-second socket timeout. Test representative observation windows before selecting limits:
+reasoning may consume the token allowance without producing a final answer. The full
+serialized prompt and model response must still fit their independent byte bounds.
+The final observer JSON answer is limited to 16 KiB; reasoning tokens belong in the
+provider's separate reasoning field, never in the final answer. Known AI budget and
+transport refusals are retained as fixed `model_*` journal codes; provider error text
+and unrecognized codes are not persisted.
 Unknown model cost remains null; reported input/output token counts and elapsed time are retained.
 Remote requests carry the fixed output contract in short structured fields, so the existing
 `no_free_text` policy does not erase the instructions or evidence IDs. If that policy withholds
