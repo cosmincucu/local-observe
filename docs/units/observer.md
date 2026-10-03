@@ -203,6 +203,26 @@ existing platform behavior continues. Blank, relative, missing, unsafe or invali
 platform startup. The review surface only opens an existing versioned journal; it never creates
 a database, and reading reviews does not initialize or migrate state.
 
+For Compose, add a deployment-owned override rather than setting an unused shell variable:
+
+```yaml
+services:
+  platform:
+    environment:
+      LO_OBSERVER_REVIEW_STATE: /observer-state
+    volumes:
+      - type: bind
+        source: ${LO_OBSERVER_STATE_DIR:?select the existing observer state directory}
+        target: /observer-state
+        bind:
+          create_host_path: false
+```
+
+Back up the journal before enabling feedback writes. Its directory and files must already have the
+private modes and OS ownership required by the platform process (UID 65532 in the reference Compose
+service). This mount is read/write because feedback is appended there. Keep the operator interface
+behind the installation's authenticated HTTPS access path; this feature adds no published port.
+
 | Route | Answer |
 |---|---|
 | `GET /v1/observer/cycles` | At most 100 newest cycle summaries, newest first, including quiet, failed and in-flight work. Optional `limit` (1-100) and `after=<cycle_id>` cursor. Reports `limit`, `returned`, `total_cycles`, `truncated` and `next_after`. `queue_reason` reuses the workload report's `quiet-sample` and `finding-or-coverage-gap` words per row, without its window-based sampling, and is absent for a cycle that cannot be graded yet. A summary carries no evidence, answer, rationale or grade, only the newest review's ID. |
@@ -438,9 +458,9 @@ Telegram API. There is no public callback service. Inline buttons offer combinat
 usefulness and correctness. The callback must match the configured human user (not a bot),
 chat, acknowledged message ID, cycle-bound random nonce, current epoch and expiry. A callback
 is consumed once; its human feedback and the polling cursor commit atomically. Rejected or
-replayed callbacks create no labels or action approval. Phone scalar grades cannot enable
-retrieval/export; an independently reviewed correction and explicit local export approval
-are still required. Quick phone grades leave `review_seconds` null. Each bot should belong to this integration, because Telegram polling
+replayed callbacks create no labels or action approval. Telegram scalar grades cannot enable
+retrieval/export; an independently reviewed correction and explicit export approval through the CLI
+or authenticated review interface are still required. Quick Telegram grades leave `review_seconds` null. Each bot should belong to this integration, because Telegram polling
 cursors are shared by all consumers of a bot.
 
 Backups include delivery outcomes, spent reservations, cursor, callback consumption and

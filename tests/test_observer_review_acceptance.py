@@ -2,22 +2,41 @@
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import contextlib
+import copy
 import datetime as dt
 import hashlib
 import io
 import json
 import sqlite3
 import threading
+import tracemalloc
 from unittest.mock import patch
 
 from local_observe.observer.cli import main
 from local_observe.observer.contract import ObserverError, digest, instant
 from local_observe.observer.journal import Journal
 from local_observe.platform.observer_review import CYCLE_ROUTE, CYCLES_ROUTE, FEEDBACK_ROUTE, ObserverReview
-from test_observer_review_api import HUMAN_A, ReviewFixture, request, submission
+from test_observer_review_api import EVIDENCE, HUMAN_A, ReviewFixture, add_cycle, request, submission
 
 
 class ReviewAcceptanceTests(ReviewFixture):
+    def test_listing_large_cycles_retains_summaries_instead_of_a_page_of_evidence(self):
+        evidence = copy.deepcopy(EVIDENCE)
+        row = {**evidence[0]['rows'][0], 'labels': {'padding': 'x' * 3800}}
+        evidence[0]['rows'] = [row] * 100
+        for index in range(25):
+            add_cycle(self.journal, f'large-{index}', minutes=index, evidence=evidence)
+        app = self.app()
+        tracemalloc.start()
+        try:
+            status, body = self.get(CYCLES_ROUTE, query=b'limit=25', app=app)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(status, 200)
+        self.assertEqual(body['returned'], 25)
+        self.assertLess(peak, 6 * 1024 * 1024)
+
     def test_all_valid_platform_identifier_shapes_retain_the_authenticated_identity(self):
         self.seeded()
         for index, identity in enumerate(('operator:reviewer', '_' + 'r' * 127)):

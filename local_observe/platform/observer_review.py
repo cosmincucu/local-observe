@@ -461,18 +461,23 @@ class ObserverReview:
                     # be answered with an empty page that would also be the answer for a short journal.
                     raise _Refusal(404, NOT_FOUND)
                 where, arguments = ' WHERE c.rowid < ?', [cursor[0], limit + 1]
-            rows = journal.db.execute(_PAGE_SQL.format(where=where), tuple(arguments)).fetchall()
-            total = journal.db.execute(_COUNT_SQL).fetchone()[0]
+            rows = journal.db.execute(_PAGE_SQL.format(where=where), tuple(arguments))
             # One row more than the page was asked for, so "there is a newer-or-older side you have not
             # seen" is a measurement and not a guess: `truncated` is true only when a row really was cut,
             # and `next_after` names the cursor that returns the next page.
-            page, truncated = rows[:limit], len(rows) > limit
+            page, truncated = [], False
+            for row in rows:
+                if len(page) == limit:
+                    truncated = True
+                    break
+                # Retain summaries only: a page of 100 maximum-size cycle documents is 50 MiB.
+                page.append(_summary(row[0], strict_json(row[1], 524288, max_depth=20), bool(row[2]), row[3]))
+            total = journal.db.execute(_COUNT_SQL).fetchone()[0]
             return {'schema_version': 1,
-                    'cycles': [_summary(row[0], strict_json(row[1], 524288, max_depth=20),
-                                        bool(row[2]), row[3]) for row in page],
+                    'cycles': page,
                     'limit': limit, 'returned': len(page), 'total_cycles': total,
                     'truncated': truncated,
-                    'next_after': page[-1][0] if truncated and page else None}
+                    'next_after': page[-1]['cycle_id'] if truncated and page else None}
 
         return self._journal(work)
 

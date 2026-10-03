@@ -10,7 +10,7 @@ must validate its selected components before relying on them. No production serv
 | Incidents | Detection, correlation, suppression, notification state and approval records |
 | Operations | Homepage navigation, platform interface and job-status adapters |
 | Observer | Scheduled, bounded investigations with retained redacted evidence and explicit incomplete coverage |
-| Feedback | Versioned human corrections, eligible-case retrieval and provenance-preserving export |
+| Feedback | Optional authenticated browser review of quiet and finding cycles, versioned human corrections, eligible-case retrieval and provenance-preserving export |
 | Guided setup | Reviewed plans and a separate trusted execution boundary |
 | Optional integrations | Model-assisted explanation, chat, additional sensors and external APIs |
 
@@ -22,6 +22,9 @@ Automated tests establish behavior under fixtures. The [evaluation harness](loca
 uses a small generated corpus by default. A configured observer can be compared with the same
 threshold, seasonal and shaping baselines; fixture results do not establish live detection quality.
 Ungraded cases stay unknown. The quality report cannot authorize notifications.
+Private held-out input has its own corpus origin; that label does not certify its truth or anonymization.
+An optional per-call deployment guard can reject a gateway response from a different configured model
+deployment. Provider and weight version remain operator declarations, and missing identity blocks acceptance.
 
 Live model quality, fit on a 16 GB VRAM device and human feedback burden across deployment
 sizes require measured acceptance. No training run or fine-tuned model is shipped. Telegram is
