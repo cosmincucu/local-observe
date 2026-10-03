@@ -10,6 +10,7 @@ from local_observe.platform.state import EVENT_KINDS, identifier
 MAX_BYTES = 1_048_576
 MAX_ROWS = 2000
 MAX_ITEMS = 128
+HELD_OUT_ORIGINS = ('anonymized-example', 'operator-held-out')
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -92,8 +93,8 @@ def validate(value):
         raise CorpusError('Unsupported corpus version')
     if not isinstance(value['id'], str) or not 1 <= len(value['id']) <= 64:
         raise CorpusError('Invalid corpus id')
-    if value['origin'] not in ('generated-demo', 'anonymized-example'):
-        raise CorpusError('Only demo-derived public corpus data is supported')
+    if value['origin'] not in ('generated-demo', *HELD_OUT_ORIGINS):
+        raise CorpusError('Unsupported corpus origin')
     evaluation = window(value['evaluation'])
     start, end = timestamp(evaluation['start']).timestamp(), timestamp(evaluation['end']).timestamp()
     for field in ('incidents', 'quiet', 'series'):

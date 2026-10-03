@@ -13,7 +13,8 @@ from .journal import private_directory
 ALLOWED = frozenset({'LO_CLICKHOUSE_URL', 'LO_CLICKHOUSE_READ_USER', 'LO_CLICKHOUSE_READ_PASSWORD_FILE',
                      'LO_AI_BASE_URL', 'LO_AI_API_KEY_FILE', 'LO_AI_MODEL', 'LO_AI_MODEL_FAST',
                      'LO_AI_OUT_OF_LAN', 'LO_AI_CAPTURE', 'LO_AI_POLICY', 'LO_AI_CAPABILITY', 'LO_AI_BUDGET',
-                     'LO_INTERNAL_ALLOW_HTTP', 'LO_OBSERVER_MODEL_PROVIDER', 'LO_OBSERVER_MODEL_VERSION'})
+                     'LO_INTERNAL_ALLOW_HTTP', 'LO_OBSERVER_MODEL_PROVIDER', 'LO_OBSERVER_MODEL_VERSION',
+                     'LO_OBSERVER_MODEL_DEPLOYMENT'})
 PATHS = frozenset({'LO_CLICKHOUSE_READ_PASSWORD_FILE', 'LO_AI_API_KEY_FILE', 'LO_AI_POLICY',
                    'LO_AI_CAPABILITY', 'LO_AI_BUDGET'})
 
@@ -57,6 +58,10 @@ def validate_environment(value: dict) -> dict[str, str]:
                     and bool(parsed.hostname) and not parsed.username and not parsed.password
                     and not parsed.query and not parsed.fragment and parsed.path in ('', '/'),
                     'invalid_setting_endpoint')
+        elif key == 'LO_OBSERVER_MODEL_DEPLOYMENT':
+            # A gateway deployment ID names one backend: same single-token shape the guard compares.
+            from .model_route import deployment_id
+            require(deployment_id(item) is not None, 'invalid_environment_label')
         else:
             from .provenance import label
             require(label(item) == item, 'invalid_environment_label')

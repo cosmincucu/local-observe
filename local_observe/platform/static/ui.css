@@ -529,3 +529,204 @@ dd {
     width: 42px;
   }
 }
+
+/* Observer investigations: the retained record of one cycle, its review history, and the one form that
+   writes a human grade. The widest thing this panel can be handed is a 64-character digest, a rationale
+   of 4000 characters or an evidence row full of labels, so every text-bearing box inside it wraps
+   anywhere rather than pushing the dialog sideways — the same rule the verification panel follows. */
+.observer {
+  margin-top: 24px;
+  border-top: 1px solid #dce3df;
+  padding-top: 6px;
+  min-width: 0;
+}
+.observer h3 {
+  font-size: 15px;
+  margin: 16px 0 0;
+}
+.observer h4 {
+  font-size: 13px;
+  margin: 18px 0 0;
+}
+.observer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.observer-heading button {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.observer p,
+.observer dd,
+.observer summary,
+.observer pre,
+.observer label {
+  overflow-wrap: anywhere;
+}
+.observer pre {
+  white-space: pre-wrap;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  max-width: 100%;
+  margin: 8px 0 0;
+}
+.observer details {
+  border-top: 1px solid #edf2ef;
+  padding: 6px 0;
+}
+.observer summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #33413c;
+}
+.observer-none,
+#observer-state {
+  font-size: 12px;
+  color: #5a6660;
+  margin: 12px 0 0;
+}
+/* A refusal is the reason to stop, so it carries the same red the platform uses for a failed record; a
+   form that was not filled in is a caution, not a failure, and stays amber. */
+#observer-feedback {
+  font-size: 12px;
+  margin: 14px 0 0;
+  color: #5a6660;
+}
+#observer-feedback[data-state="recorded"] {
+  color: #1d7251;
+}
+#observer-feedback[data-state="grade"],
+#observer-feedback[data-state="seconds"],
+#observer-feedback[data-state="answer"],
+#observer-feedback[data-state="sent"],
+#observer-feedback[data-state="changed"] {
+  color: #8f650c;
+}
+#observer-feedback[data-state="stale"],
+#observer-feedback[data-state="reused"],
+#observer-feedback[data-state="ungraded"],
+#observer-feedback[data-state="conflict"],
+#observer-feedback[data-state="refused"],
+#observer-feedback[data-state="unknown"],
+#observer-feedback[data-state="broken"] {
+  color: #a63749;
+}
+#observer-summary {
+  font-size: 12px;
+  color: #5a6660;
+  margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
+#observer-summary[data-state="unauthorised"],
+#observer-summary[data-state="unavailable"],
+#observer-summary[data-state="busy"],
+#observer-summary[data-state="malformed"],
+#observer-summary[data-state="refused"],
+#observer-summary[data-state="unreachable"] {
+  color: #a63749;
+}
+#observer-more {
+  margin: 14px 0 0;
+}
+/* A `display` from a class beats the UA sheet's `[hidden] { display: none }`, so hiding by attribute
+   alone would leave this form on screen: a cycle nobody may grade would still offer its grade boxes.
+   Every display this panel sets that the script also hides is restated as hidden here. */
+.observer-review,
+#observer-grades {
+  display: grid;
+}
+.observer-review[hidden],
+#observer-grades[hidden] {
+  display: none;
+}
+.observer-review {
+  gap: 12px;
+  margin-top: 18px;
+  border: 1px solid #dce3df;
+  border-radius: 6px;
+  padding: 14px;
+  min-width: 0;
+}
+.observer-review h4 {
+  margin: 0;
+}
+/* Two grade groups that never force horizontal scroll: on a phone each question is one line and the
+   three answers wrap under it, on a desktop they sit side by side. */
+#observer-grades {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+.observer-grades {
+  border: 1px solid #cbd4d1;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 0;
+  min-width: 0;
+}
+.observer-grades legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: #67776c;
+  padding: 0 4px;
+}
+.observer-grades label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  margin-right: 12px;
+}
+.observer-field {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  color: #67776c;
+  min-width: 0;
+}
+.observer-field textarea,
+.observer-field input {
+  width: 100%;
+  max-width: 100%;
+  padding: 10px;
+  border: 1px solid #bdcbc3;
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+}
+.observer-field textarea {
+  resize: vertical;
+}
+.observer-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+}
+.observer-choice input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  flex: 0 0 auto;
+}
+.observer-note {
+  font-size: 12px;
+  color: #5a6660;
+  margin: 0;
+  border-left: 3px solid #cbd4d1;
+  padding-left: 10px;
+}
+@media (max-width: 760px) {
+  .observer-review {
+    padding: 12px 10px;
+  }
+  #observer-grades {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .observer-grades label {
+    margin-right: 8px;
+  }
+}

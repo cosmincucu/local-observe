@@ -37,7 +37,10 @@
           <i data-lucide="server"></i>Inventory</button
         ><button data-view="events">
           <i data-lucide="list-filter"></i>Events</button
-        ><button data-view="audit"><i data-lucide="history"></i>Audit</button>
+        ><button data-view="audit"><i data-lucide="history"></i>Audit</button
+        ><button data-view="investigations">
+          <i data-lucide="notebook-pen"></i>Investigations
+        </button>
       </nav>
       <main>
         <section class="summary" aria-label="Current totals">
@@ -78,12 +81,26 @@
           </select>
         </div>
         <p id="error" role="alert" hidden></p>
+        <!-- Investigations view only: the page count is the route's own answer, so it is stated before
+             any row is listed and never implied by the rows that happen to be on screen. -->
+        <p
+          id="observer-summary"
+          role="status"
+          aria-live="polite"
+          data-state="idle"
+          hidden
+        ></p>
         <div class="table-wrap">
           <table>
             <thead id="columns"></thead>
             <tbody id="records"></tbody>
           </table>
           <p id="empty">Sign in to view records.</p>
+          <p id="observer-more" hidden>
+            <button id="observer-next" type="button">
+              <i data-lucide="chevron-down"></i>Load older investigations
+            </button>
+          </p>
         </div>
       </main>
     </div>
@@ -147,6 +164,68 @@
           hidden
         ></p>
         <div id="verification-result"></div>
+      </section>
+      <!-- Observer investigations: the retained record of one cycle, its review history, and the one
+           place a human grade is written. The grade groups are built by ui.js and start untouched, so
+           an open form never reads as `useful` or `correct`; it stays hidden for a cycle the journal
+           cannot grade. Nothing here is fetched until a cycle is inspected. -->
+      <section id="observer" class="observer" aria-labelledby="observer-title" hidden>
+        <div class="observer-heading">
+          <h3 id="observer-title">Investigation record</h3>
+          <button id="observer-reload" type="button">Reload</button>
+        </div>
+        <p
+          id="observer-state"
+          role="status"
+          aria-live="polite"
+          data-state="not-loaded"
+        >
+          Not loaded.
+        </p>
+        <div id="observer-record"></div>
+        <div id="observer-history"></div>
+        <div id="observer-review" class="observer-review" hidden>
+          <h4>Grade this investigation</h4>
+          <div id="observer-grades"></div>
+          <label class="observer-field"
+            >Corrected answer (optional)
+            <textarea
+              id="observer-answer"
+              rows="3"
+              maxlength="4000"
+              autocomplete="off"
+            ></textarea>
+          </label>
+          <label class="observer-choice"
+            ><input id="observer-export" type="checkbox" />Approve the corrected answer for
+            export</label
+          >
+          <p class="observer-note">
+            Export approval is recorded only with a corrected answer, a correctness
+            grade of correct or incorrect, and retained evidence on this cycle.
+          </p>
+          <label class="observer-field"
+            >Review seconds (optional, self-reported)
+            <input
+              id="observer-seconds"
+              type="number"
+              min="0"
+              max="3600"
+              step="1"
+              inputmode="numeric"
+            />
+          </label>
+          <button id="observer-submit" class="primary" type="button" disabled>
+            Submit review
+          </button>
+        </div>
+        <p
+          id="observer-feedback"
+          role="status"
+          aria-live="polite"
+          data-state=""
+          hidden
+        ></p>
       </section>
       <p id="detail-error" role="alert"></p>
     </dialog>

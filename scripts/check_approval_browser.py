@@ -1,4 +1,4 @@
-"""Require the authenticated action approval workflow to pass in a real browser."""
+"""Require action approval and observer review to pass in a real browser without skips."""
 import os
 from pathlib import Path
 import sys
@@ -15,10 +15,12 @@ def main():
         print('Install the pinned Playwright Chromium browser before this check.', file=sys.stderr)
         return 2
     os.environ['LO_TEST_BROWSER'] = selected
-    suite = unittest.defaultTestLoader.loadTestsFromName(
-        'test_operator.OperatorTests.test_action_approval_in_chromium_with_real_platform_api')
+    suite = unittest.defaultTestLoader.loadTestsFromNames([
+        'test_operator.OperatorTests.test_action_approval_in_chromium_with_real_platform_api',
+        'test_observer_review_browser'])
+    expected = suite.countTestCases()
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    return 0 if result.wasSuccessful() and result.testsRun == 1 and not result.skipped else 1
+    return 0 if result.wasSuccessful() and expected >= 2 and result.testsRun == expected and not result.skipped else 1
 
 
 if __name__ == '__main__':

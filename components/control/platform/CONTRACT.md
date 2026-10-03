@@ -18,6 +18,17 @@ Schema 10 adds setup plans, human binding approvals and trusted runner requests.
 observer has a separate private journal; back up both selected state stores and configuration.
 Reconcile external effects before resuming execution or delivery after restoring an older copy.
 
+`LO_OBSERVER_REVIEW_STATE` optionally names an existing absolute observer state directory. The
+platform process must own it (0700) and its journal (0600), using the same OS identity as the observer.
+Provide an explicit read/write mount when enabling browser feedback; the default deployment adds no
+mount and the routes remain disabled. Startup refuses invalid or missing configured state. Reads
+never initialize a journal. The human-only `/v1/observer/cycles`, `/v1/observer/cycle` and
+`/v1/observer/feedback` routes retain evidence in that journal and append authenticated review records
+with atomic stale-review checks. Agent roles cannot read or write these routes. Browser review uses
+the existing operator password or human credential; it grants no model delivery or action authority.
+Back up the selected observer state before enabling writes. See the
+[review contract](../../../docs/units/observer.md#optional-authenticated-review-api) for limits.
+
 Intake v1 accepts source retry identity, nullable resource UUID, classification,
 severity, status, rule/version, bounded evaluation window and evidence references.
 The server derives event_id from source/source_event_id and assigns received_at;

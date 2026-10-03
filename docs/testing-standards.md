@@ -30,7 +30,8 @@ python -B tests/tiers.py --start-dir tests/compiler --json tier-report-compiler.
 The CI configuration runs the base tier once under coverage, the optional MCP subgroup and the
 compiler tier. Tier reports distinguish failures, collection errors and platform or dependency
 skips. A skip is not acceptance. Empty collection fails. A separate browser job requires the
-authenticated action approval workflow to pass in desktop and mobile Chromium. Its requests are
+authenticated action approval and observer investigation review workflows to pass in desktop and
+mobile Chromium, including stale submissions, retries, logout races and denied agent roles. Their requests are
 handled by the actual platform API in process; it contacts no deployed service. To run it locally,
 install the base test requirements and `scripts/requirements-browser.txt` in an isolated environment,
 run `python -m playwright install --with-deps chromium`, then

@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 
 from local_observe.http import JsonClient, ResultTooLarge
 
+from . import model_route
 from .contract import Config, ObserverError, Source, digest, require, strict_json, utc
 
 
@@ -111,9 +112,14 @@ class Model:
         self.secrets: tuple[str, ...] = ()
 
     def provenance(self) -> dict:
+        # With an expected gateway deployment selected, the version label becomes the bounded digest of
+        # (declared version, expected ID): changing either one invalidates an accepted provenance. An
+        # unknown declared version stays null instead of becoming a hash that invents completeness.
+        expected = model_route.declared_deployment(self.environ)
+        declared = self.environ.get('LO_OBSERVER_MODEL_VERSION')
         result = {'configured_model': getattr(self.client, 'model', None) or self.environ.get('LO_AI_MODEL'),
                   'provider': self.environ.get('LO_OBSERVER_MODEL_PROVIDER'),
-                  'model_version': self.environ.get('LO_OBSERVER_MODEL_VERSION')}
+                  'model_version': declared if expected is None else model_route.route_label(declared, expected)}
         try:
             from local_observe.ai import budget, capability, policy
         except ImportError:
@@ -146,6 +152,7 @@ class Model:
             values = {k: v for k, v in self.environ.items() if k != 'LO_AI_API_KEY'}
             values['LO_AI_CAPTURE'] = '0'
             self.client = AiClient.from_environment(values)
+        self.client = model_route.guard_client(self.client, self.environ)
         require(not self.client.capture, 'model_payload_logging_forbidden')
         configured = self.provenance()
         for attribute in ('policy', 'capability', 'budget'):
