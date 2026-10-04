@@ -210,6 +210,32 @@ class PreflightPredictionTests(unittest.TestCase):
         self.assertIn('no_usable_evidence', codes(report))
         self.assertEqual(report['cycles']['usable_initial_evidence'], 0)
 
+    def test_incidents_for_resources_outside_the_corpus_are_reported_separately(self):
+        held = corpus([series(rows=points(2))], incidents=[{
+            'id': 'outside', 'resource_id': SECOND, 'expected_class': 'anomaly',
+            'window': {'start': utc_text(START), 'end': utc_text(START + dt.timedelta(hours=1))}}])
+        report = checked(held, config())
+        self.assertEqual(report['labels']['incident_labels'], 0)
+        self.assertEqual(report['labels']['out_of_scope_incident_labels'], 1)
+        self.assertEqual(report['labels']['unknown_seconds'], 3600)
+        self.assertIn('out_of_scope_incident_labels', report['caveats'])
+        self.assertTrue(report['inputs_feasible'])
+
+    def test_fully_labelled_span_can_still_have_gaps_between_observations(self):
+        span = {'start': utc_text(START), 'end': utc_text(START + dt.timedelta(hours=3))}
+        held = corpus([series(rows=[(0, 30, 1), (2, 30, 1)])], quiet=[span], hours=3)
+        report = checked(held, config(cadence_seconds=7200, window_seconds=3600))
+        self.assertEqual(report['labels']['evaluation_seconds'], 10800)
+        self.assertEqual(report['labels']['unknown_seconds'], 0)
+        self.assertEqual(report['cycles']['observation_seconds'], 7200)
+        self.assertEqual(report['cycles']['unobserved_seconds'], 3600)
+        self.assertIn('unobserved_evaluation_intervals', report['caveats'])
+        self.assertTrue(report['inputs_feasible'])
+        # Overlapping cycles contribute their union, not twice their covered time.
+        report = checked(held, config(cadence_seconds=1800, window_seconds=3600))
+        self.assertEqual(report['cycles']['observation_seconds'], 10800)
+        self.assertEqual(report['cycles']['unobserved_seconds'], 0)
+
     def test_partial_window_staleness_and_empty_samples_are_located(self):
         rows = [series(rows=[(0, 30, 10), (1, 5, 10)]), series(metric=OTHER, rows=[(0, 30, 10)])]
         settings = config(sources=[metric_source(METRIC, 'first'), metric_source(OTHER, 'second')],
@@ -281,11 +307,11 @@ class PreflightPredictionTests(unittest.TestCase):
                                 {'resource_id': SECOND, 'window': interval(2)}])
         report = checked(held, config())
         self.assertEqual(report['labels'], {
-            'unit': 'resource_seconds', 'window_seconds': 14400, 'duration_seconds': 14400,
+            'unit': 'resource_seconds', 'evaluation_seconds': 14400, 'duration_seconds': 14400,
             'exhaustive_seconds': 7200, 'unknown_seconds': 7200,
             'resources': [{'resource_index': 0, 'exhaustive_seconds': 7200, 'unknown_seconds': 7200}],
             'quiet_windows': 1, 'labelled_windows': 3, 'labelled_resources': 1,
-            'out_of_scope_labelled_windows': 1, 'incident_labels': 1,
+            'out_of_scope_labelled_windows': 1, 'incident_labels': 1, 'out_of_scope_incident_labels': 0,
             'incidents_are_exhaustive_negatives': False})
         self.assertTrue(report['inputs_feasible'], 'unknown labels warn; they do not invalidate runnable inputs')
         self.assertIn('unknown_label_intervals', report['caveats'])

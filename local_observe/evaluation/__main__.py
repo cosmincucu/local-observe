@@ -46,7 +46,8 @@ def main(argv=None):
             if not args.output or args.output.parent != args.observer_directory:
                 raise ValueError('Observer report must be inside its protected output directory')
         private_output = args.preflight or any(value is not None for value in
-                                               (args.corpus, args.observer_directory, args.baseline_config))
+                                               (args.corpus, args.observer_directory, args.observer_config,
+                                                args.baseline_config))
         if private_output:
             if not args.output or not args.output.is_absolute():
                 raise ValueError('Supplied inputs require an absolute protected report output')

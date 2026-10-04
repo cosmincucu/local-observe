@@ -103,6 +103,14 @@ live ingestion delay, corpus/truth/retrieval disjointness, or quality floors. Re
 bytes are not modelled. `authorizes_delivery` and `substitute_for_quality_report` are always
 false; the actual comparison and its acceptance checks remain necessary.
 
+`labels.evaluation_seconds` is the evaluation span in ordinary seconds, distinct from the
+per-cycle `configuration.window_seconds`. `cycles.observation_seconds` measures the union
+of cycle windows; `unobserved_seconds` and a caveat expose gaps when cadence exceeds the
+observation window. A fully labelled span can still contain unobserved intervals. Incident
+labels naming resources outside the corpus are counted separately and add a caveat: no
+configured source can detect them, although the actual comparison still includes them in
+its scoring denominator. Correct that mismatch before interpreting quality results.
+
 ## Data and scoring
 
 `fault_inject.py` seeds actual `MetricSample` records into `InMemoryStore`, checks the resources

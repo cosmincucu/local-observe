@@ -67,7 +67,8 @@ def label_coverage(corpus):
                                                    if row['resource_id'] == resource])
         coverage.append({'resource_index': index, 'exhaustive_seconds': covered,
                          'unknown_seconds': max(0.0, duration - covered)})
-    return {'unit': 'resource_seconds', 'window_seconds': duration,
+    outside_incidents = sum(row['resource_id'] not in resources for row in corpus['incidents'])
+    return {'unit': 'resource_seconds', 'evaluation_seconds': duration,
             'duration_seconds': duration * len(resources),
             'exhaustive_seconds': sum(row['exhaustive_seconds'] for row in coverage),
             'unknown_seconds': sum(row['unknown_seconds'] for row in coverage),
@@ -75,7 +76,8 @@ def label_coverage(corpus):
             'labelled_windows': len(corpus['labelled']),
             'labelled_resources': len({row['resource_id'] for row in corpus['labelled']} & set(resources)),
             'out_of_scope_labelled_windows': sum(row['resource_id'] not in resources for row in corpus['labelled']),
-            'incident_labels': len(corpus['incidents']), 'incidents_are_exhaustive_negatives': False}
+            'incident_labels': len(corpus['incidents']) - outside_incidents,
+            'out_of_scope_incident_labels': outside_incidents, 'incidents_are_exhaustive_negatives': False}
 
 
 def preflight(corpus, *, revision, observer_config, baseline_config):
@@ -154,6 +156,12 @@ def preflight(corpus, *, revision, observer_config, baseline_config):
     labels = label_coverage(corpus)
     if labels['unknown_seconds']:
         caveats.append('unknown_label_intervals')
+    if labels['out_of_scope_incident_labels']:
+        caveats.append('out_of_scope_incident_labels')
+    observed_seconds = union_seconds(windows)
+    unobserved_seconds = max(0.0, labels['evaluation_seconds'] - observed_seconds)
+    if unobserved_seconds:
+        caveats.append('unobserved_evaluation_intervals')
     counts = dict(Counter(gap['code'] for gap in gaps))
     return {'schema_version': 1, 'revision': revision,
             'binding': {'corpus_sha256': sha(canonical(corpus).encode('utf-8')),
@@ -171,6 +179,7 @@ def preflight(corpus, *, revision, observer_config, baseline_config):
             'cycles': {'count': len(windows), 'inputs_ready': len(windows) - len(incomplete),
                        'inputs_incomplete': len(incomplete), 'usable_initial_evidence': usable_cycles,
                        'source_reads': planned_reads, 'peak_evidence_bytes': peak_bytes,
+                       'observation_seconds': observed_seconds, 'unobserved_seconds': unobserved_seconds,
                        'model_calls_required_per_run': len(windows) * capacity['required_model_calls']},
             'follow_up': capacity, 'labels': labels,
             'gaps': gaps, 'counts': counts, 'caveats': caveats,
