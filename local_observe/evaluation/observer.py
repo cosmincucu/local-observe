@@ -26,6 +26,33 @@ class CorpusSources:
                          for point in row['rows'] if start <= point['ts'] < end]}
 
 
+def match_sources(series, sources):
+    """Refuse unless every configured metric source maps to exactly one corpus series.
+
+    Shared by the comparison run and the model-free preflight so their source mappings agree.
+    """
+    selected = [(source.resource_id, source.metric_name) for source in sources]
+    available = {(row['resource_id'], row['metric']) for row in series}
+    if (any(source.query_type != 'metric-threshold' for source in sources)
+            or len(set(selected)) != len(selected) or set(selected) != available):
+        raise CorpusError('Corpus must match all configured metric sources exactly and unambiguously')
+
+
+def cycle_windows(evaluation, config):
+    """Return every complete aligned observation window a comparison must cover."""
+    begin, end = timestamp(evaluation['start']), timestamp(evaluation['end'])
+    duration = (end - begin).total_seconds()
+    if (duration < config.window_seconds or begin.timestamp() % config.cadence_seconds
+            or (duration - config.window_seconds) % config.cadence_seconds):
+        raise CorpusError('Observer comparison requires complete configured cadence/windows')
+    windows, current = [], begin + dt.timedelta(seconds=config.window_seconds)
+    while current <= end:
+        windows.append({'start': utc_text(current - dt.timedelta(seconds=config.window_seconds)),
+                        'end': utc_text(current)})
+        current += dt.timedelta(seconds=config.cadence_seconds)
+    return windows
+
+
 class CurrentModel:
     """Historical telemetry must not rewind live credential/capability policy checks."""
     def __init__(self):
@@ -65,23 +92,15 @@ def judge(context, *, directory, model_factory=None, config=None):
                               max_age_seconds=3600, data_class='internal', mode='recording')
     if not isinstance(config, Config):
         raise CorpusError('Observer configuration must be a validated Config')
-    selected = [(source.resource_id, source.metric_name) for source in config.sources]
-    available = {(row['resource_id'], row['metric']) for row in context['series']}
-    if (any(source.query_type != 'metric-threshold' for source in config.sources)
-            or len(set(selected)) != len(selected) or set(selected) != available):
-        raise CorpusError('Corpus must match all configured metric sources exactly and unambiguously')
+    match_sources(context['series'], config.sources)
     config_sha256 = digest(asdict(config))
-    begin, end = timestamp(context['evaluation']['start']), timestamp(context['evaluation']['end'])
-    duration = (end - begin).total_seconds()
-    if (duration < config.window_seconds or begin.timestamp() % config.cadence_seconds
-            or (duration - config.window_seconds) % config.cadence_seconds):
-        raise CorpusError('Observer comparison requires complete configured cadence/windows')
+    windows = cycle_windows(context['evaluation'], config)
     model = (model_factory or CurrentModel)()
     journal = Journal(Path(directory))
     cycles, findings, decisions, resource_findings = [], [], {}, {}
     try:
-        current = begin + dt.timedelta(seconds=config.window_seconds)
-        while current <= end:
+        for window in windows:
+            current = timestamp(window['end'])
             cycle = Observer(config, journal, sources=CorpusSources(context['series'], config.sources), model=model,
                              clock=lambda at=current: at).run('evaluation-' + str(int(current.timestamp())))
             answer = cycle.get('answer') or {}
@@ -92,8 +111,6 @@ def judge(context, *, directory, model_factory=None, config=None):
             known = (cycle['status'] == 'completed' and cycle['coverage'] == 'complete'
                      and cycle.get('decision') in ('quiet', 'watch', 'tell') and cycle.get('error') is None
                      and supported and evaluation_complete)
-            window = {'start': utc_text(current - dt.timedelta(seconds=config.window_seconds)),
-                      'end': utc_text(current)}
             cycles.append({'cycle_id': cycle['cycle_id'], 'status': cycle['status'],
                            'coverage': cycle['coverage'], 'decision': cycle['decision'],
                            'error': cycle['error'], 'structured_findings': supported,
@@ -119,7 +136,6 @@ def judge(context, *, directory, model_factory=None, config=None):
                 findings.append(finding(item['resource_id'], item['kind'],
                     timestamp(item['observed_at']).timestamp(), arm='llm-rca', window=window,
                     observation=sorted(item['evidence_ids'])))
-            current += dt.timedelta(seconds=config.cadence_seconds)
     finally:
         journal.close()
     complete = bool(cycles) and all(value is not None for value in decisions.values())

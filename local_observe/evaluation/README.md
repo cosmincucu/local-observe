@@ -52,6 +52,65 @@ created exclusively with mode 0600 and symlinks refused. Only default generated 
 corpus/operator inputs can print the full report to stdout or use ordinary CI output files.
 Observer comparisons still require a fresh `--observer-directory` and report output inside it.
 
+## Feasibility preflight
+
+Check a planned observer study before creating a journal or making model calls:
+
+```sh
+python -B -m local_observe.evaluation --preflight --revision <full-commit-id> \
+  --corpus <corpus.json> --observer-config <observer.json> \
+  --baseline-config <baseline.json> --output <new-report.json>
+```
+
+All five arguments are required. Use an absolute output path in an existing owned 0700
+directory outside Git; the report is created exclusively with mode 0600. Existing files and
+symlinks are refused. `--observer-directory` is incompatible with preflight. This operation
+creates only its report: it opens no journal, model client, credential or network connection.
+The Python entry point is `evaluation.preflight.preflight(corpus, revision=...,
+observer_config=Config(...), baseline_config=...)`.
+
+Source mappings and baseline declarations must match the corpus exactly. The evaluation
+range must cover complete configured cadence/windows. These structural errors are refused.
+Valid inputs produce diagnostics for every configured source in every cycle, including
+sources requiring model follow-up. The check reuses production evidence validation and
+accounts for per-source and total cycle limits. Empty or stale samples, row or byte limits,
+insufficient source slots, no usable initial evidence and inadequate model-call budgets
+appear as `gaps` with window/source indices. Source indices follow configuration order;
+windows follow chronological order. More than 4,000 source checks is refused: split a larger
+study into smaller evaluation windows.
+
+`inputs_feasible` means these necessary input checks found no gap. It does not predict a
+successful model answer. Reachable non-initial sources remain `follow_up.capacity:
+conditional`, because the model must request them. `cycles.inputs_ready` and
+`cycles.inputs_incomplete` count windows passing or failing input checks; global budget
+failures affect every window. `source_reads` includes conditional sources checked locally,
+not predicted live reads. `model_calls_required_per_run` is the minimum for full coverage
+(one call per cycle, or two when follow-up is needed); the comparison runs three times.
+`peak_evidence_bytes` measures retained evidence, excluding retrieved history. Infeasible
+inputs still write the diagnostic report and return exit code 2; feasible inputs return 0.
+
+Reports contain fixed codes, numeric limits, counts and input-binding hashes rather than
+sample values, resource IDs, labels or endpoint text. Label coverage is measured separately
+for each corpus resource, with indices in first-appearance order. Quiet windows cover all
+resources; `labelled` windows cover only their named resource. Their half-open union is
+counted once per resource. Aggregate durations use **resource-seconds**: two resources each
+observed for an hour total 7,200 seconds. Labels for resources outside the corpus and positive
+incident labels provide no exhaustive coverage. Unknown intervals remain unknown and add
+a caveat; they never count as correct answers or authorize delivery.
+
+Preflight does not check baseline history sufficiency, model provenance or latency, credentials,
+live ingestion delay, corpus/truth/retrieval disjointness, or quality floors. Retrieved-history
+bytes are not modelled. `authorizes_delivery` and `substitute_for_quality_report` are always
+false; the actual comparison and its acceptance checks remain necessary.
+
+`labels.evaluation_seconds` is the evaluation span in ordinary seconds, distinct from the
+per-cycle `configuration.window_seconds`. `cycles.observation_seconds` measures the union
+of cycle windows; `unobserved_seconds` and a caveat expose gaps when cadence exceeds the
+observation window. A fully labelled span can still contain unobserved intervals. Incident
+labels naming resources outside the corpus are counted separately and add a caveat: no
+configured source can detect them, although the actual comparison still includes them in
+its scoring denominator. Correct that mismatch before interpreting quality results.
+
 ## Data and scoring
 
 `fault_inject.py` seeds actual `MetricSample` records into `InMemoryStore`, checks the resources
@@ -184,10 +243,13 @@ origin label or a passing generated fixture does not supply that acceptance.
 ## Tests and CI
 
 The `evaluation` subgroup is registered in `tests/tiers.py`. Run all evaluation regression modules:
-`PYTHONPATH=tests:. python -B -m unittest test_eval_gate test_eval_arms test_eval_corrections test_eval_final test_observer_evaluation test_fault_injection`.
+`PYTHONPATH=tests:. python -B -m unittest test_eval_gate test_eval_arms test_eval_corrections test_eval_final test_observer_evaluation test_eval_preflight test_fault_injection`.
 CI executes these tests once inside the existing covered base pass. Its additional evaluation step
 generates and uploads the quality report, without a second unittest pass. Negative controls prove
 fires-everywhere fails a deliberately chosen test policy and unwired stays unwired. Bounds,
 half-open endpoints, wrong hosts/classes, duplicate findings, provenance tampering, missing seasonal
-history, actual store reads and schema/checklist checks are covered. No numerical policy is adopted
-by a successful test run.
+history, actual store reads and schema/checklist checks are covered. The preflight tests additionally
+show that no journal, model client, credential read or network path is reachable from its API or CLI,
+that its per-window predictions agree with the production cycles run over the same corpus and Config,
+and that its output refusal and no-stdout behaviour match the protected report path. No numerical
+policy is adopted by a successful test run.

@@ -84,7 +84,8 @@ TIER_TESTS: dict[str, tuple[str, ...]] = {
     # Deterministic named subgroup: CI executes these once in base; the evaluation report
     # step measures the fixture, not a second unittest pass. This selector is for focused runs.
     'evaluation': ('test_eval_gate.', 'test_eval_arms.', 'test_fault_injection.',
-                   'test_observer_evaluation.', 'test_eval_corrections.', 'test_eval_final.', 'test_feedback_measurement.',
+                   'test_observer_evaluation.', 'test_eval_corrections.', 'test_eval_final.', 'test_eval_preflight.',
+                   'test_feedback_measurement.',
                    'test_observer_acceptance_integration.', 'test_operator_held_out_corpus.'),
     'mcp': ('test_homepage_surfaces.MCPSurfaceTests',
             'test_mcp_surface.LegacySurfaceUnchangedTests',
