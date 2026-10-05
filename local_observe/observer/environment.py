@@ -47,7 +47,7 @@ def validate_environment(value: dict) -> dict[str, str]:
     require(isinstance(value, dict) and set(value) <= ALLOWED, 'unknown_environment_setting')
     require(not value.get('LO_OBSERVER_MODEL_ROUTES') or not any(value.get(key) for key in
             ('LO_OBSERVER_MODEL_DEPLOYMENT', 'LO_OBSERVER_MODEL_PROVIDER', 'LO_OBSERVER_MODEL_VERSION')),
-            'ambiguous_model_routes')
+            'model_route_pool_ambiguous')
     for key, item in value.items():
         require(isinstance(item, str) and 1 <= len(item) <= 2048 and item == item.strip()
                 and not any(ord(c) < 32 or ord(c) == 127 for c in item), 'invalid_environment_value')

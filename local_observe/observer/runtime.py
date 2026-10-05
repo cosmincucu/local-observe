@@ -163,7 +163,8 @@ class Observer:
             else:
                 result = self.model.complete(evidence, allowed, request_config, now)
             require(isinstance(result, dict) and isinstance(result.get('content'), str), 'invalid_model_envelope')
-            call['provenance'] = build_provenance(self.config, self.model, response_model=result.get('response_model'))
+            call['provenance'] = build_provenance(self.config, self.model, response_model=result.get('response_model'),
+                                                route_receipt=result.get('model_route'))
             document['provenance'] = call['provenance']
             if 'model_route' in result:
                 call['model_route'] = validate_route_receipt(result['model_route'], call['provenance'])

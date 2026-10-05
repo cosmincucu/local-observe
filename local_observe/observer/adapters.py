@@ -112,6 +112,15 @@ class Model:
         self.secrets: tuple[str, ...] = ()
 
     def provenance(self) -> dict:
+        return self._provenance(model_pool.load_pool(self.environ))
+
+    def provenance_for_route(self, receipt) -> dict:
+        """Bind post-call provenance and the receipt to one validated declaration read."""
+        pool = model_pool.load_pool(self.environ)
+        require(pool is not None and receipt in pool.member_receipts.values(), 'model_configuration_drift')
+        return self._provenance(pool)
+
+    def _provenance(self, pool) -> dict:
         # With an expected gateway deployment selected, the version label becomes the bounded digest of
         # (declared version, expected ID): changing either one invalidates an accepted provenance. An
         # unknown declared version stays null instead of becoming a hash that invents completeness.
@@ -120,7 +129,6 @@ class Model:
         result = {'configured_model': getattr(self.client, 'model', None) or self.environ.get('LO_AI_MODEL'),
                   'provider': self.environ.get('LO_OBSERVER_MODEL_PROVIDER'),
                   'model_version': declared if expected is None else model_route.route_label(declared, expected)}
-        pool = model_pool.load_pool(self.environ)
         if pool is not None:
             result.update(provider=model_pool.POOL_PROVIDER, model_version=pool.model_version)
         try:
@@ -161,9 +169,7 @@ class Model:
         if pool is not None:
             self.client.transport.take_receipt()
         require(not self.client.capture, 'model_payload_logging_forbidden')
-        configured = self.provenance()
-        if pool is not None:
-            require(configured['model_version'] == pool.model_version, 'model_configuration_drift')
+        configured = self._provenance(pool)
         for attribute in ('policy', 'capability', 'budget'):
             if hasattr(self.client, attribute):
                 require(configured[attribute + '_sha256'] == digest(getattr(self.client, attribute)),

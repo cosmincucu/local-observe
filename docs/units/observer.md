@@ -394,6 +394,10 @@ An adapter enabling retrieval implements `complete_with_history(..., history=...
 Its optional `provenance()` returns configured model/provider/version labels and effective
 policy/capability/budget hashes. The observer supplies implementation, prompt and Config
 hashes and reads actual response identity from the adapter's provider-envelope result.
+An adapter returning a `model_route` receipt also implements `provenance_for_route(receipt)`:
+it must bind that receipt to the same declaration snapshot used to build the returned metadata,
+and refuse a changed declaration. The built-in adapter checks membership, including incomplete
+declarations, from one protected-file read. The receipt cannot be supplied as model-generated text.
 Unknown provenance cannot enable delivery. Stable alias/backend differences are represented
 by the contract; the existing production AI adapter still enforces its own model matching policy.
 

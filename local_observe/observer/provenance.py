@@ -66,9 +66,13 @@ def validate_provenance(value, *, require_complete: bool = False) -> dict:
     return value
 
 
-def build_provenance(config: Config, model, *, response_model=None) -> dict:
+def build_provenance(config: Config, model, *, response_model=None, route_receipt=None) -> dict:
     from .adapters import prompt_contract
-    metadata = model.provenance() if callable(getattr(model, 'provenance', None)) else {}
+    if route_receipt is not None:
+        require(callable(getattr(model, 'provenance_for_route', None)), 'model_route_provenance_required')
+        metadata = model.provenance_for_route(route_receipt)
+    else:
+        metadata = model.provenance() if callable(getattr(model, 'provenance', None)) else {}
     require(isinstance(metadata, dict) and set(metadata) <= {*LABELS, 'policy_sha256', 'capability_sha256',
                                                             'budget_sha256'}, 'invalid_adapter_provenance')
     value = {'schema_version': 1, 'implementation_sha256': implementation_digest(),

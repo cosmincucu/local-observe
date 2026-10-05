@@ -17,7 +17,7 @@ unselected variable attaches no wrapper and changes no existing behavior. Pooled
 here and nothing else: it never establishes model quality and never authorizes acceptance or delivery.
 
 Refusals are payload-free `ObserverError` codes, one per diagnosis: `invalid_pool_path` (the selection
-value cannot name a file), `model_route_pool_ambiguous`, `unsupported_pool_version`,
+value cannot name a file), `absolute_private_path_required`, `model_route_pool_ambiguous`, `unsupported_pool_version`,
 `invalid_pool_declaration` (top-level shape, or the route map itself), `invalid_pool_member` (a member ID
 or member object), `invalid_pool_metadata` (a provider or version that is neither null nor a bounded label),
 `model_deployment_mismatch` (shared with the single-deployment guard) and `model_route_pool_unsupported`
@@ -178,7 +178,8 @@ class PoolGuard:
                                               **kwargs)
         # A non-2xx answer is refused by the existing status gate before any result is used, and it
         # carries no verified member; only the answer that produced content can.
-        if 200 <= status < 300:
+        # Match the AI client's accepted statuses; other statuses keep its endpoint-status refusal.
+        if status in (200, 201):
             observed = collected.values
             collected.values = []
             self.receipt = self.pool.receipt_for(observed[0] if len(observed) == 1 else None)

@@ -38,7 +38,7 @@ class PoolIntegrationTests(GuardTestCase):
     def test_environment_checks_path_and_ambiguous_declarations(self):
         self.assertEqual(validate_environment(self.environ), self.environ)
         for key in ('LO_OBSERVER_MODEL_DEPLOYMENT', 'LO_OBSERVER_MODEL_PROVIDER', 'LO_OBSERVER_MODEL_VERSION'):
-            with self.subTest(key=key), self.assertRaisesRegex(ObserverError, 'ambiguous_model_routes'):
+            with self.subTest(key=key), self.assertRaisesRegex(ObserverError, 'model_route_pool_ambiguous'):
                 validate_environment({**self.environ, key: 'example'})
         with self.assertRaisesRegex(ObserverError, 'absolute_setting_path_required'):
             validate_environment({'LO_OBSERVER_MODEL_ROUTES': 'relative.json'})
@@ -133,8 +133,29 @@ class PoolIntegrationTests(GuardTestCase):
             self.assertNotIn(marker, encoded(cycle))
             self.assertNotIn('model_route', cycle['model_calls'][0])
 
+    def test_incomplete_declaration_changed_after_response_cannot_relabel_it(self):
+        self.routes['routes']['backend-b']['model_version'] = None
+        self.route_file.write_text(encoded(self.routes), encoding='utf-8')
+        model = self.model(self.response('backend-a'), deployment=None)
+        result = self.call(model)
+        self.routes['routes']['backend-a']['provider'] = 'changed-engine'
+        self.route_file.write_text(encoded(self.routes), encoding='utf-8')
+        with self.assertRaisesRegex(ObserverError, 'model_configuration_drift'):
+            build_provenance(CONFIG, model, response_model=ALIAS, route_receipt=result['model_route'])
+
+    def test_unaccepted_success_status_keeps_the_ai_status_refusal(self):
+        for status in (202, 204, 206):
+            with self.subTest(status=status):
+                model = self.model(FakeResponse(completion_body(), status=status), deployment=None)
+                with self.assertRaisesRegex(ObserverError, 'model_endpoint_status'):
+                    self.call(model)
+                self.assertIsNone(model.client.transport.take_receipt())
+
 
 class PoolFixtureModel(FixtureModel):
+    def provenance_for_route(self, receipt):
+        return self.provenance()
+
     def complete(self, evidence, allowed, config, now):
         return {**super().complete(evidence, allowed, config, now), 'model_route': {
             'schema_version': 1, 'pool_sha256': 'a' * 64, 'member_sha256': 'b' * 64, 'complete': True}}

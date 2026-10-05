@@ -69,6 +69,9 @@ class CurrentModel:
     def provenance(self):
         return self.model.provenance()
 
+    def provenance_for_route(self, receipt):
+        return self.model.provenance_for_route(receipt)
+
 
 def judge(context, *, directory, model_factory=None, config=None):
     """One real observer per comparison run; durable cycles have no external sender.
