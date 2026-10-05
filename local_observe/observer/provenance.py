@@ -26,6 +26,20 @@ def is_digest(value):
     return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
 
 
+def validate_route_receipt(value, provenance):
+    """Admit only bounded pool/member digests, never adapter-supplied descriptive metadata."""
+    fields(value, {'schema_version', 'pool_sha256', 'member_sha256', 'complete'})
+    require(type(value['schema_version']) is int and value['schema_version'] == 1
+            and type(value['complete']) is bool
+            and is_digest(value['pool_sha256']) and is_digest(value['member_sha256']),
+            'invalid_model_route_receipt')
+    require(provenance['provider'] == 'declared-route-pool'
+            and provenance['model_version'] in (None, 'route-pool-sha256:' + value['pool_sha256'])
+            and (provenance['model_version'] is None or value['complete']),
+            'model_route_receipt_mismatch')
+    return dict(value)
+
+
 def implementation_digest() -> str:
     root = Path(__file__).resolve().parents[1]
     files = [*root.joinpath('observer').glob('*.py'), *root.joinpath('ai').glob('*.py')]
@@ -52,9 +66,13 @@ def validate_provenance(value, *, require_complete: bool = False) -> dict:
     return value
 
 
-def build_provenance(config: Config, model, *, response_model=None) -> dict:
+def build_provenance(config: Config, model, *, response_model=None, route_receipt=None) -> dict:
     from .adapters import prompt_contract
-    metadata = model.provenance() if callable(getattr(model, 'provenance', None)) else {}
+    if route_receipt is not None:
+        require(callable(getattr(model, 'provenance_for_route', None)), 'model_route_provenance_required')
+        metadata = model.provenance_for_route(route_receipt)
+    else:
+        metadata = model.provenance() if callable(getattr(model, 'provenance', None)) else {}
     require(isinstance(metadata, dict) and set(metadata) <= {*LABELS, 'policy_sha256', 'capability_sha256',
                                                             'budget_sha256'}, 'invalid_adapter_provenance')
     value = {'schema_version': 1, 'implementation_sha256': implementation_digest(),

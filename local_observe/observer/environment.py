@@ -14,9 +14,9 @@ ALLOWED = frozenset({'LO_CLICKHOUSE_URL', 'LO_CLICKHOUSE_READ_USER', 'LO_CLICKHO
                      'LO_AI_BASE_URL', 'LO_AI_API_KEY_FILE', 'LO_AI_MODEL', 'LO_AI_MODEL_FAST',
                      'LO_AI_OUT_OF_LAN', 'LO_AI_CAPTURE', 'LO_AI_POLICY', 'LO_AI_CAPABILITY', 'LO_AI_BUDGET',
                      'LO_INTERNAL_ALLOW_HTTP', 'LO_OBSERVER_MODEL_PROVIDER', 'LO_OBSERVER_MODEL_VERSION',
-                     'LO_OBSERVER_MODEL_DEPLOYMENT'})
+                     'LO_OBSERVER_MODEL_DEPLOYMENT', 'LO_OBSERVER_MODEL_ROUTES'})
 PATHS = frozenset({'LO_CLICKHOUSE_READ_PASSWORD_FILE', 'LO_AI_API_KEY_FILE', 'LO_AI_POLICY',
-                   'LO_AI_CAPABILITY', 'LO_AI_BUDGET'})
+                   'LO_AI_CAPABILITY', 'LO_AI_BUDGET', 'LO_OBSERVER_MODEL_ROUTES'})
 
 
 def protected_bytes(path: str | Path, limit: int = 65536) -> bytes:
@@ -45,6 +45,9 @@ def protected_json(path: str | Path, limit: int = 65536):
 
 def validate_environment(value: dict) -> dict[str, str]:
     require(isinstance(value, dict) and set(value) <= ALLOWED, 'unknown_environment_setting')
+    require(not value.get('LO_OBSERVER_MODEL_ROUTES') or not any(value.get(key) for key in
+            ('LO_OBSERVER_MODEL_DEPLOYMENT', 'LO_OBSERVER_MODEL_PROVIDER', 'LO_OBSERVER_MODEL_VERSION')),
+            'model_route_pool_ambiguous')
     for key, item in value.items():
         require(isinstance(item, str) and 1 <= len(item) <= 2048 and item == item.strip()
                 and not any(ord(c) < 32 or ord(c) == 127 for c in item), 'invalid_environment_value')

@@ -69,6 +69,9 @@ class CurrentModel:
     def provenance(self):
         return self.model.provenance()
 
+    def provenance_for_route(self, receipt):
+        return self.model.provenance_for_route(receipt)
+
 
 def judge(context, *, directory, model_factory=None, config=None):
     """One real observer per comparison run; durable cycles have no external sender.
@@ -121,6 +124,7 @@ def judge(context, *, directory, model_factory=None, config=None):
                            'model_calls': [{key: call.get(key) for key in
                                             ('status', 'model', 'response_model', 'usage', 'cost', 'elapsed_seconds')}
                                            | {'provenance': safe_provenance(call.get('provenance'))}
+                                           | ({'model_route': call['model_route']} if 'model_route' in call else {})
                                            for call in cycle['model_calls']]})
             for resource in sorted({source.resource_id for source in config.sources}):
                 kinds = [item['kind'] for item in structured if item['resource_id'] == resource]

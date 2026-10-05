@@ -32,6 +32,8 @@ Pause producers and executors when creating a coordinated checkpoint. Retain:
 - Approved guided setup configuration and its `.setup-plan` marker.
 - Observer evidence, feedback, acceptance/revocation and delivery accounting through
   its separate [verified journal backup](../../../docs/units/observer.md).
+- Protected model route declarations, when selected, including versions needed to resolve
+  historical member digests. Route receipts do not contain a recoverable copy of that configuration.
 - Independent service histories and receiver receipts where used;
   [synthetics recovery](../synthetics/backup.md) covers Gatus and its detector.
 
