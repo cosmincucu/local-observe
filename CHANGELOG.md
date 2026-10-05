@@ -8,12 +8,19 @@ plan and applies it through a separate trusted runner. Optional Telegram deliver
 requires measured quality, human acceptance, its own daily budget and reconciliation
 after restart or restore. Recording is the default.
 
+Load-balanced model gateways can use a protected route declaration to retain bounded per-call
+member receipts without changing routing. Unknown versions stay unknown; pooled quality acceptance
+is explicitly unavailable. Existing single-deployment records and evaluation remain supported.
+
 The evaluator compares the actual observer with deterministic baselines and preserves
 unknown labels and incomplete coverage. Synthetic validation does not establish live
 model quality, hardware fit or human review workload.
 
 ### Operator actions
 
+- Route receipts are opt-in through `LO_OBSERVER_MODEL_ROUTES`; follow the protected declaration
+  format in the [observer walkthrough](docs/units/observer.md). No journal migration is required.
+  Keep older declarations with configuration backups to interpret historical digests.
 - Optional platform settings: `LO_GUIDED_SETUP_ROOT`, `LO_GUIDED_SETUP_RUNNER` and
   `LO_TRUSTED_RUNNERS_FILE`; see [guided setup](docs/units/guided-setup.md). No settings
   are renamed or removed. Observer settings and optional provider/version labels are

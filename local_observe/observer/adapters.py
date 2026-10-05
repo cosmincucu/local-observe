@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 
 from local_observe.http import JsonClient, ResultTooLarge
 
-from . import model_route
+from . import model_pool, model_route
 from .contract import Config, ObserverError, Source, digest, require, strict_json, utc
 
 
@@ -120,6 +120,9 @@ class Model:
         result = {'configured_model': getattr(self.client, 'model', None) or self.environ.get('LO_AI_MODEL'),
                   'provider': self.environ.get('LO_OBSERVER_MODEL_PROVIDER'),
                   'model_version': declared if expected is None else model_route.route_label(declared, expected)}
+        pool = model_pool.load_pool(self.environ)
+        if pool is not None:
+            result.update(provider=model_pool.POOL_PROVIDER, model_version=pool.model_version)
         try:
             from local_observe.ai import budget, capability, policy
         except ImportError:
@@ -152,9 +155,15 @@ class Model:
             values = {k: v for k, v in self.environ.items() if k != 'LO_AI_API_KEY'}
             values['LO_AI_CAPTURE'] = '0'
             self.client = AiClient.from_environment(values)
-        self.client = model_route.guard_client(self.client, self.environ)
+        pool = model_pool.load_pool(self.environ)
+        self.client = (model_pool.guard_pool_client(self.client, pool) if pool is not None
+                       else model_route.guard_client(self.client, self.environ))
+        if pool is not None:
+            self.client.transport.take_receipt()
         require(not self.client.capture, 'model_payload_logging_forbidden')
         configured = self.provenance()
+        if pool is not None:
+            require(configured['model_version'] == pool.model_version, 'model_configuration_drift')
         for attribute in ('policy', 'capability', 'budget'):
             if hasattr(self.client, attribute):
                 require(configured[attribute + '_sha256'] == digest(getattr(self.client, attribute)),
@@ -187,6 +196,7 @@ class Model:
         if history:
             references[0]['sample'] = {**references[0]['sample'], 'historical_examples': history}
         from local_observe.ai import AiError
+        receipt = None
         try:
             result = self.client.complete(instruction=instruction,
                                           data_class=config.data_class, evidence=references, json_mode=True, now=now)
@@ -198,7 +208,15 @@ class Model:
                           'incomplete_response'}
             code = exc.code if isinstance(exc.code, str) and exc.code in safe_codes else 'request_failed'
             raise ObserverError('model_' + code) from None
+        finally:
+            if pool is not None:
+                receipt = self.client.transport.take_receipt()
         # Preserve the published refusal code for partial answers that contain text.
         require(result.get('finish_reason') == 'stop', 'incomplete_model_response')
         require(not result.get('redaction_counts', {}).get('no_free_text'), 'model_evidence_withheld')
+        if pool is not None:
+            # Compare against the same declaration after the call, including incomplete pools.
+            require(model_pool.load_pool(self.environ).sha256 == pool.sha256, 'model_configuration_drift')
+            require(receipt is not None, 'model_deployment_mismatch')
+            result = {**result, 'model_route': receipt}
         return result

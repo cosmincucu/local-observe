@@ -202,6 +202,9 @@ def _recompute(report, config):
 def validate_report(report: dict, *, config_sha256: str, provenance: dict, config: Config | None = None) -> dict:
     """Validate measured inputs as well as the verdict; missing measurements are not zero."""
     validate_provenance(provenance, require_complete=True)
+    require(provenance['provider'] != 'declared-route-pool'
+            and not provenance['model_version'].startswith('route-pool-sha256:'),
+            'pooled_model_quality_unaccepted')
     require(isinstance(config, Config) and digest(asdict(config)) == config_sha256,
             'quality_configuration_required')
     require(isinstance(report, dict) and type(report.get('schema_version')) is int

@@ -139,6 +139,47 @@ complete a cycle. This is transport metadata about where a request went, not an 
 weights: no alias, response header or cache reference proves a historical weight revision, and
 provider and model version remain explicit operator metadata.
 
+For a load-balanced gateway, set `LO_OBSERVER_MODEL_ROUTES` to an absolute path to a protected
+JSON declaration instead of the single deployment, provider and version variables. It uses the
+same owned mode-0600 file and mode-0700 directory checks as the environment file, with a 16 KiB
+limit and at most 16 members:
+
+```json
+{
+  "schema_version": 1,
+  "routes": {
+    "backend-a": {"provider": "local-engine", "model_version": "weights-aaa"},
+    "backend-b": {"provider": "local-engine", "model_version": null}
+  }
+}
+```
+
+Replace these synthetic IDs with the gateway's configured deployment IDs. Declare a version only
+when you have evidence for it; use `null` for an unknown provider or version. This file does not
+select a backend or change gateway routing. Each successful response must have exactly one
+allowlisted deployment header. Missing, duplicate, malformed and unlisted values fail the call.
+The response's model alias must still match the configured alias. Failed attempts cannot lend their
+identity to a later answer, and changing the declaration during a call refuses that call.
+
+The journal stores a `model_route` receipt on each successfully validated model envelope:
+`schema_version`, `pool_sha256`, `member_sha256` and `complete`. The pool digest covers the entire
+canonical declaration; the member digest covers `[configured ID, provider, model_version]`.
+Compare those digests with the protected declaration to identify the answering member. Received
+headers, route names and declared versions are not copied into the receipt. Preserve the declaration
+with protected configuration backups so the digests remain useful after a configuration change.
+An answer rejected later for invalid citations may have a route receipt but is still a failed call.
+
+Pool provenance uses provider `declared-route-pool` and version `route-pool-sha256:<pool digest>`.
+The version remains null if any member's provider or version is unknown. This represents a declared
+set, not one model or an attestation of loaded weights. Different members can answer follow-ups
+within a recording cycle without being mistaken for one backend. Existing records are not rewritten.
+
+**Pooled model quality is not accepted by the current evaluator.** Recording works, but a pool
+comparison remains unjudgeable and `quality-accept` refuses it as `pooled_model_quality_unaccepted`
+(or incomplete provenance when declarations are missing). A complete route receipt is not a quality
+grade. Per-member coverage and quality measurements are still required before a future evaluator
+can authorize this configuration. The existing single-deployment evaluation path is unchanged.
+
 `run` and `serve` accept `--environment /private/path/observer-environment.json`, including
 the JSON emitted by guided setup. This is an allowlisted mapping of environment names to
 strings, never a shell script. The file must be an owned, regular mode-0600 file within an
@@ -146,7 +187,8 @@ owned mode-0700 directory, with no symlinks or hardlinks. It replaces ambient se
 it does not merge with them. Allowed settings are the ClickHouse URL, read user and password
 file; AI base URL, key file, model/fast model, out-of-LAN flag, capture flag, policy, capability
 and budget files; internal HTTP flag; and the nonsecret `LO_OBSERVER_MODEL_PROVIDER`,
-`LO_OBSERVER_MODEL_VERSION` and optional `LO_OBSERVER_MODEL_DEPLOYMENT` labels. Raw
+`LO_OBSERVER_MODEL_VERSION` and optional `LO_OBSERVER_MODEL_DEPLOYMENT` labels, or the
+`LO_OBSERVER_MODEL_ROUTES` protected file path. Raw
 credentials and other names are rejected. Capture is always disabled. Without this option,
 only the same allowlisted ambient names are used.
 

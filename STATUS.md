@@ -25,6 +25,9 @@ Ungraded cases stay unknown. The quality report cannot authorize notifications.
 Private held-out input has its own corpus origin; that label does not certify its truth or anonymization.
 An optional per-call deployment guard can reject a gateway response from a different configured model
 deployment. Provider and weight version remain operator declarations, and missing identity blocks acceptance.
+An optional protected route declaration also records per-call member digests for load-balanced
+gateways. Pooled investigations remain recording-only: the current evaluator cannot certify
+per-member quality and explicitly refuses their acceptance.
 
 Live model quality, fit on a 16 GB VRAM device and human feedback burden across deployment
 sizes require measured acceptance. No training run or fine-tuned model is shipped. Telegram is

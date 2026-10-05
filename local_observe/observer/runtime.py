@@ -12,7 +12,7 @@ from dataclasses import asdict, replace
 from .adapters import Model, Sources
 from .contract import Config, ObserverError, digest, encoded, model_answer, redact, require, snapshot, utc
 from .journal import Journal
-from .provenance import build_provenance
+from .provenance import build_provenance, validate_route_receipt
 
 
 @contextlib.contextmanager
@@ -165,6 +165,12 @@ class Observer:
             require(isinstance(result, dict) and isinstance(result.get('content'), str), 'invalid_model_envelope')
             call['provenance'] = build_provenance(self.config, self.model, response_model=result.get('response_model'))
             document['provenance'] = call['provenance']
+            if 'model_route' in result:
+                call['model_route'] = validate_route_receipt(result['model_route'], call['provenance'])
+                require(all(c.get('model_route', {}).get('pool_sha256') == call['model_route']['pool_sha256']
+                            for c in document['model_calls'][:-1]), 'mixed_model_provenance')
+            require(call['provenance']['provider'] != 'declared-route-pool' or 'model_route' in call,
+                    'model_route_receipt_required')
             previous = [c.get('provenance') for c in document['model_calls'][:-1]]
             require(not previous or all(p == call['provenance'] for p in previous), 'mixed_model_provenance')
             for key in ('model', 'response_model'):

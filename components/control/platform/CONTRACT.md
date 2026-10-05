@@ -18,6 +18,11 @@ Schema 10 adds setup plans, human binding approvals and trusted runner requests.
 observer has a separate private journal; back up both selected state stores and configuration.
 Reconcile external effects before resuming execution or delivery after restoring an older copy.
 
+The observer can opt into a protected model route-pool declaration. Its per-call receipts contain
+only declared pool/member digests and completeness, while the existing provenance schema identifies
+the declared pool. The current evaluator and quality acceptance explicitly refuse pooled certification;
+these records support recording and review only. See the [observer contract](../../../docs/units/observer.md).
+
 `LO_OBSERVER_REVIEW_STATE` optionally names an existing absolute observer state directory. The
 platform process must own it (0700) and its journal (0600), using the same OS identity as the observer.
 Provide an explicit read/write mount when enabling browser feedback; the default deployment adds no

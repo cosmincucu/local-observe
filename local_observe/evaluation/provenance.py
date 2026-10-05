@@ -66,6 +66,10 @@ def cycle_identity(cycles, config_sha256):
             return None
         try:
             identity = validate_provenance(cycle.get('provenance'), require_complete=True)
+            # A pool needs per-member quality coverage; a single-model report cannot certify it.
+            if (identity['provider'] == 'declared-route-pool'
+                    or identity['model_version'].startswith('route-pool-sha256:')):
+                return None
             if identity['config_sha256'] != config_sha256:
                 return None
             for call in calls:
