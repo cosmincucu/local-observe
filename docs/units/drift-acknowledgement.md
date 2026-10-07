@@ -66,9 +66,13 @@ Two of those rows carry the safety of the whole feature:
   `source_event_id = digest([rule_id, version, resource_id, window])`. A firing event and a resolve in
   the **same** round carry the same window, so the second would meet
   `old['fingerprint'] != fingerprint` in `Store.intake` and raise `Event retry changed contents` — which
-  aborts the whole round, cursor unadvanced, and repeats forever. One event per artifact per round on the
+  aborts the whole round, leaving the batch pending and the acknowledged cursor unadvanced. One event per artifact per round on the
   drift condition is not tidiness, it is the only shape that survives intake. A matching acknowledgement
   found in a round where the digest moved therefore waits; the next round (a new window) applies it.
+
+  Delivery stores the exact pending events and their intended next cursor before the first send.
+  Restart replays those events; a persisted completed-window marker prevents a later call from
+  recomputing that window. A failed delivery or final cursor write retains the batch for retry.
 * **A malformed or stale acknowledgement is never a `coverage` event.** Coverage is a claim about the
   snapshot source — "this producer could not see the artifact". A broken operator instruction is not
   blindness about the artifact, and filing coverage for it would turn a typo into an incident about the

@@ -285,7 +285,39 @@ class SinkTests(unittest.TestCase):
         sink = SecuritySink(store)
         sink.record([finding()], now=self.now)
         verdict = sink.record([finding()], now=self.now - dt.timedelta(minutes=30))
-        self.assertIsNone(verdict.ttl)
+        self.assertEqual(verdict.ttl.status, 'match')
+        self.assertEqual(sink.last_check, self.now)
+
+    def test_drift_and_unreadable_checks_stay_unhealthy_until_a_fresh_match(self):
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable):
+                backend, store = owned()
+                if unavailable:
+                    from unittest.mock import patch
+                    check = patch.object(store, 'verify_ttl', side_effect=SecurityStoreUnavailable('offline'))
+                    check.start()
+                else:
+                    store = SecurityEventStore(writer=backend, reader=backend, policy=narrow_policy())
+                sink = SecuritySink(store)
+                first = sink.record([finding()], now=self.now)
+                if unavailable:
+                    check.stop()
+                self.assertFalse(first.healthy)
+                reads = backend.reads
+                for seconds in (-60, 60, 3599):
+                    for events in ([], [finding()]):
+                        cached = sink.record(events, now=self.now + dt.timedelta(seconds=seconds))
+                        self.assertFalse(cached.healthy)
+                        self.assertEqual(cached.ttl, first.ttl)
+                        self.assertEqual(sink.last_check, self.now)
+                self.assertEqual(backend.reads, reads)
+                if not unavailable:
+                    corrected, _ = owned(narrow_policy())
+                    backend.ttl_expression = corrected.ttl_expression
+                recovered = sink.record([], now=self.now + dt.timedelta(hours=1))
+                self.assertTrue(recovered.healthy)
+                self.assertTrue(recovered.report)
+                self.assertEqual(sink.last_check, self.now + dt.timedelta(hours=1))
 
     def test_a_ttl_drift_is_visible_without_claiming_the_write_failed(self):
         """The two answers are different: the copy landed, the table's retention is somebody else's fix."""
@@ -434,6 +466,24 @@ class RunnerHookTests(unittest.TestCase):
         self.assertEqual(backend.count(), 1, 'the absence of a match is still a verdict worth keeping')
         self.assertEqual(events['sigma.5d2cb39c-5f2a-4b40-b346-a2a00e0a8d09.store-coverage']['status'],
                          'resolved')
+
+    def test_successful_writes_do_not_resolve_retention_coverage_before_recheck(self):
+        backend, _ = owned()
+        store = SecurityEventStore(writer=backend, reader=backend, policy=narrow_policy())
+        sink = SecuritySink(store)
+        platform, _, _ = self.run_tick('ttl-cadence', sink=sink)
+        self.now += dt.timedelta(minutes=1)
+        self.run_tick('ttl-cadence', sink=sink, store=platform)
+        coverage = sorted((e for e in self.payloads(platform) if e['rule_id'].endswith('.store-coverage')),
+                          key=lambda e: e['window']['end'])
+        self.assertEqual([e['status'] for e in coverage], ['firing', 'firing'])
+        corrected, _ = owned(narrow_policy())
+        backend.ttl_expression = corrected.ttl_expression
+        self.now += dt.timedelta(hours=1)
+        self.run_tick('ttl-cadence', sink=sink, store=platform)
+        coverage = sorted((e for e in self.payloads(platform) if e['rule_id'].endswith('.store-coverage')),
+                          key=lambda e: e['window']['end'])
+        self.assertEqual([e['status'] for e in coverage], ['firing', 'firing', 'resolved'])
 
 
 if __name__ == '__main__':

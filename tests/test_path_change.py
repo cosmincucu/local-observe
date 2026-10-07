@@ -257,7 +257,7 @@ class RoundTests(unittest.TestCase):
         third, _ = self.round(now=NOW + 2 * INTERVAL)
         self.assertEqual([item['transition'] for item in third['route_findings']], ['held'])
 
-    def test_the_cursor_is_not_advanced_over_a_refused_delivery_so_the_transition_is_recomputed(self):
+    def test_refused_delivery_retains_acknowledged_routes_and_the_intended_transition(self):
         self.write_report(one_hop())
         self.round()
         self.write_report(two_hops(), observed_at=LATER, ok=False)
@@ -269,11 +269,18 @@ class RoundTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pathcheck.tick(self.index, self.config, self.cursor, refuse, now=NOW + INTERVAL,
                            source=SOURCE)
-        self.assertEqual(self.cursor_text(), before,
-                         'the cursor moved over a round nothing was accepted for')
+        pending = self.cursor_text()['pending']
+        self.assertEqual(self.cursor_text()['routes'], before['routes'])
+        self.assertEqual(self.cursor_text()['open'], before['open'])
+        self.assertIsNotNone(pending, 'the refused transition must remain available for replay')
         self.assertEqual(before['routes'][pathcheck.route_key(VANTAGE, 'demo-api', 'icmp')]['open'],
                          'no', 'the refused transition was written anyway')
         self.assertIsNone(before['open'])
+        summary, events = self.round(now=NOW + INTERVAL)
+        self.assertEqual(summary['result'], 'replayed')
+        self.assertEqual(events, pending['events'])
+        self.assertEqual(self.cursor_text()['routes'], pending['routes'])
+        self.assertEqual(self.cursor_text()['open'], pending['open'])
 
     def test_a_route_change_alone_files_no_event_and_the_ok_verdict_says_nothing_either(self):
         """event vocabulary's refusal, pinned: a bare route change has no `kind`, so nothing reaches intake.
@@ -334,8 +341,9 @@ class RoundTests(unittest.TestCase):
             [{'target': 'demo-api', 'protocol': 'icmp', 'hops': [{'ttl': 1, 'rtts_ms': [1.0],
                                                                   'extra': 1}]}],
         ]
-        for bad in refused:
+        for position, bad in enumerate(refused):
             with self.subTest(traces=str(bad)):
+                self.cursor = self.root / f'trace-hygiene-{position}.json'
                 payload = {'schema_version': 1, 'vantage_resource_id': VANTAGE,
                            'observed_at': utc_text(WATERMARK),
                            'probes': [{'target': 'demo-api', 'ok': True}], 'traces': bad}

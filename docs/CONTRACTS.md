@@ -296,8 +296,12 @@ The group is decided in creation order — first matching incident, first matchi
 reproducible from the file, and its bounds (`300 s` window, `2` hops, `32` members, `50` candidates
 examined) all fail toward *a second incident*, because the cost of a wrong group is an operator trusting an
 explanation that misattributes a cause. The gap is measured between the arriving event's window end and the
-**subject event** of the candidate (the verdict that last changed that incident, which `intake` already
-records as `incidents.last_event_id`); the alternative — an anchor time kept per group — is a clock this
+**subject event** of the candidate (the latest retained verdict of the condition that opened the
+incident, recorded as `incidents.last_event_id`). A member's firing, unknown or resolved update changes
+its own condition and the group's update time, but never replaces that subject. While other members
+remain open, the subject's recovery keeps its previous event pointer; the incident status determines
+when the whole group closes. Delivery payloads remain the events originally booked for each condition.
+The alternative — an anchor time kept per group — is a clock this
 schema does not have, so a long-lived incident whose first symptom is older than the window stops accepting
 members while its own conditions keep firing. That is correlation's stated limit, not a hidden one, and it too
 fails toward the second incident.
@@ -347,6 +351,29 @@ condition in the estate that never joins anything. `lo-platform intake` groups w
 (correlation followups 2): with that flag it passes the same admission over the same built index, and with it omitted — no
 declared graph to consult — it files the behaviour that predates grouping, which is a choice the flag
 leaves open and not a gap. Both halves are pinned by `tests/test_correlation.py::CliGroupingTests`.
+
+**Drift and pathcheck delivery survive lost acknowledgements.** Before sending a nonempty batch,
+the producer atomically saves its exact events and intended next state in its cursor. Any delivery
+failure retains that batch, including failure after an earlier event committed. Restart replays it
+before reading fresh observations; only acknowledged completion installs the next state. Completed
+windows are retained so repeated or older rounds cannot recompute changed contents under an accepted
+event identity. Drift can then evaluate a newer window in the same call; pathcheck returns its replay
+receipt and evaluates fresh probes on its next call. Final cursor-write failure leaves the saved batch
+available for duplicate-safe replay.
+
+Existing cursors load without re-baselining. New cursors carry optional pending and completed-window
+metadata; malformed or oversized state is refused before delivery. An older build refuses these new
+fields, so a downgrade needs an explicitly reviewed cursor conversion, not deletion of delivery state.
+The drift cursor bound is 8 MiB because a pending round retains both acknowledged and intended snapshot
+text; the pathcheck cursor remains bounded to 1 MiB.
+
+**Path coverage is checked per required target and vantage.** Every configured target needs an
+observation from this producer's configured vantage. A sibling's observation can corroborate a verdict
+but cannot fill that missing pair. The protocol list filters acceptable observations: it does not
+require a complete protocol matrix. At least one permitted protocol must report for each required
+pair, and every protocol actually observed for that pair must succeed for it to count as reachable.
+Missing pairs make the verdict indeterminate, including a diagonal set in which all target and vantage
+names occur but required combinations are absent.
 
 **An incident's owner is read from the declaration and from nowhere else:** the incident's own resource is
 looked up in the built index and the label is what its declaration says — the typed `owner` field of the
@@ -513,7 +540,9 @@ runner and reports where coverage is already reported: the batch carrying a find
 a `source-heartbeat` reference so intake admits it. A store that cannot be reached never delays or
 replaces the operational event (incident and action state: `state.py` decides what is open), and never passes silently:
 the copy is re-attempted while the batch is still owed, and the coverage condition stays open until a
-read agrees.
+read agrees. Between scheduled reads, the sink retains the last comparison and its check time;
+successful writes cannot clear a drift or unreadable result. A fresh matching TTL comparison is
+required to report recovery. A new runner process performs a new comparison on its first batch.
 
 ## 5. Operational SQLite and action lifecycle
 

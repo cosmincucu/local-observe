@@ -699,6 +699,46 @@ class GroupingIntakeTests(GraphFixture):
         with closing(sqlite3.connect(store.path)) as db:
             self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
 
+    def test_member_updates_preserve_subject_for_suppression_and_escalation(self):
+        from local_observe.platform.escalation_reader import EscalationReader
+        from local_observe.platform.suppression import firing_resources, condition_key
+        store = self.store()
+        subject = self.verdict('demo-api', 'api.down')
+        opened = self.file(store, subject)
+        self.file(store, self.verdict('demo-host', 'host.down'))
+        for minute, status in enumerate(('firing', 'unknown', 'resolved', 'firing'), 1):
+            member = self.file(store, self.verdict('demo-host', 'host.down', status=status,
+                                                  at=NOW + dt.timedelta(minutes=minute)))
+            self.assertEqual(member['incident_id'], opened['incident_id'])
+            incident = self.raw(store, 'SELECT * FROM incidents')[0]
+            self.assertEqual(incident['condition_key'], condition_key(subject))
+            self.assertEqual(incident['resource_id'], subject['resource_id'])
+            self.assertEqual(incident['last_event_id'], opened['event_id'])
+            self.assertEqual(firing_resources(store)['resources'][subject['resource_id']]['rule_id'], 'api.down')
+            with EscalationReader(store.path, ack_statuses=('approved',)) as reader:
+                discovery = reader.discover(0)
+                self.assertTrue(discovery.complete)
+                self.assertEqual(discovery.rows[0].event['rule_id'], 'api.down')
+                current = reader.read_incidents([opened['incident_id']])[opened['incident_id']]
+                self.assertEqual(current.event['resource_id'], subject['resource_id'])
+                self.assertEqual(current.event['rule_id'], 'api.down')
+        refreshed = self.file(store, self.verdict('demo-api', 'api.down',
+                                                  at=NOW + dt.timedelta(minutes=5)))
+        self.assertEqual(self.raw(store, 'SELECT last_event_id FROM incidents')[0]['last_event_id'],
+                         refreshed['event_id'])
+        # Recovery of the anchor holds the group open; the final member closes it without
+        # changing its subject. Each delivery still carries its own condition's event.
+        self.file(store, self.verdict('demo-api', 'api.down', status='resolved',
+                                     at=NOW + dt.timedelta(minutes=6)))
+        closed = self.file(store, self.verdict('demo-host', 'host.down', status='resolved',
+                                              at=NOW + dt.timedelta(minutes=7)))
+        self.assertEqual(closed['transition'], 'resolved')
+        incident = self.raw(store, 'SELECT * FROM incidents')[0]
+        self.assertEqual(incident['last_event_id'], refreshed['event_id'])
+        self.assertEqual(incident['status'], 'resolved')
+        delivery = self.raw(store, 'SELECT payload FROM outbox ORDER BY rowid DESC LIMIT 1')[0]
+        self.assertEqual(json.loads(delivery['payload'])['event']['rule_id'], 'host.down')
+
     def test_no_index_configured_means_no_grouping_at_all(self):
         """An installation that declared no topology is not making a claim about what is related."""
         store = self.store()
