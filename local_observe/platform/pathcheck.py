@@ -33,10 +33,27 @@ and the hole it leaves is what makes the round `indeterminate` rather than confi
 that probed it; `local` when a vantage fails against everything it probed while others reach those
 same targets; `upstream/route` when a shared-ASN cluster of targets is dead everywhere; `ok` when
 nothing failed; and `indeterminate` for everything else — including the case v0.1 could not express
-because it had no expected set: **a vantage point that probed nothing, or a configured target nobody
-probed, makes the verdict `indeterminate`, never `ok`.** Silence is not health. That is the one place
-this port is stricter than v0.1, and the reason is the whole point of the module: `ok` from half the
-vantage points is a lie about the other half.
+because it had no expected set: **what is owed is the product of the two expected sets, and a required
+`(target, vantage point)` pair nobody filled makes the verdict `indeterminate`, never `ok`.** Silence is
+not health. That is the one place this port is stricter than v0.1, and the reason is the whole point of
+the module: `ok` from half the vantage points is a lie about the other half — and `ok` about one target
+seen from one probe is a lie about the target nobody probed. The narrower hole is the one that reads as
+health today: V1 reports its API, a sibling reports its router, and "2 targets from 2 vantage points,
+all reachable" is true of neither reporter, because each one's own list has a blank in it. A vantage
+that reported without being expected adds no requirement and satisfies none either, so a sibling's data
+may corroborate this producer's verdict and can never complete it.
+
+**A verdict owed to the platform is written down before it is sent.** One round owes one or two events,
+and the second can be refused or — the case that matters — accepted and lost on the way back, which the
+producer cannot tell from never having been sent. So the exact bytes of the batch, the condition and
+route state the round intends to leave behind, and the window they belong to go into the cursor *first*,
+and the cursor moves past them only once every one has been accepted. The next round replays those bytes
+and reads no report at all: a fresh probe cannot un-owe a conclusion the previous round already reached,
+and re-judging instead of replaying is how the `resolved` for an outage never gets filed and the incident
+sits open over a network the operator can watch being healthy. Any delivery failure retains the batch:
+even an explicit refusal cannot undo earlier commits in that batch. This is `conditions.tick`'s durability rule,
+ported for the same reason, with the pair `routes`/`open` added because this producer's pending round
+also carries route baselines that may not be re-derived from a later trace.
 
 **How a verdict becomes an event.** Through `detections.event()` and no other door, with the probe
 window as its window (aligned to the interval, so a replayed round is the same `source_event_id` and
@@ -101,7 +118,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from local_observe.credentials import read_credential
-from local_observe.http import JsonClient, TransportError
+from local_observe.http import JsonClient
 from local_observe.inventory import index
 from local_observe.inventory.validation import digest, timestamp, utc_text
 from local_observe.log import get_logger
@@ -109,7 +126,7 @@ from .detections import event
 from .owner import exclusive_owner
 from .pathcheck_parsers import (PROTOCOLS, PathParseError, PingReport, TraceReport, analyze_ping,
                                 parse_traceroute, require_protocol)
-from .state import identifier, label
+from .state import identifier, label, validate_event
 
 log = get_logger(__name__)
 
@@ -138,6 +155,21 @@ MAX_ASN = 32
 MAX_OBSERVATION_AGE_SECONDS = 900
 FUTURE_SKEW_SECONDS = 60
 MAX_CURSOR_BYTES = 1_048_576
+#: What a cursor may hold. ``pending`` is optional and that is deliberate: a cursor written before the
+#: lost-acknowledgement fix — or by a build rolled back to it — carries the other four keys and still
+#: loads, while a cursor written here carries a fifth that a build without the fix refuses rather than
+#: misreads as "nothing owed". No version bump is needed for an additive key, and none is claimed.
+CURSOR_KEYS = frozenset({'schema_version', 'binding', 'open', 'routes', 'pending', 'settled_end'})
+CURSOR_REQUIRED_KEYS = CURSOR_KEYS - {'pending', 'settled_end'}
+#: What one owed batch is: the bytes to send again, the window they were computed for (so a reader can
+#: re-check their retention against the round that wrote them), and the cursor state to adopt once every
+#: one of them has been accepted. ``binding`` rides inside for the reason `conditions.load_cursor` gives:
+#: a batch may never be delivered under a configuration that did not write it.
+PENDING_KEYS = frozenset({'binding', 'end', 'events', 'open', 'routes'})
+#: A round files at most two events — the `resolved` for the condition a moving verdict replaces and the
+#: `firing` for the one it means (`verdict_findings`) — so a longer batch on disk is not a batch this
+#: producer wrote, and is refused rather than delivered a page at a time.
+MAX_PENDING_EVENTS = 2
 #: Route keys this producer may hold at once: one per declared target — the protocols a target is
 #: probed by share a key space, so the ceiling is targets x protocols and the bound is what keeps a
 #: cursor from becoming an unbounded route history.
@@ -158,6 +190,10 @@ LOCAL_MIN_TARGETS = 2
 #: An `upstream/route` verdict needs this many dead targets sharing an ASN. One target with an ASN is
 #: a target outage wearing a coincidence.
 CLUSTER_MIN_TARGETS = 2
+#: How many blank `(target, vantage point)` observations one degradation note may name. The ceiling here
+#: is targets x vantage points, and a note is reasoning for a log line rather than a table: past the
+#: ceiling the rest is counted, never dropped.
+MAX_GAP_NOTE_PAIRS = 8
 BgpFeed = Callable[[str], list[str]]
 
 # verdict -> (event kind, rule id). `upstream/route` cannot be a rule id verbatim: `state.label`
@@ -199,12 +235,15 @@ class ReachabilityVerdict(NamedTuple):
     is empty for `ok` and for any verdict degraded to `indeterminate`, because a verdict that cannot
     be reached must not leave behind the implication it did not earn. :attr:`notes` is reasoning for
     the log line and the CLI body — a canonical event carries no summary field, so these never reach
-    a pager.
+    a pager. :attr:`coverage_gaps` is the machine-readable form of the blank pairs the notes describe
+    in prose: `classify` normalises both halves (a label, a canonical UUID), and a round summary that
+    re-derived them would be a second, possibly disagreeing, answer to "who never looked".
     """
     verdict: str
     affected: tuple[str, ...]
     failing: tuple[tuple[str, str], ...]
     notes: tuple[str, ...]
+    coverage_gaps: tuple[tuple[str, str], ...] = ()
 
 
 def _target_name(value: Any) -> str:
@@ -241,9 +280,23 @@ def classify(observations: Sequence[ProbeObservation], *,
     rather than asking this function to invent a shape for "nothing").
 
     ``expected_vantage_points`` / ``expected_targets`` are v0.1's missing half and the only addition to
-    the classifier: whoever is *supposed* to have reported and did not turns the verdict into
-    `indeterminate`. ``bgp_feed`` is the culled seam — see the module docstring — and passing None is
-    the shipped behaviour.
+    the classifier, and they are honoured **pairwise**: what is owed is the product of the two sets, so
+    every expected vantage point owes an observation of every expected target and one blank pair degrades
+    the verdict to `indeterminate` however firm the rest of the grid looks. A vantage point that reported
+    without being expected adds no requirement, and one that was expected owes the whole target list:
+    reporting for something else is not a statement about the target this process was configured to
+    watch. A pair already observed satisfies once, and repeating it satisfies no better.
+
+    A required observation is one `(target, vantage point)` pair and never one per protocol. Protocols
+    are the filter `load_reports` applies to what a report may say — an out-of-scope probe is excluded
+    and counted, and a report with nothing in scope is refused as a configuration mismatch rather than
+    read as silence — and inside a pair, every protocol that did report must have reached for the pair
+    to count as reached. So a configured protocol nobody probed is not its own blank cell: the hole is
+    the pair's, which is what keeps `local` meaning "this vantage could not reach these targets" rather
+    than "this vantage did not send this packet type".
+
+    ``bgp_feed`` is the culled seam — see the module docstring — and passing None is the shipped
+    behaviour.
 
     Raises:
         PathCheckError: The set is empty, holds a value that is not a :class:`ProbeObservation`, a
@@ -279,10 +332,11 @@ def classify(observations: Sequence[ProbeObservation], *,
     notes: list[str] = []
     verdict, affected, suspects = _classify_pattern(keyed, targets, vantage_points, failing, asn_of,
                                                     notes)
-    verdict, affected = _degrade_for_gaps(verdict, affected, expected_vp, expected_target, targets,
-                                          vantage_points, notes)
+    verdict, affected, gaps = _degrade_for_gaps(verdict, affected, expected_vp, expected_target,
+                                                keyed, notes)
     notes.extend(_bgp_notes(bgp_feed, verdict, suspects))
-    return ReachabilityVerdict(verdict=verdict, affected=affected, failing=failing, notes=tuple(notes))
+    return ReachabilityVerdict(verdict=verdict, affected=affected, failing=failing, notes=tuple(notes),
+                               coverage_gaps=tuple(gaps))
 
 
 def _classify_pattern(keyed: Mapping[tuple[str, str], bool],
@@ -291,8 +345,12 @@ def _classify_pattern(keyed: Mapping[tuple[str, str], bool],
                       notes: list[str]) -> tuple[str, tuple[str, ...], list[str]]:
     """The correlation itself, v0.1's lines in v0.1's order. Returns (verdict, affected, suspect ASNs)."""
     if not failing:
-        notes.append(f'all {len(targets)} target(s) reachable from all {len(vantage_points)} '
-                     'vantage point(s)')
+        # The numbers are of what the data covers, not of what was owed: "2 targets, 2 vantage points"
+        # is a count of reporters and names, and `_degrade_for_gaps` below is what says whether the grid
+        # between them was actually filled in. v0.1's wording (`all N from all M`) read as a completion
+        # claim on a partial round, which is the sentence this module must never print over a gap.
+        notes.append(f'no failing pair: {len(targets)} target(s) reachable across '
+                     f'{len(vantage_points)} vantage point(s) on {len(keyed)} observed pair(s)')
         return VERDICT_OK, (), []
 
     vps_probing = {target: sorted(vantage for (inner, vantage) in keyed if inner == target)
@@ -344,31 +402,72 @@ def _classify_pattern(keyed: Mapping[tuple[str, str], bool],
     return VERDICT_INDETERMINATE, tuple(sorted({target for target, _ in failing})), []
 
 
+def _coverage_gaps(keyed: Mapping[tuple[str, str], bool], expected_vp: Sequence[str],
+                   expected_target: Sequence[str]) -> tuple[list[str], list[str],
+                                                            list[tuple[str, str]]]:
+    """Return the reporters that said nothing, the targets nobody probed, and the blank required pairs.
+
+    The three answers describe one hole each, and only the third is invisible to the other two: a blank
+    pair inside a vantage point that went quiet entirely is already `missing_vp`, and a target nobody
+    probed anywhere is already `missing_target`. `missing_pairs` is the narrower case both of those wave
+    past — the reporter DID report and the target WAS probed, just never from the vantage point that owed
+    the observation — which is the shape that used to read as a healthy network. The pair list is the
+    complete owed-and-absent set, so a round summary can name every hole structurally; the notes below
+    are allowed to group them into sentences instead.
+    """
+    observed = set(keyed)
+    seen_targets = {target for target, _vantage in observed}
+    seen_vantages = {vantage for _target, vantage in observed}
+    missing_vp = [vantage for vantage in expected_vp if vantage not in seen_vantages]
+    missing_target = [target for target in expected_target if target not in seen_targets]
+    missing_pairs = sorted((target, vantage) for vantage in expected_vp for target in expected_target
+                           if (target, vantage) not in observed)
+    return missing_vp, missing_target, missing_pairs
+
+
 def _degrade_for_gaps(verdict: str, affected: tuple[str, ...], expected_vp: tuple[str, ...],
-                      expected_target: tuple[str, ...], targets: list[str],
-                      vantage_points: list[str], notes: list[str]) -> tuple[str, tuple[str, ...]]:
-    """Downgrade to `indeterminate` when someone expected to report did not. The stricter half of v0.1.
+                      expected_target: tuple[str, ...], keyed: Mapping[tuple[str, str], bool],
+                      notes: list[str]) -> tuple[str, tuple[str, ...], list[tuple[str, str]]]:
+    """Downgrade to `indeterminate` when a required observation is missing. The stricter half of v0.1.
 
     A vantage point that probed nothing is not a vantage point that saw nothing wrong: it is the
     absence of a statement, and `ok` read from the remaining vantages would be a claim about the
-    missing one. The pattern the data *would* have supported stays in the notes, because "looks
-    local, but the second probe never reported" is a more useful sentence than either word alone.
+    missing one. The same is true of the narrower hole — a vantage that probed *something*, but never
+    the target it was configured to watch, has said nothing about that target, and its gap may not be
+    filled from a sibling's report, because the sibling is a different reporter with a different view.
+    Coverage is therefore never "some pairs arrived" but "every pair this configuration owed did".
+    The pattern the data *would* have supported stays in the notes, because "looks local, but the
+    second probe never reported" is a more useful sentence than either word alone.
+
+    Returns the blank pairs beside the verdict so the round summary can name them without re-normalising
+    the observations; a degraded verdict carries no `affected` set either way.
     """
-    missing_vp = [vantage for vantage in expected_vp if vantage not in vantage_points]
-    missing_target = [target for target in expected_target if target not in targets]
-    if not missing_vp and not missing_target:
-        return verdict, affected
+    missing_vp, missing_target, missing_pairs = _coverage_gaps(keyed, expected_vp, expected_target)
+    if not missing_vp and not missing_target and not missing_pairs:
+        return verdict, affected, []
     if missing_vp:
         notes.append(f'vantage point(s) {", ".join(missing_vp)} reported no probe: no verdict about '
                      'their view of the targets')
     if missing_target:
         notes.append(f'configured target(s) {", ".join(missing_target)} were not probed by any '
                      'vantage point')
+    if missing_pairs:
+        # Only the pairs that neither of the two sentences above already names: "V2 went quiet" says more
+        # than a list of its blanks, and "nobody probed T9" says more than one line per expected vantage.
+        narrow = [(target, vantage) for target, vantage in missing_pairs
+                  if vantage not in missing_vp and target not in missing_target]
+        if narrow:
+            named = ', '.join(f'{target} from {vantage}'
+                              for target, vantage in narrow[:MAX_GAP_NOTE_PAIRS])
+            rest = len(narrow) - MAX_GAP_NOTE_PAIRS
+            notes.append(f'no observation of {named}{f" and {rest} more pair(s)" if rest > 0 else ""}: '
+                         'those vantage points reported, but not about these targets, so the verdict '
+                         'cannot borrow another reporter\'s view of them')
     if verdict != VERDICT_INDETERMINATE:
         notes.append(f'pattern in the data that did arrive was "{verdict}"; the verdict is '
                      f'{VERDICT_INDETERMINATE} because a verdict is only as firm as the coverage it '
                      'was computed from')
-    return VERDICT_INDETERMINATE, ()
+    return VERDICT_INDETERMINATE, (), missing_pairs
 
 
 def _bgp_notes(bgp_feed: BgpFeed | None, verdict: str, suspect_asns: Sequence[str]) -> list[str]:
@@ -791,19 +890,93 @@ def cursor_binding(config: Mapping[str, Any]) -> str:
                    sorted(config['protocols']), str(config['sources']['reports_dir'])])
 
 
+def _checked_open(value: Any) -> None:
+    """Refuse an open-finding record this producer could not have written, naming nothing but the field."""
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {'kind', 'rule_id'}:
+        raise ValueError('Pathcheck cursor holds an unreadable open finding')
+    try:
+        label(value['rule_id'])
+    except Exception:
+        raise ValueError('Pathcheck cursor holds an unreadable open finding') from None
+    if value['kind'] not in ('availability', 'coverage'):
+        raise ValueError('Pathcheck cursor holds an open finding of a kind it never files')
+
+
+def _checked_routes(routes: Any) -> None:
+    """Refuse a route table this producer could not have written, field by field."""
+    if not isinstance(routes, dict) or len(routes) > MAX_ROUTES:
+        raise ValueError('Unsupported pathcheck cursor document')
+    for key, record in routes.items():
+        if (not isinstance(key, str) or not isinstance(record, dict)
+                or set(record) != {'baseline', 'signature', 'open'} or record['open'] not in ('yes', 'no')):
+            raise ValueError('Pathcheck cursor holds an unreadable route record')
+        for field in ('baseline', 'signature'):
+            if not isinstance(record[field], str) or len(record[field]) != 64:
+                raise ValueError('Pathcheck cursor holds a route signature that is not a digest')
+
+
+def _settled_end(document: Mapping[str, Any]) -> dt.datetime | None:
+    """Validate the optional completed-window watermark without inventing one for legacy state."""
+    if 'settled_end' not in document:
+        return None
+    try:
+        return timestamp(document['settled_end'])
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('Pathcheck cursor holds an unusable completed window') from None
+
+
+def _checked_pending(pending: Any, binding: str) -> None:
+    """Refuse an owed batch that could not be delivered as written.
+
+    The bytes are re-checked with `state.validate_event` rather than restated, for the reason
+    `conditions.load_cursor` gives: a cursor that half-parsed would hand a hand-edited verdict to
+    intake, and a batch is exactly that dangerous when the producer trusts it enough to replay it
+    before looking at the network again. `end` is the instant the batch was computed for, so it is the
+    clock the evidence retention is checked against — not now, which would age a owed round out of its
+    own cursor while the platform is down.
+    """
+    if (not isinstance(pending, dict) or set(pending) != PENDING_KEYS
+            or pending['binding'] != binding or not isinstance(pending['events'], list)
+            or not 1 <= len(pending['events']) <= MAX_PENDING_EVENTS):
+        raise ValueError('Pathcheck cursor pending batch is malformed')
+    try:
+        end = timestamp(pending['end'])
+    except Exception:
+        raise ValueError('Pathcheck cursor pending batch names no readable window') from None
+    for item in pending['events']:
+        try:
+            validate_event(item, end)
+        except ValueError:
+            refusal = 'Pathcheck cursor pending batch holds an event that is not canonical'
+            raise ValueError(refusal) from None
+    _checked_open(pending['open'])
+    _checked_routes(pending['routes'])
+
+
 def load_cursor(path: Path | str, config: Mapping[str, Any]) -> dict[str, Any]:
     """Return this producer's cursor, refusing one that belongs to another configuration.
 
-    ``{'schema_version', 'binding', 'open', 'routes'}``. A binding mismatch is never silently
-    re-baselined: a stored route signature from a different vantage or a different reports tree,
-    compared against what is read now, manufactures a route change out of an unrelated edit — exactly
-    the failure the drift producer refuses for the same reason. The structure is checked field by
-    field, because a cursor that half-parses would report a clean network from an empty ``routes``.
+    ``{'schema_version', 'binding', 'open', 'routes'}``, plus ``pending`` when a round still owes a
+    batch. A binding mismatch is never silently re-baselined: a stored route signature from a different
+    vantage or a different reports tree, compared against what is read now, manufactures a route change
+    out of an unrelated edit — exactly the failure the drift producer refuses for the same reason. The
+    structure is checked field by field, because a cursor that half-parses would report a clean network
+    from an empty ``routes``.
+
+    A document without ``pending`` is read as one with nothing owed, which is both the legacy cursor
+    (four keys, written before this module kept a batch at all) and the shape a rollback writes; it costs
+    a producer nothing to upgrade and, on the way back, an unrecognised key is a refusal rather than a
+    silently dropped verdict. The key is filled in on the way out for that reason: a caller that has to
+    remember which cursors are old is a caller that will eventually guess. A file that does not exist yet
+    is an empty document, not a refusal: the first round has nothing owed.
     """
     candidate = Path(path)
     expected = cursor_binding(config)
     if not candidate.exists():
-        return {'schema_version': CURSOR_VERSION, 'binding': expected, 'open': None, 'routes': {}}
+        return {'schema_version': CURSOR_VERSION, 'binding': expected, 'open': None, 'routes': {},
+                'pending': None}
     with candidate.open('rb') as stream:
         raw = stream.read(MAX_CURSOR_BYTES + 1)
     if len(raw) > MAX_CURSOR_BYTES:
@@ -812,30 +985,38 @@ def load_cursor(path: Path | str, config: Mapping[str, Any]) -> dict[str, Any]:
         document = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         raise ValueError('Pathcheck cursor is not JSON') from None
-    if (not isinstance(document, dict) or set(document) != {'schema_version', 'binding', 'open', 'routes'}
-            or document['schema_version'] != CURSOR_VERSION or not isinstance(document['routes'], dict)
-            or len(document['routes']) > MAX_ROUTES):
+    if (not isinstance(document, dict) or not CURSOR_REQUIRED_KEYS <= set(document)
+            or set(document) - CURSOR_KEYS or document['schema_version'] != CURSOR_VERSION):
         raise ValueError('Unsupported pathcheck cursor document')
     if document['binding'] != expected:
         raise ValueError('Pathcheck cursor belongs to a different vantage point, target set or '
                          'reports directory; remove it to re-baseline')
-    open_finding = document['open']
-    if open_finding is not None:
-        if not isinstance(open_finding, dict) or set(open_finding) != {'kind', 'rule_id'}:
-            raise ValueError('Pathcheck cursor holds an unreadable open finding')
-        try:
-            label(open_finding['rule_id'])
-        except Exception:
-            raise ValueError('Pathcheck cursor holds an unreadable open finding') from None
-        if open_finding['kind'] not in ('availability', 'coverage'):
-            raise ValueError('Pathcheck cursor holds an open finding of a kind it never files')
-    for key, record in document['routes'].items():
-        if (not isinstance(key, str) or not isinstance(record, dict)
-                or set(record) != {'baseline', 'signature', 'open'} or record['open'] not in ('yes', 'no')):
-            raise ValueError('Pathcheck cursor holds an unreadable route record')
-        for field in ('baseline', 'signature'):
-            if not isinstance(record[field], str) or len(record[field]) != 64:
-                raise ValueError('Pathcheck cursor holds a route signature that is not a digest')
+    _checked_open(document['open'])
+    _checked_routes(document['routes'])
+    _settled_end(document)
+    if document.get('pending') is not None:
+        _checked_pending(document['pending'], document['binding'])
+        return document
+    document['pending'] = None
+    return document
+
+
+def _cursor_document(cursor: Mapping[str, Any], *, pending: Mapping[str, Any] | None = None,
+                     state: Mapping[str, Any] | None = None, settled_end: str | None = None) -> dict[str, Any]:
+    """Return the cursor that remembers *pending* is owed, with the condition state *state* now open.
+
+    One writer for the shape, so the two facts a round can be in — "nothing owed, this is the state"
+    and "something owed, the state below is only true once it lands" — cannot drift apart by one of
+    them being edited in place. `state` absent means the caller wants the cursor's current state kept,
+    including while a new batch is in flight. The completed window advances only after every
+    event has been acknowledged.
+    """
+    settled = state if state is not None else {'open': cursor['open'], 'routes': cursor['routes']}
+    document = {'schema_version': CURSOR_VERSION, 'binding': cursor['binding'], 'open': settled['open'],
+                'routes': settled['routes'], 'pending': dict(pending) if pending else None}
+    end = settled_end if settled_end is not None else cursor.get('settled_end')
+    if end is not None:
+        document['settled_end'] = end
     return document
 
 
@@ -879,15 +1060,56 @@ def _window(now: dt.datetime, interval_seconds: int) -> dict[str, str]:
     return {'start': utc_text(end - dt.timedelta(seconds=interval_seconds)), 'end': utc_text(end)}
 
 
+def _replay(path: Path, cursor: Mapping[str, Any],
+            deliver: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    """Send the batch the last round owed, and only then let that round's state become the cursor's.
+
+    Nothing here reads a report, opens the inventory index or asks the classifier an opinion: this round
+    has one job, and reading the world while a verdict is unfiled is how the file-never event gets lost.
+    The bytes are delivered as stored (`events` is a copy for the summary, not a re-write), so a replay
+    is the same `source_event_id` over the same window and `Store.intake` folds the ones that did land
+    into `duplicate` answers instead of a second incident.
+
+    Every delivery failure retains the batch. Even an explicit refusal of a later event cannot
+    undo an earlier commit, and an exception class cannot prove whether an event was accepted.
+    """
+    batch = cursor['pending']
+    events = [dict(item) for item in batch['events']]
+    for item in events:
+        deliver(item)
+    save_cursor(path, _cursor_document(cursor, state={'open': batch['open'], 'routes': batch['routes']},
+                                      settled_end=batch['end']))
+    return {'result': 'replayed', 'window': dict(events[0]['window']), 'verdict': None,
+            'affected': [], 'failing': [], 'coverage_gaps': [], 'replayed_events': len(events),
+            'notes': [f'{len(events)} event(s) owed by the round at {batch["end"]} were replayed from '
+                      'the cursor; no report was read and no verdict was computed, because a later '
+                      'probe cannot un-owe what that round already concluded'],
+            'events': events, 'open_finding': batch['open'], 'observations': 0,
+            'probes_by_vantage': {}, 'traces': 0, 'route_findings': [], 'latency': [],
+            'latency_rows': 0, 'latency_truncated': False, 'transitions': 0,
+            'excluded_undeclared_vantage': [], 'out_of_scope_probes': 0, 'excess_reports': 0,
+            'unparseable_reports': 0, 'oversize_reports': 0, 'stale_reports': 0,
+            'blind': True, 'blind_reason': 'pending_batch'}
+
+
 def tick(index_path: Path | str, config: Mapping[str, Any], cursor_path: Path | str,
          deliver: Callable[[dict[str, Any]], None], *, now: dt.datetime,
          source: str) -> dict[str, Any]:
     """Judge the reports, deliver what changed, and advance the cursor only after.
 
-    One round, no loop, no client of its own: `deliver` is called once per event and must raise on any
-    refusal, so the cursor is written **last** and a crashed round is recomputed rather than
-    half-remembered (the aligned window makes that recomputation the same `source_event_id`, which the
-    platform folds into the row it already holds).
+    One round, no loop, no client of its own: `deliver` is called once per event, so a round can fail
+    between its first event and its second, or between its last event and the acknowledgement. That is
+    why what it owes is written to the cursor **before** the first send and cleared only after the last
+    one: the exact bytes, the condition state the round intends and the route state it computed ride out
+    a crash and a lost ack alike. The platform folds a retry of identical bytes into the row it already
+    holds, so replay is cheap and re-judging is not — a fresh healthy report cannot retroactively un-owe
+    the `resolved` the failing round owed, and skipping the owed batch to judge the new one is how an
+    incident stays open over a network the operator can see is healthy.
+
+    So a round that finds a pending batch replays it and returns before reading anything (`_replay`),
+    which is `conditions.tick`'s durability rule with one addition: this producer's round also carries
+    route baselines, and a transition computed from a trace that has since moved is not the transition
+    the failed round saw. Both halves of the intended final state travel with the batch.
 
     The undeclared-vantage check runs before a single report is read, and refuses the round: producer
     identity is not something a partial verdict may be built on — the same check `detections.evaluate`
@@ -901,15 +1123,31 @@ def tick(index_path: Path | str, config: Mapping[str, Any], cursor_path: Path | 
     cheaper to raise first than to explain afterwards.
 
     The summary carries the window, the verdict and its notes, the events delivered, the probe counts,
-    the excluded/unparseable/stale counts, the route findings and which condition is open now. Nothing
-    in it holds a credential; hop addresses appear only as digests.
+    the excluded/unparseable/stale counts, the route findings, the blank `(target, vantage)` pairs the
+    verdict was degraded for and which condition is open now. A replay round reports no verdict — its
+    `verdict` is null, its `window` is the one the replayed bytes carry, its `blind_reason` is
+    `pending_batch` — because the true sentence about that round is that nothing was looked at. Nothing
+    in any of it holds a credential; hop addresses appear only as digests.
     """
     path = Path(cursor_path)
     if not path.parent.is_dir():
         raise ValueError('Pathcheck cursor parent does not exist; create it before the first round')
     cursor = load_cursor(path, config)
+    if cursor['pending']:
+        return _replay(path, cursor, deliver)
     window = _window(now, int(config['interval_seconds']))
     end = timestamp(window['end'])
+    settled = _settled_end(cursor)
+    if settled is not None and end <= settled:
+        return {'result': 'idle', 'window': window, 'verdict': None,
+                'affected': [], 'failing': [], 'coverage_gaps': [], 'replayed_events': 0,
+                'notes': ['This window was already completed; no reports were read.'],
+                'events': [], 'open_finding': cursor['open'], 'observations': 0,
+                'probes_by_vantage': {}, 'traces': 0, 'route_findings': [], 'latency': [],
+                'latency_rows': 0, 'latency_truncated': False, 'transitions': 0,
+                'excluded_undeclared_vantage': [], 'out_of_scope_probes': 0, 'excess_reports': 0,
+                'unparseable_reports': 0, 'oversize_reports': 0, 'stale_reports': 0,
+                'blind': False, 'blind_reason': 'settled_window'}
     with index.readonly(index_path) as connection:
         if index.resolve(connection, resource_id=config['vantage_resource_id'])['status'] != 'resolved':
             raise ValueError('Vantage point is not declared')
@@ -947,14 +1185,27 @@ def tick(index_path: Path | str, config: Mapping[str, Any], cursor_path: Path | 
                                             vantage_resource_id=config['vantage_resource_id'],
                                             window=window, observations=observations,
                                             open_finding=cursor['open'])
-    route_findings = observe_routes(cursor['routes'], traces, observed_at=window['end'])
+    # A copy, so the cursor keeps the state the last *completed* round reached while this round's is
+    # still only intended: `observe_routes` writes its transitions into what it is handed, and a refused
+    # batch must leave the route baselines where they were for the next round to recompute honestly.
+    routes = dict(cursor['routes'])
+    route_findings = observe_routes(routes, traces, observed_at=window['end'])
+    if events:
+        # Write down what this round owes before a single byte of it leaves. Everything after this line
+        # is allowed to fail: the batch, the condition state it implies and the route state it computed
+        # are on disk, and the next round's job is to send them, not to guess them again.
+        save_cursor(path, _cursor_document(cursor, pending={
+            'binding': cursor['binding'], 'end': window['end'], 'events': events,
+            'open': open_finding, 'routes': routes}))
     for item in events:
         deliver(item)
-    save_cursor(path, {'schema_version': CURSOR_VERSION, 'binding': cursor['binding'],
-                       'open': open_finding, 'routes': cursor['routes']})
+    save_cursor(path, _cursor_document(cursor, state={'open': open_finding, 'routes': routes},
+                                      settled_end=window['end']))
     return {'result': ('blind' if read['blind'] else 'delivered' if events else 'idle'),
             'window': window, 'verdict': verdict.verdict, 'affected': list(verdict.affected),
             'failing': [[target, vantage] for target, vantage in verdict.failing],
+            'coverage_gaps': [[target, vantage] for target, vantage in verdict.coverage_gaps],
+            'replayed_events': 0,
             'notes': list(verdict.notes), 'events': events,
             'open_finding': open_finding, 'observations': len(observations),
             'probes_by_vantage': {report.vantage_resource_id: len(report.observations)
@@ -999,8 +1250,11 @@ def main() -> int:
         return 1
 
     def deliver(item: dict[str, Any]) -> None:
-        if platform.request('POST', '/v1/events', item)[0] != 200:
-            raise TransportError('Pathcheck intake refused; the cursor is not advanced')
+        # Both a transport failure and a refused event leave the whole batch pending. Earlier
+        # accepted events will replay as duplicates; a persistent refusal needs operator correction.
+        status = platform.request('POST', '/v1/events', item)[0]
+        if status != 200:
+            raise PathCheckError(f'Pathcheck intake answered {status}; the batch remains pending')
 
     log.info('Pathcheck producer started', extra={'targets': len(config['targets']),
                                                   'tick_seconds': config['interval_seconds']})
@@ -1012,6 +1266,8 @@ def main() -> int:
                 log.info('Pathcheck tick finished',
                          extra={'result': summary['result'], 'verdict': summary['verdict'],
                                 'events': len(summary['events']), 'observations': summary['observations'],
+                                'replayed_events': summary['replayed_events'],
+                                'coverage_gaps': len(summary['coverage_gaps']),
                                 'route_findings': len(summary['route_findings'])})
             except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
                 # sqlite3.Error because a round opens the inventory index, whose absence or damage

@@ -26,6 +26,19 @@ which commit or which operator made it. The unified diff is built against the re
 — held in the cursor for that one purpose, up to :data:`MAX_SNAPSHOT_BYTES` — so deleting the cursor
 re-baselines silently: the next round reports nothing until an artifact moves again.
 
+**A round that sent and never heard back is not a round that may be recomputed.** ``Store.intake`` commits
+before it answers, so a transport failure has two shapes and the producer cannot tell them apart from its
+own side: nothing was filed, or everything was filed and only the acknowledgement was lost. The cursor
+carries the difference. A round that has anything to send first writes the batch it owes — those exact
+event bytes, the window they were judged inside, and the cursor this producer intended to install once they
+were accepted — and clears it only after the last one was delivered. A retry therefore replays *those
+bytes* before it opens the tree again, and the judgement it is retrying is never rebuilt from a source
+that has since moved. Skipping that order is not a lost retry, it is a lost verdict: a mount that came back
+compares clean against the healthy digest still in the cursor, the round files nothing, and the coverage
+incident the failed round opened can never close — only a later round that reads the artifact files that
+recovery, and it has been told there was nothing to read. One document, written atomically, covers both
+halves: there is no queue, no sidecar file and no second service to run.
+
 Two refusals carry the rest of the design.
 
 * **No event when nothing changed, and none on a first sighting either.** An artifact this producer
@@ -72,7 +85,7 @@ from local_observe.inventory.validation import digest, timestamp, utc_text
 from local_observe.log import get_logger
 from .detections import event
 from .owner import exclusive_owner
-from .state import identifier, label
+from .state import identifier, label, validate_event
 
 log = get_logger(__name__)
 
@@ -95,7 +108,23 @@ MAX_SNAPSHOT_BYTES = 65_536
 # Artifacts per process. The cursor holds one retained text each, so the bound is also the bound on
 # the cursor's size (32 x 64 KiB plus JSON overhead, worst case about 2 MiB).
 MAX_TRACKED = 32
-MAX_CURSOR_BYTES = 4 * 1024 * 1024
+# The cursor's size ceiling, and why it counts two copies of the retained text: while a batch is in
+# flight the document holds the acknowledged baseline **and** the cursor intended to replace it, so the
+# worst case is twice the 32 x 64 KiB above. The number stays a guard against a huge or hostile file, not
+# an invariant of the shape — a cursor that trips it is refused, and removing it is the operator's answer.
+MAX_CURSOR_BYTES = 8 * 1024 * 1024
+# What one cursor document must hold, and the one extra field it may hold. `pending` is the batch this
+# round owes: it is optional, so a cursor written before the replay batch exists loads unchanged, and a
+# healthy round never writes the key at all.
+CURSOR_KEYS = frozenset({'schema_version', 'binding', 'seen'})
+CURSOR_KEYS_OPTIONAL = frozenset({'pending', 'settled_end'})
+# What the owed batch must hold: the bytes to send, the window they were judged inside (`source_event_id`
+# is derived from it, so it is part of the event's identity and not a timestamp for the log), the cursor
+# to install once every one of them was accepted, and the binding that says which configuration owes it.
+PENDING_KEYS = frozenset({'binding', 'window', 'events', 'next'})
+# Events per round: one artifact can earn at most a drift finding, the coverage recovery beside it and one
+# applied acknowledgement, so a batch can never legitimately hold more than three per tracked artifact.
+MAX_PENDING_EVENTS = MAX_TRACKED * 3
 # What one cursor entry must hold, and the one extra field it may hold: `ack_applied` is the identity of
 # the last acknowledgement applied for that artifact, and nothing else may appear.
 CURSOR_ENTRY_KEYS = frozenset({'sha256', 'text', 'unreadable'})
@@ -570,41 +599,17 @@ def _carry_ack(target: dict[str, Any], record: Mapping[str, Any] | None, applied
         target['ack_applied'] = marker
 
 
-def load_cursor(path: Path | str, config: Mapping[str, Any]) -> dict[str, Any]:
-    """Return ``{'schema_version', 'binding', 'seen'}``; refuse a cursor from another configuration.
+def _validate_entries(seen: Any) -> None:
+    """Refuse a `seen` map this producer could not deliver from; shared by the cursor and its next cursor.
 
-    A cursor whose binding differs is never silently re-baselined: a record of "what the digest was
-    before" read from a different root or a different artifact set is precisely how a monitor
-    manufactures drift out of an unrelated edit. The refusal says so, and removing the file is the
-    operator's answer (the next round then re-baselines and reports nothing until an artifact moves).
-    The structure is checked field by field and fails closed for the same reason.
-
-    One entry field is optional: ``ack_applied``, the identity of the last acknowledgement this producer
-    actually applied for that artifact. It is what makes an acknowledgement spendable once — without it
-    a stable, acknowledged artifact would be resolved on every round after the first — and it is a
-    digest or nothing. An artifact that has never been acknowledged keeps the three-key entry it always
-    had, so turning the feature on changes no existing cursor byte.
+    The checks are the ones the cursor has always made, in the same order, with the same words: an entry
+    is three keys plus at most one acknowledgement marker, a digest is 64 lowercase hex with the text
+    behind it, a digestless entry is legal only while that artifact is unreadable, and no retained text
+    exceeds what `read_snapshot` could ever have returned.
     """
-    candidate = Path(path)
-    expected = cursor_binding(config)
-    if not candidate.exists():
-        return {'schema_version': 1, 'binding': expected, 'seen': {}}
-    with candidate.open('rb') as stream:
-        raw = stream.read(MAX_CURSOR_BYTES + 1)
-    if len(raw) > MAX_CURSOR_BYTES:
-        raise ValueError(f'Drift cursor exceeds {MAX_CURSOR_BYTES} bytes')
-    try:
-        document = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        raise ValueError('Drift cursor is not JSON') from None
-    if (not isinstance(document, dict) or set(document) != {'schema_version', 'binding', 'seen'}
-            or document['schema_version'] != 1 or not isinstance(document['seen'], dict)
-            or len(document['seen']) > MAX_TRACKED):
+    if not isinstance(seen, dict) or len(seen) > MAX_TRACKED:
         raise ValueError('Unsupported drift cursor document')
-    if document['binding'] != expected:
-        raise ValueError('Drift cursor belongs to a different snapshot tree or artifact set; '
-                         'remove it to re-baseline')
-    for record in document['seen'].values():
+    for record in seen.values():
         if (not isinstance(record, dict) or not CURSOR_ENTRY_KEYS <= set(record)
                 or set(record) - CURSOR_ENTRY_KEYS - CURSOR_ENTRY_OPTIONAL):
             raise ValueError('Drift cursor holds an unreadable entry shape')
@@ -622,6 +627,118 @@ def load_cursor(path: Path | str, config: Mapping[str, Any]) -> dict[str, Any]:
                 raise ValueError('Drift cursor holds a digestless entry that claims to be readable')
         elif not isinstance(checksum, str) or not SHA256_TEXT.fullmatch(checksum) or not isinstance(text, str):
             raise ValueError('Drift cursor holds a digest with no text behind it')
+
+
+def _settled_end(document: Mapping[str, Any]) -> dt.datetime | None:
+    """Validate the optional watermark retained across completed deliveries and restarts."""
+    if 'settled_end' not in document:
+        return None
+    try:
+        return timestamp(document['settled_end'])
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('Drift cursor holds an unusable completed window') from None
+
+
+def _validate_pending(pending: Any, expected: str) -> None:
+    """Refuse an owed batch before a byte of it is sent; what cannot be trusted must not be delivered.
+
+    The batch is exactly the thing this producer sends without judging it again, so it is verified as
+    strictly as the platform will verify it. Three checks, each with a failure this producer has seen:
+
+    * every event is canonical by ``state.validate_event`` — the same call ``Store.intake`` makes, so a
+      hand-edited verdict cannot be walked into intake by a retry, and a cursor cannot become a place to
+      file findings the producer never made. An event that fails here is refused rather than sent to a
+      400 round after round.
+    * every event carries the batch's own window. ``source_event_id`` is derived from that window, so a
+      batch holding two windows is two rounds wearing one retry identity — and the second of them would
+      be refused by intake as `Event retry changed contents`, which wedges the producer forever.
+    * every event's ``source_event_id`` is the digest `detections.event` derives from its own rule, version,
+      resource and window. That is what makes a replay fold into the row the platform already holds; an id
+      that did not come from the factory would be a **new** event wearing a remembered round's clothes,
+      and a cursor would have become a place to mint verdicts.
+    * the cursor it intends to install is a cursor this reader would accept for this configuration, so a
+      damaged `next` is caught here and not written out as remembered state after a successful delivery.
+
+    `binding` is checked on both the batch and its next cursor: an owed batch belongs to the artifact set
+    whose digests its events name, and re-baselining it away is how a monitor forgets an open incident.
+    """
+    if not isinstance(pending, dict) or set(pending) != PENDING_KEYS or pending['binding'] != expected:
+        raise ValueError('Drift cursor holds a pending batch that is malformed')
+    window = pending['window']
+    if not isinstance(window, dict) or set(window) != {'start', 'end'}:
+        raise ValueError('Drift cursor holds a pending batch with an unusable window')
+    try:
+        start, end = timestamp(window['start']), timestamp(window['end'])
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('Drift cursor holds a pending batch with an unusable window') from None
+    if not start < end:
+        raise ValueError('Drift cursor holds a pending batch with an unusable window')
+    events = pending['events']
+    if not isinstance(events, list) or not 1 <= len(events) <= MAX_PENDING_EVENTS:
+        raise ValueError('Drift cursor holds a pending batch that is not a bounded event list')
+    for item in events:
+        try:
+            validate_event(item, end)
+        except ValueError:
+            raise ValueError('Drift cursor holds a pending batch that is not canonical events') from None
+        if item['window'] != window:
+            raise ValueError('Drift cursor holds a pending batch judged across more than one window')
+        if item['source_event_id'] != digest([item['rule_id'], item['rule_version'],
+                                              item['resource_id'], item['window']]):
+            raise ValueError('Drift cursor holds a pending batch whose event identity is not its own')
+    following = pending['next']
+    if (not isinstance(following, dict) or not CURSOR_KEYS <= set(following)
+            or set(following) - CURSOR_KEYS - {'settled_end'}
+            or following['schema_version'] != 1 or following['binding'] != expected):
+        raise ValueError('Drift cursor holds a pending batch with no usable next cursor')
+    _validate_entries(following['seen'])
+    if _settled_end(following) not in (None, end):
+        raise ValueError('Drift pending cursor completion differs from its event window')
+
+
+def load_cursor(path: Path | str, config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``{'schema_version', 'binding', 'seen'}`` plus ``pending`` when a round is in flight.
+
+    A cursor whose binding differs is never silently re-baselined: a record of "what the digest was
+    before" read from a different root or a different artifact set is precisely how a monitor
+    manufactures drift out of an unrelated edit. The refusal says so, and removing the file is the
+    operator's answer (the next round then re-baselines and reports nothing until an artifact moves).
+    The structure is checked field by field and fails closed for the same reason.
+
+    One entry field is optional: ``ack_applied``, the identity of the last acknowledgement this producer
+    actually applied for that artifact. It is what makes an acknowledgement spendable once — without it
+    a stable, acknowledged artifact would be resolved on every round after the first — and it is a
+    digest or nothing. An artifact that has never been acknowledged keeps the three-key entry it always
+    had, so turning the feature on changes no existing cursor byte.
+
+    ``pending`` optionally holds the exact batch a previous round still owes. ``settled_end``
+    optionally records its most recent completed window so restarting after a replay cannot recompute
+    that window. Legacy documents load unchanged; older readers refuse the new fields. A null pending
+    value means absence, matching ``conditions.load_cursor``. Removing pending state manually loses
+    delivery evidence and is not a recovery procedure. Invalid batches are refused before delivery.
+    """
+    candidate = Path(path)
+    expected = cursor_binding(config)
+    if not candidate.exists():
+        return {'schema_version': 1, 'binding': expected, 'seen': {}}
+    with candidate.open('rb') as stream:
+        raw = stream.read(MAX_CURSOR_BYTES + 1)
+    if len(raw) > MAX_CURSOR_BYTES:
+        raise ValueError(f'Drift cursor exceeds {MAX_CURSOR_BYTES} bytes')
+    try:
+        document = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError('Drift cursor is not JSON') from None
+    if (not isinstance(document, dict) or not CURSOR_KEYS <= set(document)
+            or set(document) - CURSOR_KEYS - CURSOR_KEYS_OPTIONAL or document['schema_version'] != 1):
+        raise ValueError('Unsupported drift cursor document')
+    if document['binding'] != expected:
+        raise ValueError('Drift cursor belongs to a different snapshot tree or artifact set; '
+                         'remove it to re-baseline')
+    _validate_entries(document['seen'])
+    _settled_end(document)
+    if document.get('pending') is not None:
+        _validate_pending(document['pending'], expected)
     return document
 
 
@@ -636,6 +753,13 @@ def save_cursor(path: Path | str, value: Mapping[str, Any]) -> None:
     directory is created when absent, as ``Store`` does for its own database: the operator names
     a path, and a producer that refused to start because of one missing directory would be
     asking to be pointed somewhere unsafe instead.
+
+    Whatever document it is handed is written whole, which is what makes the owed batch durable: a round's
+    events and the cursor they replace cross the disk in one atomic replace, so a crash can land on exactly
+    two states — the batch still owed, with the cursor that will replace the baseline already beside it, or
+    that cursor installed and nothing owed. The cost is one extra write on a delivering round — the batch
+    before the send, the installed cursor after — on a producer that runs on a minute grid and files a
+    handful of events a day.
     """
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -737,35 +861,78 @@ def _acknowledgement_state(entry: Mapping[str, Any], record: Mapping[str, Any] |
 def tick(index_path: Path | str, config: Mapping[str, Any], cursor_path: Path | str,
          deliver: Callable[[dict[str, Any]], None], *, now: dt.datetime,
          source: str) -> dict[str, Any]:
-    """Compare the tree with the cursor, deliver what moved, and advance the cursor only after.
+    """Compare the tree with the cursor, deliver what moved, and owe it durably until it was accepted.
 
     One round, no loop and no client of its own: `deliver` is called once per event and must raise on
-    any refusal. The cursor is written **last**, so a refused or crashed delivery is recomputed on the
-    next round instead of being half-remembered — and because the window is aligned, that recomputation
-    yields the same ``source_event_id`` and the platform folds it into the row it already holds.
+    any refusal. What it is owed is written **before** it is sent — the batch of exact event bytes, the
+    window they were judged inside, and the cursor this round intends to install once every one of them
+    was accepted — and that record is cleared only after the last delivery returned. A refused or crashed
+    delivery therefore costs a retry, not the verdict:
+
+    * a delivery the platform **refused** left nothing behind, and replaying the batch is the same event
+      the aligned window would have produced anyway;
+    * a delivery the platform **accepted and then lost** is the case that cannot be recomputed. The
+      source is free to move before the retry, and a re-judged round would name the newest digest in a
+      window where nobody looked — and, when a blind mount simply came back, would compare clean against
+      the healthy digest still in the cursor, file nothing, and leave the coverage incident open for good
+      (which is what a restart used to make permanent, since the cursor was the only memory there was).
+
+    So a round with a batch owed delivers it first, in the bytes it wrote, **before** the first fresh
+    source read, and only then judges the tree from the cursor that batch was going to install. That
+    ordering is also what keeps a recovery legal: the replayed firing event still precedes the new
+    `resolved` one, whatever the retry round reads. One exception, and it is the same identifier: a retry
+    that lands **inside the window it owes** files nothing of its own, because its fresh verdict would
+    carry the replayed event's ``source_event_id`` with different bytes and intake would refuse the round
+    as `Event retry changed contents` on every round until the grid moved. That round replays and stops.
+
+    A batch is the producer's own short-term memory, not a queue: one per round, bounded by
+    :data:`MAX_PENDING_EVENTS`, validated by `load_cursor` (through ``state.validate_event``) before any
+    of it is sent, and never written when the round has nothing to file.
 
     Outcomes, in the summary's ``result`` field and in the caller's one log line: ``idle`` (every
-    artifact readable and unchanged; may still have baselined new ones), ``delivered`` (at least one
-    event went out and every artifact was readable), ``unreadable`` (something could not be read this
-    round — the dominant answer, so a round that both reported a change and lost a file says
-    ``unreadable``). An undeclared resource raises out of the whole round: identity is not something a
-    partial verdict may be built on.
+    artifact readable and unchanged, and nothing owed; may still have baselined new ones), ``delivered``
+    (at least one event went out — replayed or fresh — and every artifact was readable), ``unreadable``
+    (something could not be read this round — the dominant answer, so a round that both reported a change
+    and lost a file says ``unreadable``). An undeclared resource raises out of the whole round, batch
+    included: identity is not something a partial verdict may be built on, and a binding change refuses
+    the round rather than quietly dropping what it owed.
 
-    The summary carries the `window` judged, the `events` delivered, one `evaluations` row per
-    artifact (both digests, the diff, the fixed `error` code when the artifact was refused, and the one
-    `ack` word from `ACK_STATES` describing what its acknowledgement meant this round) and the
+    The summary carries the `window` judged, the `events` delivered (a replayed batch first, so the count
+    is what left the process) and how many of them `replayed`, one `evaluations` row per artifact (both
+    digests, the diff, the fixed `error` code when the artifact was refused, and the one `ack` word from
+    `ACK_STATES` describing what its acknowledgement meant this round) and the
     `changed`/`baselined`/`unreadable`/`acknowledged` counts the caller's one log line is built from.
-    Nothing in it holds a credential or a file's text except the `diff` field, which `lo-platform drift`
-    prints only when the operator asks for it.
+    The `evaluations` rows describe this round's reads only — a replayed event is not a fresh look at the
+    tree, and pretending otherwise would report an artifact as unreadable in a round that read it.
+    Nothing in the summary holds a credential or a file's text except the `diff` field, which
+    `lo-platform drift` prints only when the operator asks for it.
     """
     path = Path(cursor_path)
     cursor = load_cursor(path, config)
-    seen: Mapping[str, Any] = cursor['seen']
+    binding = str(cursor['binding'])
     window = _window(now, int(config['interval_seconds']))
     with index.readonly(index_path) as connection:
         for entry in config['resources']:
             if index.resolve(connection, resource_id=entry['resource_id'])['status'] != 'resolved':
                 raise ValueError('Detection resource is not declared')
+    replayed: list[dict[str, Any]] = []
+    owed = cursor.get('pending')
+    if owed:
+        # Anything owed goes out first, and goes out as written: these are the bytes the platform was
+        # already shown, so `deliver` failing again leaves them exactly where they are.
+        for item in owed['events']:
+            deliver(item)
+            replayed.append(item)
+        cursor = {**owed['next'], 'settled_end': owed['window']['end']}
+        save_cursor(path, cursor)
+    settled = _settled_end(cursor)
+    if settled is not None and timestamp(window['end']) <= settled:
+        # This survives another restart after the replay receipt was saved. Re-reading here could
+        # assign different contents to an accepted identity or forget a recovery intake ignored.
+        return {'result': 'delivered' if replayed else 'idle', 'window': window, 'events': replayed,
+                'replayed': len(replayed), 'evaluations': [], 'changed': 0, 'baselined': 0,
+                'unreadable': 0, 'acknowledged': 0}
+    seen: Mapping[str, Any] = cursor['seen']
     events: list[dict[str, Any]] = []
     evaluations: list[dict[str, Any]] = []
     remembered: dict[str, dict[str, Any]] = {}
@@ -813,13 +980,24 @@ def tick(index_path: Path | str, config: Mapping[str, Any], cursor_path: Path | 
         _carry_ack(remembered[key], record, acknowledgement.apply)
         evaluations.append(artifact)
         dirty = dirty or remembered[key] != record
-    for item in events:
-        deliver(item)
-    if dirty:
-        save_cursor(path, {'schema_version': 1, 'binding': cursor['binding'], 'seen': remembered})
+    next_cursor: dict[str, Any] = {'schema_version': 1, 'binding': binding, 'seen': remembered,
+                                   'settled_end': window['end']}
+    if events:
+        # The round is in flight from here on: this write is what a crash between "sent" and
+        # "acknowledged" is recovered from, so it happens before the first `deliver` and not after it.
+        save_cursor(path, {**cursor,
+                           'pending': {'binding': binding, 'window': dict(window), 'events': events,
+                                       'next': next_cursor}})
+        for item in events:
+            deliver(item)
+        save_cursor(path, next_cursor)
+    elif dirty:
+        save_cursor(path, next_cursor)
+    delivered = replayed + events
     return {'result': ('unreadable' if any(item['error'] for item in evaluations)
-                       else 'delivered' if events else 'idle'),
-            'window': window, 'events': events, 'evaluations': evaluations,
+                       else 'delivered' if delivered else 'idle'),
+            'window': window, 'events': delivered, 'replayed': len(replayed),
+            'evaluations': evaluations,
             'changed': sum(1 for item in evaluations if item['changed']),
             'baselined': sum(1 for item in evaluations if item['previous_sha256'] is None and not item['error']),
             'unreadable': sum(1 for item in evaluations if item['error']),
@@ -833,7 +1011,10 @@ def main() -> int:
     platform records who said it; the index it resolves against is ``LO_INDEX_PATH``, the same built
     snapshot every other reader here opens. Each round logs one INFO line and a failed round logs a
     WARNING naming the error class, so a silent process is a process that is not running rather than a
-    healthy one with nothing to say. This worker neither reads nor writes a notification mode.
+    healthy one with nothing to say. A round whose delivery was refused or lost leaves the batch it owed
+    in the cursor, so the retry after a restart sends what was already judged instead of re-judging it:
+    this loop needs no queue and no second process, only its own file. This worker neither reads nor
+    writes a notification mode.
     """
     try:
         config = producer_config()
@@ -864,6 +1045,7 @@ def main() -> int:
                                source=source)
                 log.info('Config-drift tick finished',
                          extra={'result': summary['result'], 'events': len(summary['events']),
+                                'replayed': summary['replayed'],
                                 'changed': summary['changed'], 'baselined': summary['baselined'],
                                 'unreadable': summary['unreadable'],
                                 'acknowledged': summary['acknowledged']})

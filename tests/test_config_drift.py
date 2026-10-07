@@ -514,9 +514,10 @@ class TickTests(Fixture):
         """
         self.write_artifact(ORIGINAL)
         summary, _ = self.run_tick()
-        self.assertEqual(set(summary), {'result', 'window', 'events', 'evaluations', 'changed',
+        self.assertEqual(set(summary), {'result', 'window', 'events', 'replayed', 'evaluations', 'changed',
                                         'baselined', 'unreadable', 'acknowledged'})
         self.assertEqual(summary['events'], [])
+        self.assertEqual(summary['replayed'], 0, 'a round that owed nothing counted a replay anyway')
         self.assertEqual([set(row) for row in summary['evaluations']],
                          [{'resource_id', 'name', 'rule_id', 'previous_sha256', 'current_sha256',
                            'changed', 'diff', 'diff_lines', 'error', 'error_class', 'ack'}])

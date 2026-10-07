@@ -483,6 +483,7 @@ def main() -> int:
             result = {'status': summary['result'], 'window': summary['window'],
                       'changed': summary['changed'], 'baselined': summary['baselined'],
                       'unreadable': summary['unreadable'], 'events': filed,
+                      'replayed': summary['replayed'],
                       'evaluations': summary['evaluations']}
         elif args.command == 'conditions':
             # One round of the same producer `python -m local_observe.platform.conditions` will loop when
@@ -547,6 +548,8 @@ def main() -> int:
                 result = {'status': summary['result'], 'window': summary['window'],
                           'verdict': summary['verdict'], 'notes': summary['notes'],
                           'affected': summary['affected'], 'failing': summary['failing'],
+                          'coverage_gaps': summary['coverage_gaps'],
+                          'replayed_events': summary['replayed_events'],
                           'open_finding': summary['open_finding'], 'intake': filed,
                           'observations': summary['observations'],
                           'route_findings': summary['route_findings'],

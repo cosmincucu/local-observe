@@ -1051,12 +1051,16 @@ class Store:
                         connection.execute('UPDATE incidents SET updated_at=? WHERE id=?',
                                            (utc_text(now), incident_id))
                     else:
-                        connection.execute("UPDATE incidents SET status='resolved',updated_at=?,last_event_id=?"
-                                           ' WHERE id=?', (utc_text(now), event_id, incident_id))
+                        connection.execute("UPDATE incidents SET status='resolved',updated_at=?,"
+                                           'last_event_id=CASE WHEN condition_key=? THEN ? ELSE last_event_id END'
+                                           ' WHERE id=?', (utc_text(now), key, event_id, incident_id))
                     transition = 'resolved' if not open_members else None
                 elif incident_id:
-                    connection.execute('UPDATE incidents SET updated_at=?,last_event_id=? WHERE id=?',
-                                       (utc_text(now), event_id, incident_id))
+                    # Refresh the subject only from its own condition. Other members retain their
+                    # current verdict in conditions/events without changing the incident's identity.
+                    connection.execute('UPDATE incidents SET updated_at=?,'
+                                       'last_event_id=CASE WHEN condition_key=? THEN ? ELSE last_event_id END'
+                                       ' WHERE id=?', (utc_text(now), key, event_id, incident_id))
                 connection.execute('INSERT OR REPLACE INTO conditions VALUES (?,?,?,?,?)',
                     (key, watermark, event_id, event['status'],
                      None if event['status'] == 'resolved' else incident_id))

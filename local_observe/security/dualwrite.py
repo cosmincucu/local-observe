@@ -206,7 +206,7 @@ class SinkVerdict:
     @property
     def healthy(self) -> bool:
         """True when the store took the write (or had nothing to take) and the live TTL agrees."""
-        return self.store in ('written', 'idle') and (self.ttl is None or self.ttl.matches)
+        return self.store in ('written', 'idle') and self.ttl is not None and self.ttl.matches
 
     def as_dict(self) -> dict[str, Any]:
         """Return the verdict as JSON-safe text, with the TTL answer flattened into it."""
@@ -232,6 +232,7 @@ class SecuritySink:
             raise SecurityStoreRefused('the sink needs the owned store, not a transport')
         self.store, self.interval = store, check_interval_seconds
         self.last_check: dt.datetime | None = None
+        self.last_comparison: TtlComparison | None = None
 
     def record(self, events: Sequence[dict[str, Any]], *, now: dt.datetime,
                artifact_sha256: str = '', received_at: str | None = None) -> SinkVerdict:
@@ -261,13 +262,19 @@ class SecuritySink:
         return SinkVerdict(store=status, rows=rows, ttl=comparison, report=report, detail=detail)
 
     def _ttl_check(self, now: dt.datetime) -> tuple[TtlComparison | None, bool]:
-        """Return the TTL verdict and whether it was read on this call (``None, False`` when skipped)."""
+        """Return the last TTL verdict and whether this call refreshed it.
+
+        Skipping a scheduled read cannot clear a previous drift or unreadable result. Only a
+        subsequent successful comparison can establish recovery, even when writes keep succeeding.
+        """
         if self.last_check is not None and now < self.last_check + dt.timedelta(seconds=self.interval):
-            return None, False
-        self.last_check = now
+            return self.last_comparison, False
         try:
             verdict: TtlVerdict = self.store.verify_ttl(now=now)
         except SecurityStoreUnavailable as exc:
-            return TtlComparison(status='unreadable', declared=self.store.policy, live=None,
-                                 detail=str(exc)), True
-        return verdict.comparison, True
+            self.last_comparison = TtlComparison(status='unreadable', declared=self.store.policy, live=None,
+                                                 detail=str(exc))
+        else:
+            self.last_comparison = verdict.comparison
+        self.last_check = now
+        return self.last_comparison, True

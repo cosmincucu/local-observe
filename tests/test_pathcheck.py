@@ -32,6 +32,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from local_observe.http import TransportError
 from local_observe.inventory import index
 from local_observe.inventory.validation import read_document, timestamp, utc_text
 from local_observe.platform import cli, pathcheck
@@ -216,6 +217,24 @@ class VerdictMatrixTests(unittest.TestCase):
             observed(T2, V1, True), observed(T2, V2, False),
             observed(T3, V1, True), observed(T3, V2, True)], [V1, V2], [T1, T2, T3],
             'indeterminate'),
+        # --- the required set is a grid, not a head-count -------------------------------------------
+        # Each of these has every expected reporter present and every expected target probed by
+        # somebody. A cell is still blank, and a blank cell is a coverage gap, not a healthy round.
+        ('each expected vantage probed a different target', [
+            observed(T1, V1, True), observed(T2, V2, True)], [V1, V2], [T1, T2],
+            'indeterminate'),
+        ('the same pair reported twice is one observation, not two', [
+            observed(T1, V1, True), observed(T1, V1, True)], [V1], [T1], 'ok'),
+        ('a duplicate of one pair never fills the blank cell beside it', [
+            observed(T1, V1, True), observed(T1, V1, True),
+            observed(T2, V1, True), observed(T2, V2, True)], [V1, V2], [T1, T2],
+            'indeterminate'),
+        ('an expected vantage that probed only unconfigured targets owes what it was told', [
+            observed(T1, V1, True), observed(T2, V1, True), observed(T3, V2, True)], [V1, V2],
+            [T1, T2], 'indeterminate'),
+        ('a dead target the other vantage never looked at is a gap, not a verdict', [
+            observed(T1, V1, False), observed(T2, V1, True), observed(T2, V2, True)], [V1, V2],
+            [T1, T2], 'indeterminate'),
     ]
 
     def setUp(self) -> None:
@@ -333,6 +352,58 @@ class CoverageGapTests(Fixture):
         verdict = self.classify([observed(API, VANTAGE, True), observed(API, SIBLING, True)])
         self.assertEqual(verdict.verdict, 'ok')
 
+    def test_a_blank_pair_between_two_live_reporters_is_a_gap_and_not_a_head_count(self):
+        """Both expected vantages reported and both expected targets were probed. A cell is still blank.
+
+        This is the shape v0.1 read as health: each half of the grid is complete about *something*, and
+        the note it wrote (`all 2 target(s) reachable from all 2 vantage point(s)`) was a sentence about
+        the reporters, not about what they owed. Coverage is per required pair, so two half-reports are
+        two gaps and the verdict says which cells are empty.
+        """
+        verdict = self.classify([observed(API, VANTAGE, True), observed(ROUTER, SIBLING, True)],
+                                expected_targets=[API, ROUTER])
+        self.assertEqual(verdict.verdict, 'indeterminate')
+        self.assertEqual(verdict.coverage_gaps, ((API, SIBLING), (ROUTER, VANTAGE)))
+        self.assertTrue(any(API in line and SIBLING in line for line in verdict.notes), verdict.notes)
+        self.assertTrue(any(ROUTER in line and VANTAGE in line for line in verdict.notes),
+                        verdict.notes)
+
+    def test_supplying_the_owed_pairs_clears_a_grid_no_single_reporter_could(self):
+        verdict = self.classify([observed(API, VANTAGE, True), observed(ROUTER, SIBLING, True),
+                                 observed(ROUTER, VANTAGE, True), observed(API, SIBLING, True)],
+                                expected_targets=[API, ROUTER])
+        self.assertEqual((verdict.verdict, verdict.coverage_gaps), ('ok', ()))
+
+    def test_duplicating_an_observed_pair_does_not_fill_the_one_beside_it(self):
+        verdict = self.classify([observed(API, VANTAGE, True), observed(API, VANTAGE, True),
+                                 observed(API, SIBLING, True), observed(API, SIBLING, True),
+                                 observed(ROUTER, SIBLING, True)], expected_targets=[API, ROUTER])
+        self.assertEqual(verdict.verdict, 'indeterminate')
+        self.assertEqual(verdict.coverage_gaps, ((ROUTER, VANTAGE),))
+
+    def test_a_vantage_nobody_expected_owes_nothing_and_covers_nothing(self):
+        """The grid is the product of the two expected sets, so a third reporter changes no requirement.
+
+        Counting an unexpected vantage as coverage is how one process would borrow another's silence as
+        evidence, and refusing one is how a deployment that added a probe would have to edit every
+        configuration at once. Neither: it adds no requirement, and it satisfies none.
+        """
+        verdict = self.classify([observed(API, VANTAGE, True), observed(API, THIRD, True)],
+                                expected_vantage_points=[VANTAGE])
+        self.assertEqual((verdict.verdict, verdict.coverage_gaps), ('ok', ()))
+
+    def test_an_expected_vantage_that_reported_elsewhere_owes_its_own_blanks(self):
+        """A vantage point that probed an unconfigured target has still said nothing about these."""
+        verdict = self.classify([observed(API, VANTAGE, True), observed(ROUTER, VANTAGE, True),
+                                 observed(CACHE, SIBLING, True)], expected_targets=[API, ROUTER])
+        self.assertEqual(verdict.verdict, 'indeterminate')
+        self.assertEqual(verdict.coverage_gaps, ((API, SIBLING), (ROUTER, SIBLING)))
+
+    def test_the_gap_list_is_complete_even_when_a_reporter_or_target_is_missing_wholesale(self):
+        """The notes may group a hole into one sentence; the structured list may not hide cells."""
+        verdict = self.classify([observed(API, VANTAGE, True)], expected_targets=[API, ROUTER])
+        self.assertEqual(verdict.coverage_gaps, ((API, SIBLING), (ROUTER, VANTAGE), (ROUTER, SIBLING)))
+
     def test_a_blind_round_is_indeterminate_coverage_about_the_source_and_never_ok(self):
         self.reports.rmdir()  # the mount is not there at all
         summary, delivered = self.round()
@@ -351,6 +422,97 @@ class CoverageGapTests(Fixture):
         self.assertEqual(summary['verdict'], 'indeterminate')
         self.assertEqual(delivered.events[0]['kind'], 'coverage')
         self.assertTrue(any(VANTAGE in line for line in summary['notes']), summary['notes'])
+
+
+class RequiredPairCoverageTests(Fixture):
+    """What one producer owes, as the round reports it: a grid of pairs, not a count of files.
+
+    The expected set here is the configuration's own: this vantage point against these targets, so the
+    required observations are every target seen *from this vantage*. A sibling's report can corroborate
+    a verdict and can never complete this producer's coverage — the sibling has a different uplink, a
+    different route and a different idea of what `ok` cost. That asymmetry is what `tick` documents and
+    what these tests pin down: the round that used to print "all 2 targets from all 2 vantage points"
+    while each reporter had a blank in its own list now prints `indeterminate`, names the cells, and
+    files the coverage event that the missing data actually earned.
+    """
+
+    def split_grid(self, *, observed_at: dt.datetime = WATERMARK) -> None:
+        """One round where each vantage point reports a different half of the configured target set."""
+        self.write_report([self.probe(API, True)], observed_at=observed_at)
+        self.write_report([self.probe(ROUTER, True)], vantage=SIBLING, name='sibling.json',
+                          observed_at=observed_at)
+
+    def test_a_target_only_a_sibling_probed_is_not_coverage_for_this_vantage(self):
+        self.split_grid()
+        summary, delivered = self.round()
+        self.assertEqual(summary['verdict'], 'indeterminate')
+        self.assertEqual(summary['coverage_gaps'], [[ROUTER, VANTAGE]])
+        self.assertEqual([(item['kind'], item['status']) for item in delivered.events],
+                         [('coverage', 'firing')])
+        self.assertEqual(summary['open_finding'], {'kind': 'coverage',
+                                                   'rule_id': 'pathcheck.coverage'})
+        self.assertTrue(any(ROUTER in line and VANTAGE in line for line in summary['notes']),
+                        summary['notes'])
+
+    def test_supplying_the_owed_observation_clears_the_condition_it_opened(self):
+        self.split_grid()
+        self.round()
+        self.write_report([self.probe(API, True), self.probe(ROUTER, True)], observed_at=LATER)
+        later = LATER + dt.timedelta(seconds=5)
+        summary, delivered = self.round(now=later, deliverer=Deliverer(self.store, now=later))
+        self.assertEqual(summary['verdict'], 'ok')
+        self.assertEqual(summary['coverage_gaps'], [])
+        self.assertEqual([(item['status'], item['rule_id']) for item in delivered.events],
+                         [('resolved', 'pathcheck.coverage')])
+        self.assertIsNone(summary['open_finding'])
+
+    def test_a_still_blank_grid_keeps_the_coverage_condition_open_and_files_nothing_new(self):
+        """Partial coverage may not read as recovery: the condition closes on data, not on relief."""
+        self.round()  # blind, so the coverage condition opens
+        self.split_grid(observed_at=LATER)
+        later = LATER + dt.timedelta(seconds=5)
+        summary, delivered = self.round(now=later, deliverer=Deliverer(self.store, now=later))
+        self.assertEqual(summary['verdict'], 'indeterminate')
+        self.assertEqual(delivered.events, [], 'a round with a blank cell paged coverage a second time')
+        self.assertEqual(summary['coverage_gaps'], [[ROUTER, VANTAGE]])
+        self.assertEqual(summary['open_finding'], {'kind': 'coverage',
+                                                   'rule_id': 'pathcheck.coverage'})
+
+    def test_a_dead_target_beside_a_blank_cell_files_coverage_not_an_outage(self):
+        """The pattern the data supports stays readable; the verdict it would have earned does not."""
+        self.write_report([self.probe(API, False)])
+        self.write_report([self.probe(ROUTER, True)], vantage=SIBLING, name='sibling.json')
+        summary, delivered = self.round()
+        self.assertEqual(summary['verdict'], 'indeterminate')
+        self.assertEqual([(item['kind'], item['status']) for item in delivered.events],
+                         [('coverage', 'firing')])
+        self.assertEqual(summary['affected'], [], 'a degraded verdict kept an implication it did not earn')
+        self.assertEqual(summary['coverage_gaps'], [[ROUTER, VANTAGE]])
+        self.assertTrue(any('"target"' in line for line in summary['notes']), summary['notes'])
+
+    def test_a_sibling_that_reports_nothing_owes_this_producer_nothing(self):
+        """One process per vantage point: the shared directory is not a promise about its neighbours."""
+        self.write_report([self.probe(API, True), self.probe(ROUTER, True)])
+        summary, delivered = self.round()
+        self.assertEqual((summary['verdict'], summary['coverage_gaps']), ('ok', []))
+        self.assertEqual(delivered.events, [])
+
+    def test_the_same_target_reported_twice_in_one_report_is_not_a_gap(self):
+        """A probe runner that writes a target twice is untidy, not blind: the pair was observed."""
+        self.write_report([self.probe(API, True), self.probe(API, True), self.probe(ROUTER, True)])
+        summary, delivered = self.round()
+        self.assertEqual((summary['verdict'], summary['coverage_gaps']), ('ok', []))
+        self.assertEqual(delivered.events, [])
+
+    def test_a_target_nobody_probed_at_all_is_a_gap_this_vantage_owns_alone(self):
+        """The whole-target hole still names every required cell it leaves blank."""
+        self.write_report([self.probe(API, True)])
+        summary, delivered = self.round()
+        self.assertEqual(summary['verdict'], 'indeterminate')
+        self.assertEqual(summary['coverage_gaps'], [[ROUTER, VANTAGE]])
+        self.assertTrue(any(ROUTER in line and 'not probed' in line for line in summary['notes']),
+                        summary['notes'])
+        self.assertEqual(delivered.events[0]['kind'], 'coverage')
 
 
 class BgpSeamTests(unittest.TestCase):
@@ -839,9 +1001,10 @@ class ReportHygieneTests(Fixture):
             {'schema_version': 1, 'vantage_resource_id': VANTAGE, 'observed_at': utc_text(WATERMARK),
              'probes': [], 'traces': []},
         ]
-        for document in cases:
+        for position, document in enumerate(cases):
             with self.subTest(keys=sorted(document)):
                 self.write_raw_report(document, 'bad.json')
+                self.cursor = self.root / f'hygiene-{position}.json'
                 summary, _ = self.round()
                 self.assertEqual(summary['unparseable_reports'], 1, document)
 
@@ -954,6 +1117,27 @@ class CommandLineTests(Fixture):
         self.assertEqual(code, 0)
         self.assertEqual(result['status'], 'idle')
         self.assertEqual(result['intake'], [])
+
+    def test_the_cli_reports_a_replayed_batch_and_files_what_the_producer_owed(self):
+        """The one JSON line an operator sees says `replayed`: the round finishes old work, not new.
+
+        The cursor holds a batch because a delivery answered nothing, and the CLI round that finds it
+        sends those bytes rather than judging the reports in front of it. `verdict` is null on purpose:
+        the honest answer to "what did this round conclude" is that it looked at nothing.
+        """
+        self.write_report([self.probe(API, False), self.probe(ROUTER, True)])
+
+        def no_answer(item: dict) -> None:
+            raise TransportError('Synthetic intake that never answered')
+
+        with self.assertRaises(TransportError):
+            pathcheck.tick(self.index, self.config(), self.cursor, no_answer, now=NOW, source=SOURCE)
+        code, result, _ = self.pathcheck_round()
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'replayed')
+        self.assertIsNone(result['verdict'])
+        self.assertEqual([item['transition'] for item in result['intake']], ['opened'])
+        self.assertIsNone(json.loads(self.cursor.read_text(encoding='utf-8'))['pending'])
 
     def test_no_config_named_is_off_and_opens_nothing(self):
         code, result, _ = self.run_cli('pathcheck')
