@@ -111,3 +111,49 @@ The private repo owns declarations. Index snapshots are derived artifacts, not
 the source of truth. Recovery must bind a rebuild to the exact declaration
 revision and compare its contents. Pending discovery/proposal state is not
 disposable merely because the inventory index can be rebuilt.
+
+## Exporting to LogicMonitor
+
+`logicmonitor.py` keeps a LogicMonitor portal's device list in step with the
+declaration, in one direction only. LogicMonitor never feeds anything back into
+the inventory, and the export never deletes a LogicMonitor device.
+
+```bash
+lo-inventory build declared.yaml --output inventory.db --revision "$(git rev-parse HEAD)"
+lo-inventory export-logicmonitor --index inventory.db \
+  --config logicmonitor-export.json --token-file /run/secrets/logicmonitor-bearer
+```
+
+Without `--apply` the command lists the changes it would make and writes
+nothing to the portal. Review that output, then repeat with `--apply`. The token
+file holds a LogicMonitor Bearer API token for a user allowed to read and manage
+devices. The configuration (see `examples/inventory/logicmonitor-export.json`)
+names the portal, the attributes copied as properties, the change limit, and
+whether and where new devices may be created.
+
+Each declared resource is carried as properties with the configured prefix
+(`lo.` by default): `lo.resource_id`, `lo.kind`, `lo.owner` and one property per
+listed attribute. LogicMonitor dynamic groups and alert rules can then select on
+them. For example, a group with `lo.monitoring == "priority"` collects the devices
+the operator cares about most, and devices whose `lo.presence` says absence is
+normal can be left out of dead-device alerting.
+
+How the export pairs resources with devices, strongest first:
+
+1. A device whose `lo.resource_id` names the resource.
+2. An explicit `adopt` pin in the configuration (resource UUID → device id).
+3. Exactly one device whose display name or polling address matches the
+   resource's name, a `hostname` or `ip` alias, or its `hostname_reported`
+   attribute. Names are compared without case, spacing, punctuation or DNS
+   domain. If a device matches two resources, neither adopts it.
+4. A match on the `ip_observed` attribute alone, a DHCP lease, is only listed for
+   review: a stale device at a reused address is a different machine. Confirm it
+   by adding a pin.
+5. A resource with no candidate is created only when `create.enabled` is true,
+   it satisfies `create.when`, and it has a host name or address to poll.
+
+A matched device gets the resource's name as its display name (`rename`, on by
+default) unless another device already uses that name. Devices that claim a
+resource the declaration no longer holds are reported as orphans and left alone.
+`--apply` refuses a plan with more changes than `max_changes`. Updates use
+`opType=replace`, so properties the export does not manage are kept.

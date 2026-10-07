@@ -61,6 +61,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     forge.add_argument('--base-branch', required=True)
     forge.add_argument('--declaration-path', required=True)
     forge.add_argument('--token-file', type=Path, required=True)
+    export = commands.add_parser('export-logicmonitor',
+                                 help='plan (default) or apply a one-way export of the index to LogicMonitor')
+    export.add_argument('--index', type=Path, required=True)
+    export.add_argument('--config', type=Path, required=True)
+    export.add_argument('--token-file', type=Path, required=True,
+                        help='file holding a LogicMonitor Bearer API token')
+    export.add_argument('--apply', action='store_true',
+                        help='perform the planned changes; without it nothing is written to LogicMonitor')
     args = parser.parse_args(argv)
     try:
         if args.command == 'validate':
@@ -100,6 +108,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise InvalidInventory('Discovery failed; error snapshot retained') from exc
             result = discovery.ingest(args.database, document, now=now)
             result['observations'] = len(document['observations'])
+        elif args.command == 'export-logicmonitor':
+            from . import logicmonitor
+            from local_observe.http import JsonClient
+            config = logicmonitor.load_config(read_document(args.config))
+            with index.readonly(args.index) as connection:
+                resources = logicmonitor.read_resources(connection)
+            client = JsonClient(logicmonitor.portal_base(config), args.token_file.read_text().strip(), timeout=20)
+            result = logicmonitor.plan(resources, logicmonitor.fetch_devices(client), config)
+            result['mode'] = 'apply' if args.apply else 'dry-run'
+            if args.apply:
+                result['applied'] = logicmonitor.apply(client, result, config['max_changes'])
+                if result['applied']['failed']:
+                    print(json.dumps(result, indent=2, sort_keys=True))
+                    return 1
         else:
             from .forge import publish
             from local_observe.http import JsonClient

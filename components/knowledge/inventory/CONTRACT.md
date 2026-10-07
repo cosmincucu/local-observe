@@ -44,3 +44,6 @@ establish absence. Missing requires fresh successful complete scope. Partial
 attribute observations compare only declared keys actually reported. Local
 proposal JSON is review-only, mints a UUID once and never edits declarations.
 Automatic forge PR delivery and live provider adapters remain unimplemented.
+The optional LogicMonitor export (`lo-inventory export-logicmonitor`) is one-way:
+it plans by default, applies only with `--apply` under a change limit, reads its
+Bearer token from a file and never deletes a LogicMonitor device.

@@ -16,6 +16,11 @@ The evaluator compares the actual observer with deterministic baselines and pres
 unknown labels and incomplete coverage. Synthetic validation does not establish live
 model quality, hardware fit or human review workload.
 
+The inventory can be exported one way to a LogicMonitor portal with
+`lo-inventory export-logicmonitor`. The command plans by default, adopts existing devices
+only on unambiguous matches, never deletes a device, and needs `--apply` within a change
+limit before it writes anything.
+
 ### Operator actions
 
 - Route receipts are opt-in through `LO_OBSERVER_MODEL_ROUTES`; follow the protected declaration

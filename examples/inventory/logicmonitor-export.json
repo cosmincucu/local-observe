@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "portal": "example",
+  "property_prefix": "lo.",
+  "attributes": ["class", "presence", "monitoring", "network"],
+  "rename": true,
+  "max_changes": 25,
+  "adopt": {},
+  "create": {
+    "enabled": false,
+    "collector_id": 1,
+    "host_group_ids": [],
+    "dns_suffix": "example.invalid",
+    "when": {"monitoring": ["priority"]}
+  }
+}
