@@ -1,5 +1,5 @@
 -r requirements-test-base.txt
-mcp==1.29.1
+mcp==1.30.0
 # CI tooling. Test/CI only: never imported by product code, never listed in pyproject, and the
 # hash-locked Sigma compiler tier does not install this file. Pins are exact because a formatter or
 # tracer that changes under a green job turns a lint/coverage gate into a moving target.
