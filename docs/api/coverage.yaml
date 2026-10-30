@@ -138,18 +138,58 @@ operations:
      module: local_observe/platform/suppression.py, access: write, required_role: [local],
      side_effects: "none available from a command line", state_source: "sqlite notification_control", status: excluded, owner_area: maintenance,
      notes: "The read-only CLI refuses to declare: minting Actor(identity,'human') from a flag would claim a role the caller never proved. declare_window is reached by a caller holding a real human actor."}
-  - {operation_id: maintenance.window.declare, surface: http, method: POST, path: /v1/maintenance/windows, resource: maintenance-window,
-     module: local_observe/platform/suppression.py, access: write, required_role: [human],
-     side_effects: "one maintenance:<id> control document, one maintenance.declared audit row it is attested against", state_source: "sqlite notification_control", status: planned, owner_area: maintenance,
-     notes: "Milestone F2. The library call, its bounds and its attested read exist; the HTTP write route is the missing half `suppression.main` names as a follow-up."}
-  - {operation_id: maintenance.window.revoke, surface: http, method: POST, path: /v1/maintenance/windows/revoke, resource: maintenance-window,
-     module: local_observe/platform/suppression.py, access: write, required_role: [human],
-     side_effects: "revoked marker on the control document plus its audit row; a live window stops covering immediately", state_source: "sqlite notification_control", status: planned, owner_area: maintenance,
-     notes: "Milestone F2. Revoke is a separate operation from declare because a revocation must be legible in the audit history on its own."}
-  - {operation_id: maintenance.window.read, surface: http, method: GET, path: /v1/maintenance/windows, resource: maintenance-window,
-     module: local_observe/platform/suppression.py, access: read, required_role: [reader, producer, proposer, human, executor],
-     side_effects: none, state_source: "sqlite notification_control", status: planned, owner_area: maintenance,
-     notes: "Milestone F2. The same `live_windows` answer the CLI gives, over the credential the platform already issues."}
+  - {operation_id: maintenance.window.declare, surface: http, method: POST, path: /v1/maintenance-windows, resource: maintenance-window,
+     module: local_observe/platform/maintenance_api.py, access: write, required_role: [human],
+     side_effects: "one maintenance:<id> control document per scope member, each with its own maintenance.declared audit row it is attested against", state_source: "sqlite notification_control", status: implemented, owner_area: maintenance,
+     notes: "A silence over a `resource`, `service` or `rule` scope, planned in advance and signed by a human credential. A service scope declares one window per member and answers with every id. A window whose end has already passed is refused: see docs/api/maintenance.md."}
+  - {operation_id: maintenance.window.revoke, surface: http, method: POST, path: "/v1/maintenance-windows/{id}/cancellations", resource: maintenance-window,
+     module: local_observe/platform/maintenance_api.py, access: write, required_role: [human],
+     side_effects: "revoked marker on the control document plus its audit row; a live window stops covering immediately", state_source: "sqlite notification_control", status: implemented, owner_area: maintenance,
+     notes: "Cancelling one window leaves an overlapping sibling running: the delivery path asks whether any live window covers a finding, so a cancellation that took a second author's silence with it would end work nobody cancelled. Takes an empty body; the durable revoke records who and when and keeps no free text."}
+  - {operation_id: maintenance.window.read, surface: http, method: GET, path: /v1/maintenance-windows, resource: maintenance-window,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite notification_control + audit attestation", status: implemented, owner_area: maintenance,
+     notes: "The same `live_windows` answer the CLI gives, over the credential the platform already issues, with `bound_exceeded`, `unusable` and `unattested` beside the rows. `producer` is deliberately absent: a detector that could read which silences cover its own findings could time them."}
+  - {operation_id: maintenance.window.detail.read, surface: http, method: GET, path: "/v1/maintenance-windows/{id}", resource: maintenance-window,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite notification_control + audit attestation + incidents", status: implemented, owner_area: maintenance,
+     notes: "One window by id, expired or revoked rows included, with the outcome the platform observed (planned, active, completed, cancelled, unused, overrun, unknown) and the evidence lines behind it."}
+  - {operation_id: maintenance.window.history.read, surface: http, method: GET, path: "/v1/maintenance-windows/{id}/history", resource: maintenance-window,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite notification_control, audit and notification rows", status: implemented, owner_area: maintenance,
+     notes: "The window's timeline: declared, revoked, and each page it folded, attributed to this window by the delivery path that folded it."}
+  - {operation_id: maintenance.schedule.declare, surface: http, method: POST, path: /v1/maintenance-schedules, resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: write, required_role: [human],
+     side_effects: "one maintenance_schedules version, one window per occurrence per member up to the materialization horizon, one audit row per write", state_source: "sqlite maintenance_schedules (schema v12) + notification_control", status: implemented, owner_area: maintenance,
+     notes: "A recurring plan with a finite bound: an IANA timezone, an explicit DST policy, and either an occurrence count or an end date. Open-ended silence is refused — unbounded silence is not maintenance."}
+  - {operation_id: maintenance.schedule.list, surface: http, method: GET, path: /v1/maintenance-schedules, resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite maintenance_schedules (schema v12)", status: implemented, owner_area: maintenance,
+     notes: "Current version of every schedule by state, counting rows this build cannot read rather than dropping them."}
+  - {operation_id: maintenance.schedule.read, surface: http, method: GET, path: "/v1/maintenance-schedules/{id}", resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite maintenance_schedules (schema v12) + notification_control", status: implemented, owner_area: maintenance,
+     notes: "The current version, its version list, the occurrences still to come and the horizon already materialized. Reports what has been declared; never declares anything."}
+  - {operation_id: maintenance.schedule.history.read, surface: http, method: GET, path: "/v1/maintenance-schedules/{id}/history", resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite maintenance_schedules (schema v12) + audit attestation", status: implemented, owner_area: maintenance,
+     notes: "Every version of a plan, each with whether a human attests it — the answer to what the plan said in October, read in November."}
+  - {operation_id: maintenance.schedule.revise, surface: http, method: PATCH, path: "/v1/maintenance-schedules/{id}", resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: write, required_role: [human],
+     side_effects: "a new maintenance_schedules version, revocations of the plan's unstarted windows from earlier versions, new windows for the slice after the edit", state_source: "sqlite maintenance_schedules (schema v12) + notification_control", status: implemented, owner_area: maintenance,
+     notes: "The transport's only PATCH. Conditional: `expected_version` is required and a mismatch answers 412. Edits append — a window already running is left exactly as it was, and the version it was declared under stays readable."}
+  - {operation_id: maintenance.schedule.cancel, surface: http, method: POST, path: "/v1/maintenance-schedules/{id}/cancellations", resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: write, required_role: [human],
+     side_effects: "a cancelled version plus revocations of every unstarted window the plan declared", state_source: "sqlite maintenance_schedules (schema v12) + notification_control", status: implemented, owner_area: maintenance,
+     notes: "Cancelling a plan cancels its future, not its past: windows that already ran keep their rows and their outcomes."}
+  - {operation_id: maintenance.schedule.materialize, surface: http, method: POST, path: "/v1/maintenance-schedules/{id}/materializations", resource: maintenance-schedule,
+     module: local_observe/platform/maintenance_api.py, access: write, required_role: [human],
+     side_effects: "windows for the next bounded slice of occurrences, one audit row naming the slice", state_source: "sqlite maintenance_schedules (schema v12) + notification_control", status: implemented, owner_area: maintenance,
+     notes: "Roll-forward is a human write, not a timer: at most MAX_MATERIALIZED_OCCURRENCES occurrences per pass, never more than 35 days ahead. A scheduled job that signs declarations would put a machine's name on a silence."}
+  - {operation_id: maintenance.interval.read, surface: http, method: GET, path: /v1/maintenance-intervals, resource: maintenance-interval,
+     module: local_observe/platform/maintenance_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite notification_control (history read), maintenance_schedules, incidents", status: implemented, owner_area: maintenance,
+     notes: "Two questions in one route: `resource|service|rule` with `from` and `to` gives the bounded history of what was quiet and why; the same scope with `at` (optional `class`) classifies one instant — planned, outside or unknown — which is how a late fact reaches the window that planned it."}
   - {operation_id: maintenance.window.list, surface: cli, method: read, path: "python -m local_observe.platform.suppression windows", resource: maintenance-window,
      module: local_observe/platform/suppression.py, access: read, required_role: [local],
      side_effects: none, state_source: "sqlite notification_control + audit attestation", status: implemented, owner_area: maintenance,

@@ -1,7 +1,7 @@
 # The platform HTTP contract, OpenAPI 3.1.
 #
-# Every operation served by `local_observe.platform.api:create_app` and the two seams it hands paths to
-# (`verification_api`, `observer_review`), plus the operator shell in `operator.py`. Accuracy rule for
+# Every operation served by `local_observe.platform.api:create_app` and the three seams it hands paths to
+# (`verification_api`, `observer_review`, `maintenance_api`), plus the operator shell in `operator.py`. Accuracy rule for
 # this file: a response schema is what the code returns, and where a body is a documented superset (a
 # runtime snapshot, a record row) that is said in the description rather than hidden behind `{}`.
 #
@@ -21,7 +21,9 @@ info:
 
     * One bearer credential per caller, assigned one of six server-side roles: `reader`, `producer`,
       `proposer`, `human`, `executor`, `summary`. A body never names an actor (§5 of `docs/CONTRACTS.md`).
-    * Two verbs: `GET` reads, `POST` writes. Every other verb is answered `405`.
+    * Two verbs carry everything: `GET` reads, `POST` writes. One route also answers `PATCH` —
+      `/v1/maintenance-schedules/{id}`, where an edit appends a version and a `POST` would mean a second
+      plan. Every other verb on every other path is answered `405`.
     * Answers before the envelope existed keep the flat shape `{"error": "<code>", "detail": "<sentence>"}`.
       Answers produced through the shared boundary use `{"error": {"code", "message", "request_id"}}`, and
       `X-Request-Id` is echoed on every response, including the flat ones. `tests/test_api_errors.py` pins
@@ -78,6 +80,8 @@ tags:
     description: Guided setup plans, human decisions and the trusted runner handoff.
   - name: operator
     description: The static shell and the one question it may ask without a credential.
+  - name: maintenance
+    description: Declared silences, the plans that repeat them, and what became of each.
 paths:
   /v1/me:
     get:
@@ -1733,77 +1737,643 @@ paths:
                 $ref: '#/components/schemas/StatusResult'
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/maintenance/windows:
+  /v1/maintenance-windows:
     get:
-      tags: [occurrences]
+      tags: [maintenance]
       operationId: maintenance.window.read
-      x-status: planned
-      x-required-role: [reader, producer, proposer, human, executor]
-      summary: The live windows, each with whether its attestation can be trusted.
-      description: Not served. `platform/suppression.live_windows` already answers this question for the CLI.
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: The windows this platform is holding, each with whether its attestation can be trusted.
+      description: |
+        `suppression.live_windows` over a credential: the declared rows whose span has not ended, ordered by
+        (starts_at, id), with `covers_now` saying whether each one is covering at the instant of the read.
+        A `service`-scoped plan appears as one row per member, because that is what the delivery path matches.
+
+        Three counts sit beside the rows and each of them can be the real answer: `unusable` (a stored
+        document this build cannot validate, which suppresses nothing and needs a human), `unattested` (a
+        row whose `maintenance.declared` audit evidence is missing, which also suppresses nothing), and
+        `bound_exceeded` (the scan stopped at `max_rows`, so the list is not whole and absence in it is not
+        absence in the estate). `producer` is deliberately not in the role list: a detector that could read
+        which silences cover its own findings could schedule its findings around them.
       responses:
         '200':
-          description: The windows.
+          description: The live windows and the health of the read that produced them.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BoundedPage'
-        '404':
-          $ref: '#/components/responses/NotFound'
+                $ref: '#/components/schemas/MaintenanceWindowList'
     post:
-      tags: [occurrences]
+      tags: [maintenance]
       operationId: maintenance.window.declare
-      x-status: planned
+      x-status: implemented
       x-required-role: [human]
-      summary: Declare a bounded maintenance window.
+      summary: Declare one planned silence over a resource, a service or a rule.
       description: |
-        Not served. This is the missing HTTP write the CLI's own docstring names: the library call, its
-        bounds (`MAX_WINDOW_SECONDS`, refused at declaration *and* at every use) and its audit attestation
-        exist; the route does not. A human credential is the whole point — a command line that minted a
-        human actor from a flag would be claiming a role the caller never proved.
+        The write half of what `suppression.declare_window` already did for a caller holding a human actor.
+        The scope expands here and the durable shape stays the one the delivery path reads: a `service`
+        scope declares **one window per member** of the built inventory index and answers with every id, so
+        nobody has to guess how wide a silence they signed. A member added tomorrow is not covered.
+
+        `explains` defaults to `availability, restart, silence, freshness` and not to everything:
+        `security`, `backup-integrity`, `application` and `unclassified` findings page through a window
+        unless the declaration names them. `starts_at`/`ends_at` are timezone-aware, the span may not exceed
+        `max_seconds` (24 hours), and a window whose end has already passed is refused — see
+        `docs/api/maintenance.md` for the retroactive stance. The author is the credential, never a body field.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceWindowDeclaration'
       responses:
         '200':
-          description: The declared window.
+          description: Declared, or `duplicate` in `status` for the identical declaration already stored.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
           content:
             application/json:
               schema:
-                type: object
+                $ref: '#/components/schemas/MaintenanceWindowDeclared'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
         '409':
           oneOf:
             - $ref: '#/components/responses/IdempotencyConflict'
             - $ref: '#/components/responses/RequestInProgress'
+            - $ref: '#/components/responses/Conflict'
+  /v1/maintenance-windows/{id}:
+    get:
+      tags: [maintenance]
+      operationId: maintenance.window.detail.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: One window by id — expired and revoked rows included — with the outcome observed.
+      description: |
+        The record as stored (the span, selector, author, envelope version and condition classes a human
+        signed) plus the outcome the platform computed from its own log: `planned`, `active`, `completed`,
+        `cancelled`, `unused`, `overrun` or `unknown`, each with the evidence lines that earned it. Expired
+        and revoked windows are readable here and not in `/v1/maintenance-windows`, which stays the cheap
+        read on the delivery path.
+
+        `unknown` is not an empty answer: it is either a window no human attests or a read that hit a bound,
+        and `complete` says which.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The window identifier a declaration or a report returned.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+      responses:
+        '200':
+          description: The window and what became of it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceWindowDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
         '404':
-          $ref: '#/components/responses/NotFound'
-  /v1/maintenance/windows/revoke:
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+  /v1/maintenance-windows/{id}/history:
+    get:
+      tags: [maintenance]
+      operationId: maintenance.window.history.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: The timeline of one window — its declaration, its revocation, and every page it folded.
+      description: |
+        The attribution timeline, built from the window's audit evidence rather than from a second copy of
+        it: `maintenance.declared` for the signature, the revoke row if there was one, and one `folded`
+        entry per `notification.suppressed` row the delivery path attributed to this window by id. Because
+        those rows are durable, the timeline answers the same after a restart, and `count` is bounded by
+        `max_events` with the rest reported as truncated rather than dropped quietly.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The window identifier.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+      responses:
+        '200':
+          description: The timeline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceWindowHistory'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+  /v1/maintenance-windows/{id}/cancellations:
     post:
-      tags: [occurrences]
+      tags: [maintenance]
       operationId: maintenance.window.revoke
-      x-status: planned
+      x-status: implemented
       x-required-role: [human]
-      summary: Revoke a window so it stops covering immediately.
+      summary: Cancel one named window so it stops covering immediately.
       description: |
-        Not served. Separate from declare because a revocation has to be legible in the audit history on its
-        own, and a revoked-but-live row is the one shape a time predicate alone would keep offering.
+        Cancelling is an act, not a note: the body is empty, the durable revoke adds `revoked_by` and
+        `revoked_at` beside the row, and the audit log holds both ends. Reading a declaration is what
+        silences a page, so a window that is merely expired is left as it was signed; a revoked one stops
+        covering at the instant of the revocation.
+
+        An overlapping sibling is **not** touched, and this answer names only the id you cancelled. The
+        delivery path asks whether *any* live window covers a finding, so a cancellation that swept a second
+        author's silence away with it would end work nobody cancelled and hide the fact in a 200.
       parameters:
+        - name: id
+          in: path
+          required: true
+          description: The window to cancel.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
         - $ref: '#/components/parameters/IdempotencyKey'
-        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: An empty JSON object. Any field is refused, because nothing here is stored.
       responses:
         '200':
-          description: Revoked.
+          description: Cancelled, with the window's selector and classes.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StatusResult'
+                $ref: '#/components/schemas/MaintenanceWindowCancelled'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
         '409':
           oneOf:
             - $ref: '#/components/responses/IdempotencyConflict'
             - $ref: '#/components/responses/RequestInProgress'
-        '412':
-          $ref: '#/components/responses/StaleRevision'
+            - $ref: '#/components/responses/Conflict'
+  /v1/maintenance-schedules:
+    get:
+      tags: [maintenance]
+      operationId: maintenance.schedule.list
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Every recurring plan's current version, by state.
+      description: |
+        `state=active` (default), `state=cancelled` or `state=all`, filtered on the *current* version: a
+        plan whose last word was `cancelled` belongs to the cancelled list even though its history is full
+        of active versions. Rows this build cannot re-validate, or whose attestation is missing, are counted
+        in `unreadable` and `unattested` rather than dropped — a store this build cannot read to the end is
+        a fact the operator needs, not a row to hide.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          description: One of `active`, `cancelled`, `all`. A repeated or unknown value is refused.
+          schema:
+            type: string
+            enum: [active, cancelled, all]
+            default: active
+      responses:
+        '200':
+          description: The schedules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleList'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+    post:
+      tags: [maintenance]
+      operationId: maintenance.schedule.declare
+      x-status: implemented
+      x-required-role: [human]
+      summary: Sign a recurring maintenance plan and declare its first bounded slice of windows.
+      description: |
+        A schedule is the plan; the windows are what the platform actually holds quiet. Declaring one
+        materializes at most `MAX_MATERIALIZED_OCCURRENCES` (8) occurrences, never more than 35 days ahead,
+        and the answer names every window it produced with its stable `occurrence_id`. Rolling the horizon
+        forward is a later, explicit write (`POST .../materializations`) — a timer that signed silences in a
+        human's name would put a machine's signature on a page nobody agreed to withhold.
+
+        Three parts are mandatory and none of them is guessable: `scope` (resource, service or rule),
+        `recurrence` (an IANA `timezone`, a wall-clock `time_of_day`, `daily`/`weekly`, and an explicit
+        `dst` policy of `wall`, `fixed` or `skip`), and `bounds`. Bounds must be finite — `occurrences` or
+        `until`, exactly one, alongside `first_occurrence`. **Open-ended silence is not maintenance**: a
+        plan that never ends is not a schedule, it is an outage with a login.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceScheduleDeclaration'
+      responses:
+        '200':
+          description: Declared, or `duplicate` in `status` for the identical plan already stored.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleWrite'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+            - $ref: '#/components/responses/Conflict'
+  /v1/maintenance-schedules/{id}:
+    get:
+      tags: [maintenance]
+      operationId: maintenance.schedule.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: One plan — its current version, the occurrences still to come, and how far it is materialized.
+      description: |
+        A report read, never a scheduler: this answers what has been declared and what the plan still
+        intends, and it declares nothing. `materialized_through` is the durable horizon a previous
+        materialization wrote (absent until one has run), and `occurrences` lists the next slice after it —
+        each with its stable `occurrence_id`, its resolved instants and the `dst` verdict the zone gave that
+        minute (`normal`, `gap` or `fold`).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The schedule identifier a declaration returned.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+      responses:
+        '200':
+          description: The plan and its horizon.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleDetail'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
         '404':
-          $ref: '#/components/responses/NotFound'
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+    patch:
+      tags: [maintenance]
+      operationId: maintenance.schedule.revise
+      x-status: implemented
+      x-required-role: [human]
+      summary: Make a new version of a plan effective, leaving windows already running exactly as they were.
+      description: |
+        The transport's only `PATCH`, and the verb is what makes the meaning readable: an edit appends a
+        version to the plan the caller named, where a `POST` to the collection would mint a second plan and
+        `POST .../revisions` would leave the caller to guess which id the new version got.
+
+        `expected_version` is required and is optimistic concurrency, not a formality: if the plan moved
+        since the caller read it, nothing is written and the answer is `412`. An edit revokes the plan's
+        *unstarted* windows from earlier versions and leaves any window already running alone — cutting
+        short a silence an operator is standing inside is not what "the recurrence changed" means — and the
+        version list keeps every earlier document readable.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The schedule to edit.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceScheduleRevision'
+      responses:
+        '200':
+          description: The new version, what it revoked and what it declared.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleWrite'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+            - $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/ContractError'
+  /v1/maintenance-schedules/{id}/history:
+    get:
+      tags: [maintenance]
+      operationId: maintenance.schedule.history.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Every version of a plan, each with whether a human attests it.
+      description: |
+        The answer to "what did the plan say in October?", read in November. Versions are append-only in the
+        table (UPDATE and DELETE are refused by triggers), each row carries the sequence of its own
+        `maintenance.scheduled` audit entry, and `attested` reports whether that entry is still there — the
+        same test every window read pays, because a document nobody signed is a document that governs
+        nothing.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The schedule identifier.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+      responses:
+        '200':
+          description: The version list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleHistory'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+  /v1/maintenance-schedules/{id}/cancellations:
+    post:
+      tags: [maintenance]
+      operationId: maintenance.schedule.cancel
+      x-status: implemented
+      x-required-role: [human]
+      summary: Stop a plan's future without rewriting its past.
+      description: |
+        Cancels the current version and revokes every *unstarted* window the plan declared. Windows that
+        already ran keep their rows, their authors and their outcomes — a report about a silence that
+        happened is not edited because the plan ended — and a cancelled plan is never edited again: the new
+        plan is declared, so the audit trail shows a human ending one intention and starting another.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The schedule to cancel.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: An empty JSON object. Any field is refused.
+      responses:
+        '200':
+          description: Cancelled, with the windows revoked.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleCancelled'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+            - $ref: '#/components/responses/Conflict'
+  /v1/maintenance-schedules/{id}/materializations:
+    post:
+      tags: [maintenance]
+      operationId: maintenance.schedule.materialize
+      x-status: implemented
+      x-required-role: [human]
+      summary: Roll the plan's horizon forward by one bounded slice of occurrences.
+      description: |
+        Recurring plans do not self-declare. This writes the windows for the next slice (at most 8
+        occurrences, never more than 35 days ahead of now), and one audit row naming the slice, so "who put
+        this silence in place" has a name and an instant. A retry with the same `Idempotency-Key` replays
+        this answer; a second call without the key finds the occurrences already declared and answers
+        `rolled_forward` in `status`, with those rows listed in `duplicates` instead of written twice.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The schedule to roll forward.
+          schema:
+            $ref: '#/components/schemas/ActorIdentity'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: An empty JSON object. Any field is refused.
+      responses:
+        '200':
+          description: The slice that was declared.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceScheduleWrite'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+            - $ref: '#/components/responses/Conflict'
+  /v1/maintenance-intervals:
+    get:
+      tags: [maintenance]
+      operationId: maintenance.interval.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: What was quiet over a span, or what one instant was — including for facts that arrive late.
+      description: |
+        Two questions in one route, chosen by the parameters you send, because they are the same read over
+        the same rows.
+
+        * **A span** — `resource`/`service`/`rule` with `from` and `to` (at most 92 days; a bare date names
+          a UTC day). Each window reports two spans, and they are not the same claim: `raw` is what a human
+          signed and never moves; `adjusted` is what the platform actually held quiet, truncated at a
+          revocation and absent for a window this build refuses to apply. `effective` merges the adjusted
+          spans into the quiet intervals a report should show, and `outcomes` names each window's outcome.
+        * **An instant** — the same scope with `at`, optionally with `class`. `classification` is `planned`,
+          `outside` or `unknown`, and it is computed at the *instant you asked about*, not at now: this is
+          how a boot report about 15:30 that arrives at 17:30 reaches the window that planned it, long after
+          `live_windows` stopped seeing that row.
+
+        `unknown` is a bound, never a default. When the historical search hits `max_rows` the answer says
+        `bound_exceeded` and refuses to claim absence; a span read sets `complete: false`. Asking with both
+        `at` and `from`/`to`, with two scopes, with a repeated or unknown parameter, or with `class` but no
+        `at`, is refused rather than guessed at.
+      parameters:
+        - name: resource
+          in: query
+          required: false
+          description: A resource uuid. Exactly one of `resource`, `service`, `rule`.
+          schema:
+            type: string
+            format: uuid
+        - name: service
+          in: query
+          required: false
+          description: A service uuid, expanded against the built inventory index.
+          schema:
+            type: string
+            format: uuid
+        - name: rule
+          in: query
+          required: false
+          description: A rule label, matched on the rule a finding reported.
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Span start (inclusive). A bare `YYYY-MM-DD` is that day's start in UTC.
+          schema:
+            type: string
+        - name: to
+          in: query
+          required: false
+          description: Span end (exclusive). A bare `YYYY-MM-DD` is the *next* day's start in UTC.
+          schema:
+            type: string
+        - name: at
+          in: query
+          required: false
+          description: One instant to classify, in place of a span.
+          schema:
+            type: string
+        - name: class
+          in: query
+          required: false
+          description: Ask the sharper question — does the planned work explain *this* class of finding?
+          schema:
+            type: string
+            enum: [availability, restart, silence, freshness, backup-integrity, security, application, unclassified]
+        - name: limit
+          in: query
+          required: false
+          description: Windows to return for a span read, refused rather than clamped.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: The span's intervals, or the instant's classification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceIntervalAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
 components:
   securitySchemes:
     bearerAuth:
@@ -1965,7 +2535,9 @@ components:
             $ref: '#/components/schemas/LegacyError'
           example: {"error": "not_found"}
     MethodNotAllowed:
-      description: Only GET and POST are served.
+      description: |
+        A verb this route does not carry. The API serves GET and POST everywhere, and `PATCH` on
+        `/v1/maintenance-schedules/{id}` and nowhere else.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/XRequestId'
@@ -2281,23 +2853,6 @@ components:
                 type: object
             required: [id, kind, name]
       required: [rows]
-    BoundedPage:
-      type: object
-      description: |
-        The bounded page the shared pagination helper composes — rows, the limit that was applied, how many
-        came back, and a cursor only when a full page did.
-      properties:
-        rows:
-          type: array
-          items:
-            type: object
-        limit:
-          type: integer
-        returned:
-          type: integer
-        next_cursor:
-          type: string
-      required: [rows, limit, returned]
     DispositionRequest:
       type: object
       description: |
@@ -3019,3 +3574,905 @@ components:
         credential, and a `reader` or `summary` token is refused before the cycle is looked up. The exact
         accepted fields and their bounds belong to `observer_review.py` and its contract in
         docs/units/observer.md.
+
+    # --- maintenance: the declared silence, the plan behind it, and what became of both ---------
+    MaintenanceScope:
+      type: object
+      description: |
+        What a window or a plan covers. `resource` is one resource id, `service` is expanded at declaration
+        time against the built inventory index (its members are a fact about the estate and are never
+        guessed at read time), and `rule` matches the rule label a finding reported, on any resource.
+      properties:
+        kind:
+          type: string
+          enum: [resource, service, rule]
+        id:
+          type: string
+          description: A resource or service uuid, or a rule label. Validated by the kind.
+      required: [kind, id]
+    MaintenanceConditionClass:
+      type: string
+      description: |
+        What kind of finding a window accounts for. `availability`, `restart`, `silence` and `freshness` are
+        what planned work does cause and are explained by default; `security`, `backup-integrity`,
+        `application` and `unclassified` are not, and page through a window unless the declaration names
+        them. A v1 window that named no classes at all is class-blind and covers its whole selector.
+      enum: [availability, restart, silence, freshness, backup-integrity, security, application, unclassified]
+    MaintenanceWindowRow:
+      type: object
+      description: |
+        One stored window as the delivery path sees it: the selector, the span a human signed, the author,
+        the condition classes it explains, and the schedule and occurrence it came from when it did.
+        `None` in the schedule fields means an ad-hoc window, not a missing read.
+      properties:
+        id:
+          type: string
+          format: uuid
+        resource_id:
+          type: ['string', 'null']
+          format: uuid
+        rule_id:
+          type: ['string', 'null']
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        author:
+          type: string
+        declared_at:
+          type: string
+          format: date-time
+        explains:
+          type: ['array', 'null']
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+        schedule_id:
+          type: ['string', 'null']
+          format: uuid
+        schedule_version:
+          type: ['integer', 'null']
+        occurrence_id:
+          type: ['string', 'null']
+          format: uuid
+        revoked_at:
+          type: ['string', 'null']
+          format: date-time
+        revoked_by:
+          type: ['string', 'null']
+      required: [id, starts_at, ends_at, reason, author, declared_at]
+    MaintenanceWindowList:
+      type: object
+      description: |
+        The live windows and the health of the read that produced them. `count` is the rows in `windows`;
+        `scanned` is every unrevoked row the read looked at, and `expired`/`revoked`/`unusable`/`unattested`
+        say where the rest went. When `bound_exceeded` is true the read stopped at `max_rows` and the list
+        is not whole — an absent window is not an un-planned one.
+      properties:
+        windows:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/MaintenanceWindowRow'
+              - type: object
+                properties:
+                  covers_now:
+                    type: boolean
+                    description: Whether this window covers the instant of the read, not merely its span.
+                required: [covers_now]
+        count:
+          type: integer
+        scanned:
+          type: integer
+        bound_exceeded:
+          type: boolean
+        unusable:
+          type: integer
+        unattested:
+          type: integer
+        revoked:
+          type: integer
+        expired:
+          type: integer
+        max_live_windows:
+          type: integer
+        max_seconds:
+          type: integer
+        max_rows:
+          type: integer
+      required: [windows, count, scanned, bound_exceeded, unusable, unattested, max_live_windows,
+                 max_seconds, max_rows]
+    MaintenanceWindowDeclared:
+      type: object
+      description: |
+        What one declaration wrote. A service scope produces one row per member, so `windows` is a list and
+        `count` is how wide the silence actually is; `status` on each row is `declared` or `duplicate`.
+      properties:
+        windows:
+          type: array
+          items:
+            type: object
+            properties:
+              window_id:
+                type: string
+                format: uuid
+              status:
+                type: string
+                enum: [declared, duplicate]
+              resource_id:
+                type: ['string', 'null']
+              rule_id:
+                type: ['string', 'null']
+              starts_at:
+                type: string
+                format: date-time
+              ends_at:
+                type: string
+                format: date-time
+              reason:
+                type: string
+              declared_by:
+                type: string
+              explains:
+                type: ['array', 'null']
+                items:
+                  $ref: '#/components/schemas/MaintenanceConditionClass'
+            required: [window_id, status, starts_at, ends_at, reason, declared_by]
+        count:
+          type: integer
+        members:
+          type: array
+          items:
+            type: string
+        scope:
+          $ref: '#/components/schemas/MaintenanceScope'
+        explains:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+        bound_exceeded:
+          type: boolean
+        max_windows:
+          type: integer
+      required: [windows, count, scope, explains, bound_exceeded, max_windows]
+    MaintenanceWindowCancelled:
+      type: object
+      description: |
+        The window that stopped covering, named by id alone. An overlapping sibling is untouched and does
+        not appear here — its absence from this answer is not a claim that it stopped.
+      properties:
+        window_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          const: cancelled
+        resource_id:
+          type: ['string', 'null']
+        rule_id:
+          type: ['string', 'null']
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        explains:
+          type: ['array', 'null']
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+        cancelled_by:
+          type: string
+        cancelled_at:
+          type: string
+          format: date-time
+      required: [window_id, status, starts_at, ends_at, reason, cancelled_by, cancelled_at]
+    MaintenanceOutcome:
+      type: object
+      description: |
+        What the platform observed about a window that has run, computed from its own durable evidence
+        rather than stored beside it. `evidence` is the sentences that earned the label, so a reader can
+        disagree with `completed` without opening the database. `observed` is null while a window is still
+        ahead of the clock, and `complete: false` means an input read hit a bound or the attestation is
+        missing — in which case `unknown` is a statement about this build, not about the work.
+      properties:
+        outcome:
+          type: string
+          enum: [planned, active, completed, cancelled, unused, overrun, unknown]
+        observed:
+          type: ['boolean', 'null']
+        complete:
+          type: boolean
+        evidence:
+          type: array
+          items:
+            type: string
+        attributions:
+          type: array
+          items:
+            type: object
+            properties:
+              sequence:
+                type: integer
+              at:
+                type: string
+                format: date-time
+              delivery:
+                type: string
+                format: uuid
+              condition_class:
+                $ref: '#/components/schemas/MaintenanceConditionClass'
+            required: [sequence, at, delivery, condition_class]
+        cancelled_before_start:
+          type: boolean
+          description: 'Present on a cancelled window: whether the revocation arrived before the start.'
+      required: [outcome, observed, complete, evidence, attributions]
+    MaintenanceWindowDetail:
+      type: object
+      description: |
+        One window and what became of it. `window` is the stored record — including `attested` (does its
+        audit evidence still stand) and `document_version` (1 or 2, which is what decides whether
+        `explains` was ever named) — and `schedule`/`occurrence_id` repeat the origin for a reader who came
+        from a report and wants the plan.
+      properties:
+        window:
+          allOf:
+            - $ref: '#/components/schemas/MaintenanceWindowRow'
+            - type: object
+              properties:
+                attested:
+                  type: boolean
+                document_version:
+                  type: integer
+                  enum: [1, 2]
+              required: [attested, document_version]
+        outcome:
+          $ref: '#/components/schemas/MaintenanceOutcome'
+        schedule:
+          type: ['string', 'null']
+          format: uuid
+        occurrence_id:
+          type: ['string', 'null']
+          format: uuid
+      required: [window, outcome, schedule, occurrence_id]
+    MaintenanceWindowHistory:
+      type: object
+      description: |
+        The timeline: `declared`, at most one `revoked`, and one `folded` entry per page the delivery path
+        attributed to this window by id. `count` is bounded by `max_events`; a truncated timeline says so
+        through the bound on the attribution read rather than by quietly returning fewer pages.
+      properties:
+        window_id:
+          type: string
+          format: uuid
+        outcome:
+          type: string
+          enum: [planned, active, completed, cancelled, unused, overrun, unknown]
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              at:
+                type: string
+                format: date-time
+              what:
+                type: string
+                enum: [declared, revoked, folded]
+              by:
+                type: string
+              attested:
+                type: boolean
+              delivery:
+                type: string
+                format: uuid
+              condition_class:
+                $ref: '#/components/schemas/MaintenanceConditionClass'
+            required: [at, what, by]
+        count:
+          type: integer
+        max_events:
+          type: integer
+      required: [window_id, outcome, events, count, max_events]
+    MaintenanceWindowDeclaration:
+      type: object
+      description: |
+        One planned silence. Times are timezone-aware and must be ISO 8601; the span may not exceed
+        `max_seconds` (86400), and a window whose end is already in the past is refused — this API plans
+        work, it does not explain history after the fact.
+      properties:
+        reason:
+          type: string
+          description: One line, at most 200 characters, stored verbatim and quoted in every page it folds.
+        scope:
+          $ref: '#/components/schemas/MaintenanceScope'
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        explains:
+          type: array
+          description: Omit for the four classes planned work explains. Name the others to widen the silence.
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+      required: [reason, scope, starts_at, ends_at]
+    MaintenanceDroppedOccurrence:
+      type: object
+      description: |
+        An occurrence the plan's `dst: skip` policy lost, named rather than only counted. The minute did not
+        exist in that zone on that date; "why was nothing quiet on 29 March?" cannot be answered by a number,
+        and moving the work to the neighbouring day would buy a second silence nobody planned.
+      properties:
+        index:
+          type: integer
+        local:
+          type: string
+          description: 'The local calendar date the occurrence would have fallen on (YYYY-MM-DD).'
+        time_of_day:
+          type: string
+          description: 'The local minute the plan asked for, which the zone never showed.'
+        timezone:
+          type: string
+        reason:
+          type: string
+      required: [index, local, time_of_day, timezone, reason]
+    MaintenanceOccurrence:
+      type: object
+      description: |
+        One computed occurrence of a plan. `occurrence_id` is derived from
+        (schedule id, version, ordinal, instant) and not stored, so the same version always yields the same
+        ids — including after a restore, which is what makes a re-run answer `duplicate` instead of declaring
+        a second silence. `dst` names what the zone did with that minute: `normal`, `fold` (the minute came
+        twice), `gap` (it did not exist and a policy other than `skip` kept the occurrence) or
+        `offset-preserved` (the plan's `fixed` policy held the offset, so the local clock face moved). `past`
+        means the occurrence ended before the clock and will never be declared.
+      properties:
+        index:
+          type: integer
+        occurrence_id:
+          type: string
+          format: uuid
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        dst:
+          type: string
+          enum: [normal, gap, fold, offset-preserved]
+        started:
+          type: boolean
+        past:
+          type: boolean
+      required: [index, occurrence_id, starts_at, ends_at, dst, started, past]
+    MaintenanceRecurrence:
+      type: object
+      description: |
+        The recurrence this build can speak: `daily` or `weekly`, an interval, a wall-clock minute, and an
+        IANA zone with an explicit DST policy. `wall` keeps the clock the operator typed across a
+        transition; `fixed` keeps the offset the first occurrence established, so the local time drifts;
+        `skip` drops an occurrence whose minute does not exist. There is no cron and no monthly rule: their
+        DST behaviour is not derivable from a string, and guessing it is how a silence moves twice a year
+        without anyone deciding to.
+      properties:
+        frequency:
+          type: string
+          enum: [daily, weekly]
+        interval:
+          type: integer
+          minimum: 1
+        days_of_week:
+          type: array
+          description: Monday is 0. Required for `weekly`, forbidden for `daily`.
+          items:
+            type: integer
+            minimum: 0
+            maximum: 6
+        time_of_day:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+        duration_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        timezone:
+          type: string
+          description: An IANA zone name (`Europe/London`), resolved by the standard library at read time.
+        dst:
+          type: string
+          enum: [wall, fixed, skip]
+      required: [frequency, interval, days_of_week, time_of_day, duration_seconds, timezone, dst]
+    MaintenanceBounds:
+      type: object
+      description: |
+        A finite end, required. Exactly one of `occurrences` or `until` beside `first_occurrence`. An
+        open-ended recurrence is refused outright: unbounded silence is not maintenance, it is an outage
+        with a login, and the platform will not sign it on a plan's behalf.
+      properties:
+        first_occurrence:
+          type: string
+          description: A local calendar date (YYYY-MM-DD) in the plan's own zone.
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+        occurrences:
+          type: integer
+          minimum: 1
+          maximum: 400
+        until:
+          type: string
+          description: Inclusive last local date. The last occurrence may start on this day.
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+      required: [first_occurrence]
+    MaintenanceSchedule:
+      type: object
+      description: |
+        One version of a plan, exactly as signed. A schedule is not a window: it is the intention, and the
+        windows are its consequence, materialized in bounded slices. `horizon`, `declared_by` and `attest`
+        come from the row that stores the version rather than from the signed fields.
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        state:
+          type: string
+          enum: [active, cancelled]
+        reason:
+          type: string
+        scope:
+          $ref: '#/components/schemas/MaintenanceScope'
+        explains:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+        recurrence:
+          $ref: '#/components/schemas/MaintenanceRecurrence'
+        bounds:
+          $ref: '#/components/schemas/MaintenanceBounds'
+        author:
+          type: string
+        declared_at:
+          type: string
+          format: date-time
+        horizon:
+          type: string
+          format: date-time
+        declared_by:
+          type: string
+        attest:
+          type: integer
+      required: [id, version, state, reason, scope, explains, recurrence, bounds, author, declared_at]
+    MaintenanceScheduleWrite:
+      type: object
+      description: |
+        The result of one schedule write. `status` says which act this was (`declared`, `duplicate`,
+        `revised` through a new version, `cancelled`, `rolled_forward`), `windows` lists every window the
+        slice produced with its occurrence id and DST verdict, and `horizon` is how far the plan is now
+        materialized. `duplicates` counts occurrences that were already declared — a retried roll-forward
+        writes nothing and says so here.
+      properties:
+        status:
+          type: string
+          enum: [declared, duplicate, rolled_forward, cancelled]
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        schedule:
+          $ref: '#/components/schemas/MaintenanceSchedule'
+        occurrences:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceOccurrence'
+        windows:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/MaintenanceWindowRow'
+              - type: object
+                properties:
+                  dst:
+                    type: string
+                    enum: [normal, gap, fold, offset-preserved]
+                  status:
+                    type: string
+                    enum: [declared, duplicate]
+                required: [dst, status]
+        declared:
+          type: integer
+        duplicates:
+          type: integer
+        horizon:
+          type: string
+          format: date-time
+        skipped_occurrences:
+          type: integer
+        dropped_occurrences:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceDroppedOccurrence'
+        members:
+          type: array
+          items:
+            type: string
+        bound_exceeded:
+          type: boolean
+        windows_revoked:
+          type: integer
+          description: 'On a revise or a cancel: how many unstarted windows from earlier versions stopped.'
+        windows_superseded:
+          type: array
+          items:
+            type: string
+            format: uuid
+      required: [status, id, version, schedule, occurrences, windows, declared, duplicates, horizon,
+                 skipped_occurrences, dropped_occurrences, members, bound_exceeded]
+    MaintenanceScheduleDeclaration:
+      type: object
+      description: |
+        A plan and its first bounded slice. `version`, `state` and `author` are the server's to decide and
+        are not accepted here — the author is the credential, never a body field.
+      properties:
+        reason:
+          type: string
+        scope:
+          $ref: '#/components/schemas/MaintenanceScope'
+        recurrence:
+          $ref: '#/components/schemas/MaintenanceRecurrence'
+        bounds:
+          $ref: '#/components/schemas/MaintenanceBounds'
+        explains:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+      required: [reason, scope, recurrence, bounds]
+    MaintenanceScheduleRevision:
+      type: object
+      description: |
+        The whole plan as it should read, plus the version it is replacing. A revision is not a patch of
+        individual fields: the new version is a complete document, so a reader looking at version 3 sees
+        everything version 3 says. `expected_version` is what makes an edit safe — a plan that moved since
+        the caller read it is refused with `412` rather than quietly overwritten.
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+        scope:
+          $ref: '#/components/schemas/MaintenanceScope'
+        recurrence:
+          $ref: '#/components/schemas/MaintenanceRecurrence'
+        bounds:
+          $ref: '#/components/schemas/MaintenanceBounds'
+        explains:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+      required: [expected_version, reason, scope, recurrence, bounds]
+    MaintenanceScheduleList:
+      type: object
+      description: |
+        Current versions only, filtered on the state of that version. `unreadable` and `unattested` count
+        rows this build could not re-validate or could not match to an audit entry; they are counted, never
+        dropped, because a store this build cannot read to the end is a fact the operator is owed.
+      properties:
+        schedules:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/MaintenanceSchedule'
+              - type: object
+                properties:
+                  attested:
+                    type: boolean
+                required: [attested]
+        count:
+          type: integer
+        scanned:
+          type: integer
+        unreadable:
+          type: integer
+        unattested:
+          type: integer
+        state:
+          type: string
+          enum: [active, cancelled, all]
+        bound_exceeded:
+          type: boolean
+        max_rows:
+          type: integer
+        now:
+          type: string
+          format: date-time
+      required: [schedules, count, scanned, unreadable, unattested, state, bound_exceeded, max_rows, now]
+    MaintenanceScheduleDetail:
+      type: object
+      description: |
+        The plan, its versions, what it has materialized and what it still intends. `occurrences` is
+        recomputed from the document on every read — the plan is the fact, the windows are its consequence —
+        and `materialized_through` is the durable cursor a previous roll-forward left, absent until one
+        runs. This read never declares anything.
+      properties:
+        schedule:
+          allOf:
+            - $ref: '#/components/schemas/MaintenanceSchedule'
+            - type: object
+              properties:
+                attested:
+                  type: boolean
+              required: [attested]
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceScheduleVersion'
+        versions:
+          type: integer
+        occurrences:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceOccurrence'
+        materialized_through:
+          type: string
+          format: date-time
+        occurrence_bound:
+          type: boolean
+        skipped_occurrences:
+          type: integer
+        dropped_occurrences:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceDroppedOccurrence'
+        scope_members:
+          type: ['array', 'null']
+          items:
+            type: string
+        now:
+          type: string
+          format: date-time
+        bound_exceeded:
+          type: boolean
+      required: [schedule, history, versions, occurrences, materialized_through, occurrence_bound,
+                 skipped_occurrences, dropped_occurrences, scope_members, now, bound_exceeded]
+    MaintenanceScheduleVersion:
+      type: object
+      description: |
+        One version's row: what state it was in force under, who declared it, and whether this build can
+        still match it to its audit entry. An `unreadable` version is reported, not skipped — a corrupt
+        newest version that disappears from the list would hand a caller an older plan to edit.
+      properties:
+        version:
+          type: integer
+        declared_at:
+          type: string
+        declared_by:
+          type: string
+        state:
+          type: string
+          enum: [active, cancelled]
+        horizon:
+          type: string
+        unreadable:
+          type: boolean
+        attested:
+          type: boolean
+      required: [version, declared_at, declared_by, state, horizon, unreadable, attested]
+    MaintenanceScheduleHistory:
+      type: object
+      description: Every version of one plan, oldest first, with the document as stored.
+      properties:
+        id:
+          type: string
+          format: uuid
+        versions:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/MaintenanceScheduleVersion'
+              - type: object
+                properties:
+                  document:
+                    oneOf:
+                      - $ref: '#/components/schemas/MaintenanceSchedule'
+                      - type: 'null'
+                required: [document]
+        count:
+          type: integer
+        attested:
+          type: integer
+        bound_exceeded:
+          type: boolean
+      required: [id, versions, count, attested, bound_exceeded]
+    MaintenanceIntervalRow:
+      type: object
+      description: |
+        One window as a report sees it, with two spans that are not the same claim. `raw` is what a human
+        signed and never moves; `adjusted` is what the platform actually held quiet — truncated at a
+        revocation, and null for a window this build refuses to apply (`applied: false`, with `adjustment`
+        saying why). Printing only the raw span would claim a silence nobody observed.
+      properties:
+        window_id:
+          type: string
+          format: uuid
+        scope:
+          $ref: '#/components/schemas/MaintenanceScope'
+        raw:
+          type: object
+          properties:
+            starts_at:
+              type: string
+              format: date-time
+            ends_at:
+              type: string
+              format: date-time
+          required: [starts_at, ends_at]
+        adjusted:
+          type: ['object', 'null']
+        applied:
+          type: boolean
+        adjustment:
+          type: ['string', 'null']
+        explains:
+          type: ['array', 'null']
+          items:
+            $ref: '#/components/schemas/MaintenanceConditionClass'
+        author:
+          type: string
+        declared_at:
+          type: string
+          format: date-time
+        schedule_id:
+          type: ['string', 'null']
+        schedule_version:
+          type: ['integer', 'null']
+        occurrence_id:
+          type: ['string', 'null']
+        outcome:
+          type: string
+          enum: [planned, active, completed, cancelled, unused, overrun, unknown]
+      required: [window_id, scope, raw, adjusted, applied, explains, author, declared_at, outcome]
+    MaintenanceIntervalAnswer:
+      oneOf:
+        - description: 'The span form: what was quiet between two instants, and which window says so.'
+          type: object
+          properties:
+            intervals:
+              type: array
+              items:
+                $ref: '#/components/schemas/MaintenanceIntervalRow'
+            count:
+              type: integer
+            returned_of:
+              type: integer
+            effective:
+              type: array
+              items:
+                type: object
+                properties:
+                  starts_at:
+                    type: string
+                    format: date-time
+                  ends_at:
+                    type: string
+                    format: date-time
+                  explained_by:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+                required: [starts_at, ends_at, explained_by]
+            span:
+              type: object
+              properties:
+                from:
+                  type: string
+                  format: date-time
+                to:
+                  type: string
+                  format: date-time
+              required: [from, to]
+            scope:
+              $ref: '#/components/schemas/MaintenanceScope'
+            scope_members:
+              type: ['array', 'null']
+              items:
+                type: string
+            truncated:
+              type: boolean
+            complete:
+              type: boolean
+            bounds:
+              type: object
+              properties:
+                scanned:
+                  type: integer
+                bound_exceeded:
+                  type: boolean
+                unusable:
+                  type: integer
+                unattested:
+                  type: integer
+                max_rows:
+                  type: integer
+              required: [scanned, bound_exceeded]
+            retroactive:
+              type: boolean
+          required: [intervals, count, returned_of, effective, span, scope, truncated, complete, bounds,
+                     retroactive]
+        - description: 'The instant form: what one moment was, which is how a late fact reaches its window.'
+          type: object
+          properties:
+            at:
+              type: string
+              format: date-time
+            scope:
+              $ref: '#/components/schemas/MaintenanceScope'
+            classification:
+              type: string
+              enum: [planned, outside, unknown]
+            incomplete_reason:
+              type: ['string', 'null']
+            explained_by:
+              type: array
+              items:
+                type: string
+                format: uuid
+            covers_instant:
+              type: array
+              items:
+                type: string
+                format: uuid
+            primary:
+              type: ['object', 'null']
+            complete:
+              type: boolean
+            bounds:
+              type: object
+              properties:
+                scanned:
+                  type: integer
+                bound_exceeded:
+                  type: boolean
+                max_rows:
+                  type: integer
+              required: [scanned, bound_exceeded]
+            retroactive:
+              type: boolean
+          required: [at, scope, classification, incomplete_reason, explained_by, covers_instant, primary,
+                     complete, bounds, retroactive]
+    MaintenanceScheduleCancelled:
+      type: object
+      description: |
+        A plan's future, stopped. The cancelled version is appended rather than the current one rewritten,
+        so the version that ran stays readable; `windows_revoked` counts only windows that had not started,
+        and a window already running is left exactly as its author signed it.
+      properties:
+        status:
+          type: string
+          const: cancelled
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        schedule:
+          $ref: '#/components/schemas/MaintenanceSchedule'
+        windows_revoked:
+          type: integer
+        windows_superseded:
+          type: array
+          items:
+            type: string
+            format: uuid
+        bound_exceeded:
+          type: boolean
+      required: [status, id, version, schedule, windows_revoked, windows_superseded, bound_exceeded]

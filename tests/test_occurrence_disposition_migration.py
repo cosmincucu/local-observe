@@ -99,11 +99,11 @@ class SchemaV12Tests(unittest.TestCase):
                                                          (kind,))}
 
     def test_version_and_migration_table_agree(self):
-        self.assertEqual(state.VERSION, 12)
-        self.assertEqual(max(state.MIGRATIONS), 12)
+        self.assertGreaterEqual(state.VERSION, 12)
+        self.assertEqual(max(state.MIGRATIONS), state.VERSION)
         self.assertIs(state.MIGRATIONS[12], state.OCCURRENCE_DISPOSITION_SCHEMA)
         with contextlib.closing(connect(self.path)) as connection:
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 12)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], state.VERSION)
 
     def test_the_four_tables_exist_and_no_fifth_was_invented(self):
         present = self.names('table')
@@ -248,6 +248,10 @@ class UpgradeFromV11Tests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(self.path)) as connection:
             for table in sorted(NEW_TABLES):
                 connection.execute(f'DROP TABLE IF EXISTS {table}')
+            # A real v11 file also lacks the later steps' objects (v13 maintenance schedules).
+            connection.execute(f'DROP TABLE IF EXISTS {state.MAINTENANCE_SCHEDULE_TABLE}')
+            connection.execute(f'DROP INDEX IF EXISTS {state.MAINTENANCE_OUTCOME_INDEX}')
+            connection.execute(f'DROP INDEX IF EXISTS {state.MAINTENANCE_ATTRIBUTION_INDEX}')
             connection.execute('PRAGMA user_version=11')
             connection.commit()
 
@@ -256,7 +260,7 @@ class UpgradeFromV11Tests(unittest.TestCase):
             Store(self.path)
         Store(self.path, migrate=True)
         with contextlib.closing(sqlite3.connect(self.path)) as connection:
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 12)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], state.VERSION)
             self.assertEqual(connection.execute('SELECT status FROM incidents WHERE id=?',
                                                 (self.incident,)).fetchone()[0], 'open')
             self.assertEqual(connection.execute("SELECT count(*) FROM audit WHERE operation='action.decision'"

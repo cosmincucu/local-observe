@@ -48,7 +48,8 @@ OPENAPI = ROOT / 'docs' / 'api' / 'openapi.yaml'
 #: `local_observe/platform/crowdsec.py` reads `/v1/decisions` on a CrowdSec instance — so scanning the
 #: whole package would either forgive a missing document entry or demand one for someone else's API.
 SERVED_TRANSPORTS = ('local_observe/platform/api.py', 'local_observe/platform/verification_api.py',
-                     'local_observe/platform/observer_review.py', 'local_observe/platform/operator.py')
+                     'local_observe/platform/observer_review.py', 'local_observe/platform/operator.py',
+                     'local_observe/platform/maintenance_api.py')
 
 READER = {'identity': 'reader', 'role': 'reader', 'token': 'r' * 32}
 PRODUCER = {'identity': 'test-detector', 'role': 'producer', 'token': 'p' * 32}
@@ -60,6 +61,12 @@ CREDENTIALS = [READER, PRODUCER, PROPOSER, HUMAN, EXECUTOR, SUMMARY]
 TOKEN_BY_ROLE = {row['role']: row['token'] for row in CREDENTIALS}
 
 #: One concrete request per templated path, chosen so the route is reached rather than its parser.
+#: A window and a schedule that do not exist: the ids are well-formed, so the read reaches the store and
+#: answers "no such thing" rather than being refused by the identifier parser. That is the route being
+#: probed; inventing a live window here would test the fixture instead of the transport.
+UNKNOWN_WINDOW = '4f9c1d7b-8a3e-4c6f-9d2b-5e1a7c3f8b04'
+UNKNOWN_SCHEDULE = 'b1e5a2c9-7d4f-4e8a-9c1b-3a5d7e9f2c46'
+
 CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
             '/v1/intake/{source}': ('/v1/intake/alertmanager', b''),
             '/v1/callbacks/{channel}': ('/v1/callbacks/telegram', b''),
@@ -79,7 +86,23 @@ CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
             '/v1/verification/record': ('/v1/verification/record',
                                         b'verification_id=' + b'0' * 64),
             '/v1/observer/cycle': ('/v1/observer/cycle', b'cycle_id=unknown'),
-            '/v1/observer/cycles': ('/v1/observer/cycles', b'limit=5')}
+            '/v1/observer/cycles': ('/v1/observer/cycles', b'limit=5'),
+            '/v1/maintenance-windows/{id}': (f'/v1/maintenance-windows/{UNKNOWN_WINDOW}', b''),
+            '/v1/maintenance-windows/{id}/history': (f'/v1/maintenance-windows/{UNKNOWN_WINDOW}/history', b''),
+            '/v1/maintenance-windows/{id}/cancellations': (
+                f'/v1/maintenance-windows/{UNKNOWN_WINDOW}/cancellations', b''),
+            '/v1/maintenance-schedules/{id}': (f'/v1/maintenance-schedules/{UNKNOWN_SCHEDULE}', b''),
+            '/v1/maintenance-schedules/{id}/history': (
+                f'/v1/maintenance-schedules/{UNKNOWN_SCHEDULE}/history', b''),
+            '/v1/maintenance-schedules/{id}/cancellations': (
+                f'/v1/maintenance-schedules/{UNKNOWN_SCHEDULE}/cancellations', b''),
+            '/v1/maintenance-schedules/{id}/materializations': (
+                f'/v1/maintenance-schedules/{UNKNOWN_SCHEDULE}/materializations', b''),
+            # A complete, bounded span over a resource nothing was ever planned around: the read is whole,
+            # so its 200 body is the one the document's schema is checked against.
+            '/v1/maintenance-intervals': ('/v1/maintenance-intervals',
+                                          (f'resource={UNKNOWN_WINDOW}'
+                                           f'&from=2026-03-01&to=2026-03-08').encode())}
 
 #: Implemented read routes a plain app serves without an optional seam mounted, and the credential each
 #: needs. Their 200 bodies are validated against the schema the document claims for them.
@@ -87,6 +110,9 @@ ANSWERABLE_READS = {
     '/v1/me': 'reader', '/v1/status': 'reader', '/v1/overview': 'reader', '/v1/runtime': 'reader',
     '/v1/audit': 'reader', '/v1/records/{table}': 'reader', '/v1/notifications/safety': 'human',
     '/v1/alert-occurrences': 'reader',
+    # One of the three maintenance reads: the bounded interval query, because it answers 200 over an empty
+    # store and its body is the one place the outcome vocabulary and the read bounds are both visible.
+    '/v1/maintenance-intervals': 'reader',
 }
 
 REQUIRED_ROW_FIELDS = ('operation_id', 'surface', 'method', 'path', 'resource', 'module', 'access',
@@ -267,7 +293,10 @@ class ContractDocumentTests(unittest.TestCase):
                 self.assertIn(operation['x-status'], ('implemented', 'planned'))
                 self.assertTrue(set(operation['x-required-role']) <= roles | {'none'},
                                 operation['x-required-role'])
-                self.assertIn(method, ('GET', 'POST'))
+                # PATCH is not a general widening: the transport admits it and `maintenance_api` answers it
+                # for one route (`/v1/maintenance-schedules/{id}`, an edit that appends a version). Any
+                # other verb on any other path is a 405, which `test_the_six_transport_refusals...` proves.
+                self.assertIn(method, ('GET', 'POST', 'PATCH'))
                 self.assertTrue(path.startswith('/'), path)
                 self.assertIn('summary', operation)
                 unauthenticated = operation.get('security') == []
@@ -376,17 +405,18 @@ class CensusRowTests(unittest.TestCase):
         for area in self.census['vocabularies']['owner_areas']:
             self.assertTrue([row for row in self.census['operations'] if row['owner_area'] == area], area)
         planned = {row['operation_id'] for row in self.census['operations'] if row['status'] == 'planned'}
-        self.assertTrue({'occurrence.dismiss.revoke', 'maintenance.window.declare',
-                         'maintenance.window.revoke', 'maintenance.window.read',
-                         'platform.openapi.read'} <= planned, planned)
-        # The F2 surface this build ships: five routes, so a reader of this table can see that the
-        # acknowledgement and the dismissal are census rows *and* served, not both-and-neither.
+        self.assertTrue({'occurrence.dismiss.revoke', 'platform.openapi.read'} <= planned, planned)
         rows = {row['operation_id']: row for row in self.census['operations']}
         for operation_id in ('occurrence.list', 'occurrence.read', 'occurrence.disposition_history.read',
                              'occurrence.acknowledge', 'occurrence.dismiss'):
             with self.subTest(row=operation_id):
                 self.assertEqual(rows[operation_id]['status'], 'implemented')
                 self.assertTrue(rows[operation_id]['path'].startswith('/v1/alert-occurrences'))
+        served = {row['operation_id'] for row in self.census['operations'] if row['status'] == 'implemented'}
+        self.assertTrue({'maintenance.window.declare', 'maintenance.window.revoke',
+                         'maintenance.window.read', 'maintenance.schedule.declare',
+                         'maintenance.schedule.revise', 'maintenance.schedule.cancel',
+                         'maintenance.schedule.materialize', 'maintenance.interval.read'} <= served, served)
         self.assertIn('maintenance.window.declare_cli', {row['operation_id']
                                                         for row in self.census['operations']})
 
@@ -566,7 +596,7 @@ class ContractMatchesBehaviourTests(unittest.TestCase):
                                                            b'{}' if method == 'POST' else b'', query))
                 with self.subTest(operation=operation_id, call='credentialled'):
                     self.assertEqual((status, body), (404, {'error': 'not_found'}))
-        self.assertEqual(planned, 5)
+        self.assertEqual(planned, 2)
 
     def test_every_implemented_operation_answers_within_what_is_documented(self):
         """One probe per operation: whatever the app chooses to answer, the contract admits it.

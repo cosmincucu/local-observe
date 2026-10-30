@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 12
+VERSION = 13
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -742,10 +742,83 @@ CREATE TABLE {OCCURRENCE_PROJECTION_TABLE} (occurrence_id TEXT NOT NULL REFERENC
 CREATE INDEX {OCCURRENCE_PROJECTION_TABLE}_due ON {OCCURRENCE_PROJECTION_TABLE}(status, available_at);
 '''
 
+# Schema v13 (planned maintenance: schedules, and the two reads an outcome is made of): one append-only
+# table and two indexes, and no change to any existing row, column or business value. A *window* stayed a
+# control document — it is declared state that the delivery path reads, and the v2 argument above still
+# holds. A **schedule** is a different shape, and it is the shape that has no honest home in
+# `notification_control`: a schedule is edited, and an edit must produce a *new effective version* while
+# every version that was ever in force stays readable. `control_declare` inserts and never updates, so it
+# cannot express an edit; `control_write` replaces, so it destroys the history an operator is entitled to
+# ask back. A table keyed by `(schedule_id, version)` with `UPDATE`/`DELETE` refused by triggers is the
+# one shape in this file where "the version that was in force in October" and "the one in force now" are
+# two rows that cannot overwrite each other — the same promise `audit` and `verification_records` make.
+#
+# The two indexes are the reads that make an *outcome* more than a guess, and both follow an existing
+# step rather than inventing a shape. `incidents(resource_id, opened_at)` is plain columns over a v1
+# table, the way v6's `escalation_incidents_status` is: it answers "did anything about this resource
+# overlap the declared span", which is the only evidence that separates a window that was **unused** from
+# one that was never observed (`unknown`). The second is a partial expression index over the suppression
+# audit rows, guarded by `json_valid` inside the same expression exactly as v5 guards its window end and
+# v6 its approval intent — SQLite does not promise to evaluate `json_valid` before a neighbouring
+# extract, and a statement that could fail here fails the migration and every later audit write. It
+# answers "which pages did *this* window fold", by the id the decision already wrote into its own audit
+# detail, so the attribution survives a restart without a second copy of the fact.
+#
+# Neither index is named with `INDEXED BY`. Both reads have an honest zero to report — no overlapping
+# incident, no attributed page — and a missing index would turn a report into an SQLite error, which is
+# the trade v11 declined for the same reason. Authority stays where it was: `suppression._scan` re-checks
+# every window it applies against the envelope, the declaration and the attestation, and an index key
+# remains a search term rather than a reason to silence a pager.
+#
+# The checklist a new step must answer (the v7 preamble's, applied here): this step **does** move
+# `tests/test_state_migration.py`'s `CURRENT_TABLES` pin — one table joined the schema, named there, and
+# `tests/test_maintenance_windows.py` takes that pin by import — and it moves
+# `tests/test_incident_grouping_migration.py`'s list of `schema.migrated` subjects for a v1 file walking
+# the whole chain, which now ends at '13'. It adds no index that `escalation_reader` names with
+# `INDEXED BY`, so `tests/test_escalation_history.py` (rewound to steps 1..6) and
+# `tests/test_upgrade_acceptance.py`'s `INDEX_NAMES` (four names, all still built by their own steps) are
+# unmoved; `tests/test_maintenance_history.py` (rewound to 5) and
+# `tests/test_verification_records_migration.py` (to 4) compare a fresh file against one migrated *to
+# their own pinned version*, so a step above theirs changes nothing. The two documents that state the
+# schema number — `docs/CONTRACTS.md` §5 and the migration paragraph of `local_observe/platform/README.md`
+# — move with it, and `docs/api/maintenance.md` states what the new table and indexes are for.
+MAINTENANCE_SCHEDULE_TABLE = 'maintenance_schedules'
+#: The highest `version` one schedule may carry, spelled once for the CHECK and for
+#: `platform/maintenance.py`, which refuses a longer-lived plan at its door rather than at the column.
+MAINTENANCE_SCHEDULE_VERSION_LIMIT = 1000
+#: Characters one stored schedule document may hold. The same ceiling the idempotency reply and a
+#: verification payload carry: it is a column width, and the module refuses an oversized document rather
+#: than letting SQLite truncate a recurrence rule into a different promise.
+MAINTENANCE_SCHEDULE_DOCUMENT_LIMIT = 65536
+#: The audit operation a folded page takes, and the one expression by which a decision says *which*
+#: window it folded the page on. Spelled once: the index is cut on this text and the read filters by it.
+MAINTENANCE_SUPPRESSED_OPERATION = 'notification.suppressed'
+MAINTENANCE_ATTRIBUTION_WINDOW = ("CASE WHEN json_valid(detail) THEN"
+                                  " json_extract(detail,'$.window_id') END")
+MAINTENANCE_OUTCOME_INDEX = 'maintenance_outcome_evidence'
+MAINTENANCE_ATTRIBUTION_INDEX = 'maintenance_attribution'
+MAINTENANCE_SCHEDULES_SCHEMA = f'''
+CREATE TABLE {MAINTENANCE_SCHEDULE_TABLE} (schedule_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version BETWEEN 1 AND {MAINTENANCE_SCHEDULE_VERSION_LIMIT}),
+    document TEXT NOT NULL CHECK(length(CAST(document AS BLOB)) <= {MAINTENANCE_SCHEDULE_DOCUMENT_LIMIT}),
+    state TEXT NOT NULL CHECK(state IN ('active','cancelled')),
+    horizon TEXT NOT NULL, declared_at TEXT NOT NULL, declared_by TEXT NOT NULL,
+    attest INTEGER NOT NULL CHECK(attest > 0),
+    PRIMARY KEY (schedule_id, version));
+CREATE TRIGGER {MAINTENANCE_SCHEDULE_TABLE}_no_update BEFORE UPDATE ON {MAINTENANCE_SCHEDULE_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only maintenance schedule'); END;
+CREATE TRIGGER {MAINTENANCE_SCHEDULE_TABLE}_no_delete BEFORE DELETE ON {MAINTENANCE_SCHEDULE_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only maintenance schedule'); END;
+CREATE INDEX {MAINTENANCE_OUTCOME_INDEX} ON incidents(resource_id, opened_at);
+CREATE INDEX {MAINTENANCE_ATTRIBUTION_INDEX} ON audit({MAINTENANCE_ATTRIBUTION_WINDOW}, sequence)
+    WHERE operation='{MAINTENANCE_SUPPRESSED_OPERATION}';
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
                               7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
-                              10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA, 12: OCCURRENCE_DISPOSITION_SCHEMA}
+                              10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA, 12: OCCURRENCE_DISPOSITION_SCHEMA,
+                              13: MAINTENANCE_SCHEDULES_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
