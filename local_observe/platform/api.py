@@ -22,7 +22,7 @@ from local_observe.credentials import read_credential
 from local_observe.http import TransportError
 from local_observe.inventory.validation import InvalidInventory, canonical
 from local_observe.log import get_logger
-from . import intake
+from . import api_contract, intake
 from .policy import action_policy
 from .refusal_dispatch import RefusalAuditDispatcher
 from .refusals import SUMMARY_ONLY
@@ -75,6 +75,36 @@ INTAKE_PREFIX = '/v1/intake/'
 #: is why no branch here parses a body to decide whether the summary audit happens.
 REFUSAL_POST_ROUTES = {'/v1/actions': 'propose', '/v1/actions/decision': 'decide',
                        '/v1/actions/claim': 'claim', '/v1/executions/outcome': 'outcome'}
+
+#: The POST routes that honour `Idempotency-Key` (api boundary foundation). Membership is the whole
+#: opt-in: a route not named here ignores the header, which is what keeps every client that exists today
+#: answering exactly as it always did — no client sends the header yet.
+#:
+#: The list is a judgement about *which writes a lost response makes dangerous*, not a general
+#: allowance. In: event and evidence filing, a claim, a delivery retry, a safety reset, an execution
+#: outcome, and the intake front door — each of them performs state the caller cannot re-derive, and a
+#: client that lost the answer cannot tell "never ran" from "ran and I never heard".
+#:
+#: Out, with the reason for each, because a missing entry here reads as an oversight:
+#: * `/v1/actions` already has a durable retry identity of its own — `actions UNIQUE(requester,
+#:   retry_key)` — and a second key in front of it would make "which name deduplicates this proposal?"
+#:   a question with two answers.
+#: * `/v1/actions/decision`, `/v1/actions/execute` and the writes under `/v1/setup/` bind their own
+#:   receipt (`runner_requests` is keyed by action, and a setup plan carries its own status), so replaying
+#:   an answer would be a second opinion on a decision whose authority is the row.
+#: * `/v1/callbacks/<channel>` is single-use by contract: a stored success replayed after the token was
+#:   spent would report an intent that this route is defined to refuse.
+#: * The verification and observer-review seams own their own body parsing, size gates and replay rules
+#:   (`verification_api` refuses a changed re-post, `observer_review` refuses a re-graded cycle), so a
+#:   gate in front of them would be a second copy of a rule that already exists and is already tested.
+IDEMPOTENT_POST_ROUTES = frozenset({'/v1/events', '/v1/evidence', '/v1/actions/claim',
+                                    '/v1/notifications/retry', '/v1/notifications/reset-safety',
+                                    '/v1/executions/outcome', '/v1/runner/claim'})
+
+
+def idempotency_enabled(path: str) -> bool:
+    """Whether one POST route honours `Idempotency-Key`, as the two lists above decided."""
+    return path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
 
 
 def _retrieve_execution(future: Any) -> None:
@@ -267,6 +297,13 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     # an app that is built and never served — or served only through direct ASGI calls, with or without
     # a lifespan — costs nothing and leaks nothing.
     refusal_dispatch = RefusalAuditDispatcher()
+
+    # The idempotency boundary: one gate per `create_app`, over the same `Store` this app already writes
+    # through. It owns no thread, no queue and no in-process memory — every read and write is a `Store`
+    # call against the `api_idempotency` table (schema v11), so a key this process reserved is still
+    # reserved after a restart, which is the whole reason the record is durable rather than a dict. The
+    # gate holds rules, not rows: `state.py` stays the only SQL writer.
+    idempotency = api_contract.IdempotencyGate(store)
 
     # The verification workflow: the verification routes are their own module and their own admission slot, and this is
     # the only place either is built. One `VerificationAPI` per `create_app`, over the same `Store` this
@@ -629,9 +666,36 @@ def create_app(store: Store, credentials: list[dict[str, str]],
         if scope['type'] != 'http':
             await send({'type': 'websocket.close', 'code': 1008})
             return
-        async def respond(status, body):
+        # The identity this request is answered under, decided before any handler runs: reused when the
+        # caller sent one well-formed `x-request-id`, minted otherwise. It rides every answer as a header
+        # and every server-side log line, so an operator reading a report can find the trace of one
+        # request. Legacy bodies are unchanged (several are pinned byte for byte), which is why the id is
+        # a header on those and a field of the envelope only where `api_contract` produced the answer.
+        request_id = api_contract.request_id_from(scope)
+        # The one idempotency claim this request holds, if it made one. A list used as a mutable cell so
+        # `respond` — which every answer this handler sends passes through — can see and clear it: one
+        # place where a key is finished or released, so no answer can leave a key claimed.
+        settling: list = []
+
+        async def respond(status, body, extra=()):
+            """Send one answer, its request id, and settle the idempotency claim this request may hold.
+
+            A 2xx is stored so a caller that lost the response can replay it; every other status releases
+            the key, because a refusal is a fact about a state this platform may not have reached and
+            freezing it under a key would replay a "no" that is no longer true. The write happens before
+            the first response message goes out, which is the §5 rule that a completed answer is durable
+            rather than scheduled — and it is one more synchronous `Store` transaction on the loop, the
+            same shape every route here already has.
+            """
+            if settling:
+                reservation, settling[:] = settling[0], []
+                if 200 <= status < 300:
+                    idempotency.complete(reservation, status, body)
+                else:
+                    idempotency.abandon(reservation)
             await send({'type': 'http.response.start', 'status': status,
-                        'headers': [(b'content-type', b'application/json'), (b'cache-control', b'no-store')]})
+                        'headers': [(b'content-type', b'application/json'), (b'cache-control', b'no-store'),
+                                    (api_contract.REQUEST_ID_HEADER, request_id.encode()), *extra]})
             await send({'type': 'http.response.body', 'body': canonical(body).encode()})
         values = [value for name, value in scope.get('headers', []) if name.lower() == b'authorization']
         actor = None
@@ -804,6 +868,27 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 # Every POST branch reads named fields; a JSON array/scalar body is a client error,
                 # not the TypeError the field test would otherwise raise out of the handler.
                 return await respond(400, {'error': 'invalid_request', 'detail': 'Expected a JSON object body'})
+            if idempotency_enabled(path):
+                # The only two things the boundary adds to a route that opted in, and both happen before
+                # the first `Store` method this route would call. (1) A body may not name an identity: the
+                # actor is the credential, and §5 says a payload field cannot claim that an agent is a
+                # human, so a guarded route refuses the claim rather than ignoring it. (2) A key is
+                # claimed, replayed or refused here — never later — so a caller that retried a write it
+                # already performed reads its first answer instead of performing it twice.
+                #
+                # A route not named in `IDEMPOTENT_POST_ROUTES` never reaches here: its clients send no
+                # key, and an ignored header on such a route must not become a second answer to "what did
+                # this request cost?". This is also why the claim is made after the body was read and
+                # judged: the key is bound to a *valid* body, and a malformed retry must not spend one.
+                api_contract.assert_no_actor_claim(body)
+                key = api_contract.idempotency_key_from(scope)
+                if key is not None:
+                    reservation = idempotency.reserve(api_contract.actor_context(actor, request_id,
+                                                                                idempotency_key=key), body)
+                    if reservation.replay is not None:
+                        status, payload = reservation.replay
+                        return await respond(status, payload, [(api_contract.REPLAYED_HEADER, b'true')])
+                    settling.append(reservation)
             if path == '/v1/events':
                 # Grouping is wired here as well as on `/v1/intake/<source>`, and only there: the two
                 # `Store.intake` call sites in this file are the transport's whole write path for events,
@@ -871,6 +956,14 @@ def create_app(store: Store, credentials: list[dict[str, str]],
             return await respond(400, {'error': 'invalid_request', 'detail': str(exc)})
         except UnicodeDecodeError:
             return await respond(400, {'error': 'invalid_request', 'detail': 'Body is not valid UTF-8'})
+        except api_contract.ContractError as exc:
+            # A refusal this boundary chose, and the one answer shape `api_contract` owns. It is written
+            # before the state layer is reached (a key is claimed and a claim refused ahead of any `Store`
+            # write), so it is not a refusal §5 says `Store` already audited, and it audits nothing here.
+            # Legacy branches above keep their flat bodies untouched; these codes did not exist before
+            # this file did.
+            return await respond(exc.status, api_contract.error_envelope(exc.code, exc.message, request_id),
+                                 exc.headers)
         except (StateError, InvalidInventory, TransportError) as exc:
             # Messages raised here are the platform's own sentences: fixed wording, no request data.
             # This branch writes nothing, deliberately: a refusal that came out of `state.py` was
@@ -880,7 +973,7 @@ def create_app(store: Store, credentials: list[dict[str, str]],
         except Exception as exc:
             # Nobody chose this exception. Say only its class to the client and put the traceback in
             # the log (DEBUG only, per the logging contract) instead of blaming the caller.
-            log.error('Platform request failed', extra={'method': method, 'path': path,
+            log.error('Platform request failed', extra={'method': method, 'path': path, 'request_id': request_id,
                                                         'error_class': type(exc).__name__})
             log.debug('Platform request details', exc_info=True)
             return await respond(500, {'error': 'internal_error', 'detail': type(exc).__name__})
@@ -892,6 +985,10 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     # to see which service instance its lifespan closed and drained. Not part of the HTTP surface;
     # it accepts no caller-supplied callable or policy.
     app.verification_api = verification
+    # The same reasoning for the idempotency boundary: it is app-local, it is built over this app's
+    # `Store`, and a caller holding an app instance can see which gate its writes were booked against.
+    # Not part of the HTTP surface, and it accepts nothing a caller supplies.
+    app.idempotency_gate = idempotency
     return app
 
 

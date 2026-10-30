@@ -9,6 +9,7 @@
 | `scripts/operator/` | Deployment pin and overlay checks |
 | `tests/` | Base and optional-dependency tests |
 | `tests/compiler/` | Hash-locked Sigma compiler tests |
+| `docs/api/` | Capability census, the platform HTTP contract and its decisions |
 | `docs/units/` | Detailed implementation contracts |
 
 The main packages cover inventory, deployment, incident workflows, telemetry access, AI policy,
@@ -26,4 +27,5 @@ its injected boundaries allow tests without a live deployment.
 | [Guided setup](units/guided-setup.md), `local_observe/deployment/guided.py` | Exact setup plans, human decisions and trusted apply |
 | Evaluation, `local_observe/evaluation/` | Shared-evidence comparisons, unknown labels and independent quality measurements |
 | [Refusal audit](units/refusal-audit.md) | Durable refusal records and bounded dispatch |
+| API boundary, `local_observe/platform/api_contract.py` | Error envelope, request identity, idempotency, expected revision, bounded paging and actor context for platform routes; see [`docs/api/COVERAGE.md`](api/COVERAGE.md) |
 | Shared HTTP, `local_observe/http.py` | Explicit client trust configuration shared by integrations; no global TLS changes |

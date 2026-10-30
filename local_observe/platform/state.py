@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 10
+VERSION = 11
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -33,6 +33,17 @@ ATTEMPT_CAUSES = ('pending', 'accepted', 'rejected', 'transport', 'policy')
 # within. A callback is an intent and not a decision, so a short life costs nothing (ledger notifications).
 CALLBACK_TTL_SECONDS = 3600
 CALLBACK_TTL_BOUNDS = (60, 86400)
+#: How long a completed idempotent write may be replayed, and how long an in-flight claim may outlive
+#: the process that made it (`api_idempotency`, schema v11, api boundary foundation). Both are bounds on
+#: a durable record, not tuning: a key is a caller's promise about one intention, and the replay window
+#: is how far back that promise reaches. `300 s` for the in-flight marker is longer than any write this
+#: platform performs, so a reclaimed key means the first attempt died rather than that it is slow.
+IDEMPOTENCY_TTL_SECONDS = 86400
+IDEMPOTENCY_TTL_BOUNDS = (60, 604800)
+IDEMPOTENCY_IN_FLIGHT_SECONDS = 300
+#: Rows one reserve call may delete as expired. Bounded work per call, so the sweep never becomes the
+#: thing holding the write lock; what is left is deleted by the next call.
+IDEMPOTENCY_PRUNE_ROWS = 200
 MIGRATE_COMMAND = 'lo-platform migrate'
 MIGRATE_ACTOR = 'platform-migrate'
 # SQLite header: bytes 18/19 are the WAL file-format versions, 24..27 the change counter and
@@ -554,10 +565,62 @@ CREATE TABLE setup_plans (id TEXT PRIMARY KEY, payload TEXT NOT NULL,
     expires_at TEXT, runner TEXT NOT NULL, receipt TEXT);
 '''
 
+# Schema v11 (api boundary foundation): one table and one index, and no change to any existing row,
+# column or business value. What the table holds is the answer to "did this write already happen?", the
+# question a caller who lost the response cannot answer from its own side and this file is the only place
+# in the product that can. `platform/api_contract.py` owns the *rules* (what a replay means, how long an
+# in-flight claim lives, what may be stored); this step owns the durability, because a key remembered
+# only in process memory is exactly the lost-acknowledgement failure `docs/CONTRACTS.md` §5 is written
+# around: the client retries, the side effect happens twice, and nothing on either side can see it.
+#
+# Why a table when the maintenance-window note above chose a control key: those windows are *declared
+# state* — small, operator-visible, audited, read by the delivery path — and the argument for the key
+# was that a table there moved two pins for no CHECK constraint anybody needed. This is the opposite
+# shape: an append-mostly, per-request, high-cardinality record keyed by (actor, key) that nobody reads
+# as operator state, whose whole value is a PRIMARY KEY that makes "one row per caller per key" a
+# constraint rather than a discipline, and whose TTL is a column predicate rather than a policy.
+#
+# `completed_at IS NULL` is the in-flight marker, and the CHECK makes the three answer columns agree with
+# it, so a half-written answer is not a shape the file can hold. `status BETWEEN 100 AND 599` and the
+# payload ceiling are the same promise `api_contract.MAX_STORED_REPLY_BYTES` makes before writing: the
+# bound belongs to the file, and the module refuses the oversized reply rather than letting SQLite
+# truncate one silently.
+#
+# The checklist a new step must answer (the v7 preamble's, applied here): this step **does** move
+# `tests/test_state_migration.py`'s `CURRENT_TABLES` pin — one table joined the schema, named there — and
+# `tests/test_maintenance_windows.py` takes that pin by import, so it moves with it. It adds no index
+# that `escalation_reader`/`maintenance_reader` name with `INDEXED BY`, so
+# `tests/test_escalation_history.py` (rewound to steps 1..6) and `tests/test_upgrade_acceptance.py`'
+# `INDEX_NAMES` are unmoved; `tests/test_maintenance_history.py` and
+# `tests/test_verification_records_migration.py` compare a fresh file against one migrated *to their own
+# pinned version*, so a step above theirs changes nothing; and the two documents that state the schema
+# number — `docs/CONTRACTS.md` §5 and the migration paragraph of `local_observe/platform/README.md` —
+# move with it, as does `docs/api/COVERAGE.md`, which names the table as the state source of every
+# idempotent write.
+#
+# The one index serves the read that runs on every write: the expired-record sweep, which asks by
+# completion time over a table that grows with request volume for the life of the file. The stale
+# in-flight reclaim needs no index at all, because it is addressed by (actor, key) — the primary key.
+# Like v8 and v9, this index is deliberately **not** named with `INDEXED BY`: the sweep has an honest
+# zero to report, and an SQLite error for a missing index would turn bookkeeping into a failed write.
+API_IDEMPOTENCY_TABLE = 'api_idempotency'
+#: Characters one stored reply may hold — `api_contract.MAX_STORED_REPLY_BYTES`, written into the CHECK
+#: so the replay promise and the column cannot disagree. Repeated once here as the schema's own number.
+API_IDEMPOTENCY_REPLY_LIMIT = 65536
+IDEMPOTENCY_SCHEMA = f'''
+CREATE TABLE {API_IDEMPOTENCY_TABLE} (actor TEXT NOT NULL, key TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL CHECK(length(request_sha256) = 64),
+    reserved_at TEXT NOT NULL, completed_at TEXT, status INTEGER, payload TEXT,
+    CHECK(completed_at IS NULL OR (status BETWEEN 100 AND 599
+                                   AND length(payload) BETWEEN 1 AND {API_IDEMPOTENCY_REPLY_LIMIT})),
+    PRIMARY KEY (actor, key));
+CREATE INDEX api_idempotency_expiry ON {API_IDEMPOTENCY_TABLE}(completed_at);
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
                               7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
-                              10: RUNNER_SCHEMA}
+                              10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
@@ -1747,6 +1810,112 @@ class Store:
         """
         from .verification_reader import list_records
         return list_records(self, execution_id, actor)
+
+    def idempotency_reserve(self, actor: str, key: str, request_sha256: str, *,
+                            now: dt.datetime | None = None,
+                            ttl_seconds: int = IDEMPOTENCY_TTL_SECONDS,
+                            stale_seconds: int = IDEMPOTENCY_IN_FLIGHT_SECONDS,
+                            prune_rows: int = IDEMPOTENCY_PRUNE_ROWS) -> dict[str, Any]:
+        """Claim one idempotency key, or hand back the answer already stored under it.
+
+        Returns `{'state': ...}`, and `api_contract.IdempotencyGate` is what turns each state into an
+        HTTP answer; this method decides nothing about statuses, because a durable record is not a
+        response code. The four states, in the order they are tested:
+
+        * `replay` — the key completed with this exact digest, so `status` and `payload` are the answer
+          the caller already received and the write must not run again.
+        * `conflict` — the key exists under a different digest. Two intentions under one name; nothing
+          runs and nothing is written.
+        * `in_progress` — the key is claimed and unexpired elsewhere. The caller is told to stop, not
+          made to wait: waiting here would be a queue of duplicate side effects.
+        * `reserved` — this call wrote the in-flight marker (or reclaimed one whose owner died).
+
+        Expiry is swept in the same transaction, bounded to `prune_rows`, so no scheduler is required to
+        keep the table from growing for the life of the file.
+
+        Raises:
+            StateError: The actor or key is not a bounded label, or the digest is not 64 lowercase hex
+                characters. Raised before the table is read.
+        """
+        label(actor)
+        label(key)
+        if not re.fullmatch(r'[0-9a-f]{64}', request_sha256 or ''):
+            raise StateError('Invalid idempotency request digest')
+        if not (IDEMPOTENCY_TTL_BOUNDS[0] <= ttl_seconds <= IDEMPOTENCY_TTL_BOUNDS[1]) \
+                or not 1 <= stale_seconds <= ttl_seconds or not 1 <= prune_rows <= 1000:
+            raise StateError('Invalid idempotency retention bounds')
+        now = clock(now)
+        expiry = utc_text(now - dt.timedelta(seconds=ttl_seconds))
+        stale = utc_text(now - dt.timedelta(seconds=stale_seconds))
+        with self.transaction() as connection:
+            connection.execute(
+                f'DELETE FROM {API_IDEMPOTENCY_TABLE} WHERE rowid IN ('
+                ' SELECT rowid FROM ' + API_IDEMPOTENCY_TABLE +
+                ' WHERE (completed_at IS NOT NULL AND completed_at <=?)'
+                ' OR (completed_at IS NULL AND reserved_at <=?) LIMIT ?)',
+                (expiry, stale, prune_rows))
+            row = connection.execute(
+                f'SELECT request_sha256, completed_at, status, payload, reserved_at FROM {API_IDEMPOTENCY_TABLE}'
+                ' WHERE actor=? AND key=?', (actor, key)).fetchone()
+            if row is None:
+                connection.execute(
+                    f'INSERT INTO {API_IDEMPOTENCY_TABLE}(actor,key,request_sha256,reserved_at)'
+                    ' VALUES (?,?,?,?)', (actor, key, request_sha256, utc_text(now)))
+                return {'state': 'reserved'}
+            if row['request_sha256'] != request_sha256:
+                return {'state': 'conflict'}
+            if row['completed_at'] is not None:
+                return {'state': 'replay', 'status': row['status'], 'payload': row['payload']}
+            if row['reserved_at'] > stale:
+                return {'state': 'in_progress'}
+            # The owner of this claim died. Re-stamp it rather than delete and re-insert: the row is the
+            # same key, and a delete/insert pair across a lock boundary could hand one key to two callers.
+            connection.execute(
+                f'UPDATE {API_IDEMPOTENCY_TABLE} SET reserved_at=? WHERE actor=? AND key=?',
+                (utc_text(now), actor, key))
+            return {'state': 'reserved'}
+
+    def idempotency_complete(self, actor: str, key: str, request_sha256: str, status: int,
+                             payload: str, *, now: dt.datetime | None = None) -> bool:
+        """Store one answer under a key this request holds, and return whether the row was this request's.
+
+        The digest is part of the WHERE clause on purpose: a completion can only land on the in-flight row
+        the same caller reserved, and never on one it reserved and lost to a reclaim. `False` therefore
+        means "someone else owns this key now", which is an answer, not an error — the caller's response
+        was already correct when it was served, and the stored copy is the part that is dropped.
+
+        Raises:
+            StateError: The status is not an HTTP status, or the payload is not bounded canonical JSON.
+        """
+        label(actor)
+        label(key)
+        if not 100 <= status <= 599:
+            raise StateError('Invalid idempotency response status')
+        if not isinstance(payload, str) or not 1 <= len(payload) <= API_IDEMPOTENCY_REPLY_LIMIT:
+            raise StateError('Invalid idempotency response payload')
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                f'UPDATE {API_IDEMPOTENCY_TABLE} SET completed_at=?, status=?, payload=?'
+                ' WHERE actor=? AND key=? AND request_sha256=? AND completed_at IS NULL',
+                (utc_text(clock(now)), status, payload, actor, key, request_sha256))
+            return cursor.rowcount == 1
+
+    def idempotency_release(self, actor: str, key: str, request_sha256: str) -> None:
+        """Let go of an in-flight claim whose answer was refused, oversized or never produced.
+
+        Idempotent, and safe to call on a row that already completed: the completed_at test means a
+        release racing a completion discards nothing.
+
+        Raises:
+            StateError: The actor or key is not a bounded label.
+        """
+        label(actor)
+        label(key)
+        with self.transaction() as connection:
+            connection.execute(
+                f'DELETE FROM {API_IDEMPOTENCY_TABLE}'
+                ' WHERE actor=? AND key=? AND request_sha256=? AND completed_at IS NULL',
+                (actor, key, request_sha256))
 
     def status(self) -> dict[str, Any]:
         with self.transaction() as connection:

@@ -1,0 +1,2609 @@
+# The platform HTTP contract, OpenAPI 3.1.
+#
+# Every operation served by `local_observe.platform.api:create_app` and the two seams it hands paths to
+# (`verification_api`, `observer_review`), plus the operator shell in `operator.py`. Accuracy rule for
+# this file: a response schema is what the code returns, and where a body is a documented superset (a
+# runtime snapshot, a record row) that is said in the description rather than hidden behind `{}`.
+#
+# `x-status` is not an OpenAPI keyword; it is this product's. `implemented` means a request reaches a
+# handler; `planned` means the document proposes the shape and the transport answers 404 for it today.
+# `x-required-role` names the credential roles that may call — `tests/test_api_openapi_conformance.py`
+# fails when the list here, the list in `docs/api/coverage.yaml`, and the gate in the code disagree.
+openapi: 3.1.0
+info:
+  title: local-observe platform API
+  version: 0.1.0
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: |
+    Authenticated JSON surface for incidents, actions, notifications, evidence and review.
+
+    * One bearer credential per caller, assigned one of six server-side roles: `reader`, `producer`,
+      `proposer`, `human`, `executor`, `summary`. A body never names an actor (§5 of `docs/CONTRACTS.md`).
+    * Two verbs: `GET` reads, `POST` writes. Every other verb is answered `405`.
+    * Answers before the envelope existed keep the flat shape `{"error": "<code>", "detail": "<sentence>"}`.
+      Answers produced through the shared boundary use `{"error": {"code", "message", "request_id"}}`, and
+      `X-Request-Id` is echoed on every response, including the flat ones. `tests/test_api_errors.py` pins
+      the flat bodies; changing them is a compatibility decision, not a cleanup.
+    * Bodies are limited to 64 KiB, refused whole with `413 body_too_large` by the chunk that crosses the
+      bound.
+    * Six refusals belong to the transport and not to any handler, so `x-transport-errors` below states
+      them once for every `/v1` operation instead of repeating six entries forty times. A handler's own
+      refusals are listed per operation.
+servers:
+  - url: http://127.0.0.1:18083
+    description: |
+      The reference component — `components/control/platform/compose.yaml`, which publishes
+      `127.0.0.1:${LO_PLATFORM_PORT:-18083}` onto the service's container port 8002. Loopback only: a LAN
+      or wide address belongs to an installation overlay behind authenticated TLS, and this document can
+      state the product default, not the operator's choice.
+security:
+  - bearerAuth: []
+# The dispatcher's own answers, available on every `/v1` operation and produced before any handler runs.
+# Stated once here because repeating them under all forty-nine operations would hide the handler-specific
+# refusals that are the reason to read an operation entry. `tests/test_api_openapi_conformance.py` treats
+# these as documented for `/v1` operations and proves each one really is answerable.
+x-transport-errors:
+  scope: every path beginning /v1
+  responses:
+    '401':
+      $ref: '#/components/responses/Unauthorized'
+    '403':
+      $ref: '#/components/responses/SummaryOnly'
+    '404':
+      $ref: '#/components/responses/NotFound'
+    '405':
+      $ref: '#/components/responses/MethodNotAllowed'
+    '413':
+      $ref: '#/components/responses/BodyTooLarge'
+    '500':
+      $ref: '#/components/responses/InternalError'
+tags:
+  - name: identity
+    description: Who a credential is.
+  - name: health
+    description: What this process and this database say about themselves.
+  - name: occurrences
+    description: Canonical events, external envelopes, evidence and incidents.
+  - name: actions
+    description: The approval lifecycle — proposed, pending, approved/denied/expired, executing, outcome.
+  - name: notifications
+    description: The delivery outbox, its safety gates and its single-use callbacks.
+  - name: verification
+    description: The post-action verdict a verifier submits and the server derives.
+  - name: observer
+    description: Bounded investigations and the human review of them.
+  - name: setup
+    description: Guided setup plans, human decisions and the trusted runner handoff.
+  - name: operator
+    description: The static shell and the one question it may ask without a credential.
+paths:
+  /v1/me:
+    get:
+      tags: [identity]
+      operationId: platform.identity.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor, summary]
+      summary: Return the identity and role this credential carries.
+      description: |
+        Decided by the transport from the bearer token and nothing else. The one route besides
+        `/v1/overview` a `summary` credential may read.
+      responses:
+        '200':
+          description: The authenticated actor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActorIdentity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/status:
+    get:
+      tags: [health]
+      operationId: platform.status.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: Counts of incidents, actions and queued deliveries.
+      description: |
+        A count is not a health verdict and an absent status key means no row holds that status. The shape
+        is pinned by `tests/test_regression_schema_version.py`.
+      responses:
+        '200':
+          description: The current counts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/runtime:
+    get:
+      tags: [health]
+      operationId: platform.runtime.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: This process's startup snapshot, delivery-loop tally and refusal-audit counters.
+      description: |
+        Three sources in one body: a filesystem/module snapshot taken at startup, counters the delivery
+        loop publishes as it runs, and the refusal-audit tallies (`refusal_audit` from the store's budget,
+        `refusal_audit_dispatch` from this app instance's single slot). The counters are volatile — they
+        reset when the process does, and `scope`/`resets_on_restart` say so in the body itself. A shed
+        refusal is counted and has no row, so a 403 is never proof of a durable record.
+      responses:
+        '200':
+          description: The runtime snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/overview:
+    get:
+      tags: [health]
+      operationId: platform.overview.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor, summary]
+      summary: The portal summary — durable counts plus freshness-qualified observations.
+      description: |
+        Portal summary v1. Unknown, disabled, stale and future-dated observations carry null values; a
+        missing observation never implies zero failures or a verified backup. Job-count scope is explicit
+        and may be a subset of the estate.
+      responses:
+        '200':
+          description: The summary document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/audit:
+    get:
+      tags: [health]
+      operationId: platform.audit.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: One bounded page of the append-only audit history, newest first.
+      description: |
+        The query parser runs before the store is asked for anything, so a bad page request opens no
+        connection. `snapshot` and `before` are a pair: a cursor naming only one is refused, and `omitted`
+        marks a row the per-row width bound cut rather than a row that did not exist.
+      parameters:
+        - $ref: '#/components/parameters/AuditLimit'
+        - $ref: '#/components/parameters/AuditCategory'
+        - $ref: '#/components/parameters/AuditSnapshot'
+        - $ref: '#/components/parameters/AuditBefore'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/records/{table}:
+    get:
+      tags: [occurrences]
+      operationId: incident.records.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: One capped newest-first window over one named record table.
+      description: |
+        `table` is a closed list — `events`, `incidents`, `actions`, `executions`, `audit`, `outbox`,
+        `notification_attempts` — and `limit` is 1..100, refused rather than clamped. Columns that hold a
+        token or a token hash are removed before the page is built. Each row carries its stored document
+        plus the display projection the deployment configured.
+      parameters:
+        - name: table
+          in: path
+          required: true
+          description: One of the seven tables this surface exposes.
+          schema:
+            type: string
+            enum: [events, incidents, actions, executions, audit, outbox, notification_attempts]
+        - name: limit
+          in: query
+          required: false
+          description: Newest rows to return, 1..100. A non-integer is refused; a value out of range is refused by the store.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        '200':
+          description: The window.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordWindow'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/inventory:
+    get:
+      tags: [occurrences]
+      operationId: resource.inventory.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: The first 100 declared resources, by name.
+      description: |
+        Read from the rebuildable derived index, never from the operational store. Served only when this
+        process was started with an index; without one the path is answered `404 not_found`.
+      responses:
+        '200':
+          description: Declared rows with their display projection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryWindow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/evidence:
+    get:
+      tags: [occurrences]
+      operationId: evidence.sample.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: Ask whether one stored evidence sample is available, expired or unavailable.
+      description: |
+        Three answers and they are not interchangeable: `expired` means the sample was real and its
+        retention ended, `unavailable` means this platform never kept it. Both are answers, not errors.
+      parameters:
+        - name: source
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: sample_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The availability verdict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+    post:
+      tags: [occurrences]
+      operationId: evidence.sample.create
+      x-status: implemented
+      x-required-role: [producer]
+      summary: File one bounded evidence sample.
+      description: |
+        A sample is `sample_id`, `observed_at`, `ok` and one scalar `value`, canonical to at most 2 KiB,
+        expiring 15 days after its own observation. Re-filing the same sample from the same producer is a
+        duplicate; re-filing the same id with different contents is a refusal, not an overwrite.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceSample'
+      responses:
+        '200':
+          description: The stored sample's identifier.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceCreated'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/events:
+    post:
+      tags: [occurrences]
+      operationId: occurrence.create
+      x-status: implemented
+      x-required-role: [producer]
+      summary: Admit one canonical event.
+      description: |
+        `kind` is a closed vocabulary and severity is a closed ladder (`docs/CONTRACTS.md` §4); a word
+        outside either is refused with the sentence the crosswalk raised. Identity is
+        `(source, source_event_id)`, so this route needs no `Idempotency-Key`: a re-post of the same event
+        answers `duplicate` with the original ids, and a re-post that changed contents is refused as
+        `conflict` rather than accepted as a second verdict.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CanonicalEvent'
+      responses:
+        '200':
+          description: The admission outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventIntakeResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/intake/{source}:
+    post:
+      tags: [occurrences]
+      operationId: occurrence.intake
+      x-status: implemented
+      x-required-role: [producer]
+      summary: Accept one external source envelope and admit what it proves.
+      description: |
+        The path names the source and must equal the caller's own credential identity, so one producer
+        cannot post on another's behalf. An alert with no keepable sample becomes a `coverage` event about
+        the intake path and does not open the underlying condition. A resource name that resolves to two
+        declarations answers `conflict`, and one that resolves to none lands as the admitted
+        `resource_id: null`; the per-event `resource_link` is where that degradation is visible. At most 50
+        alerts per envelope, refused whole rather than truncated.
+      parameters:
+        - name: source
+          in: path
+          required: true
+          description: The source vocabulary this envelope is in (`alertmanager`, `crowdsec`). Must equal the credential identity.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceEnvelope'
+      responses:
+        '200':
+          description: One entry per event admitted, with its link verdict.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeBatchResult'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/actions:
+    post:
+      tags: [actions]
+      operationId: action.propose
+      x-status: implemented
+      x-required-role: [proposer, human]
+      summary: File one approval request against an open incident.
+      description: |
+        Records a pending proposal and nothing else: no approval, no dispatch, no execution. The request is
+        bound to the requester identity from the credential, the action allowlist, canonical parameters and
+        its hash. Deduplication is durable — `(requester, retry_key)` — which is why this route is not on
+        the `Idempotency-Key` list: one write would otherwise have two answers to "which name identifies
+        this proposal?".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionRequest'
+      responses:
+        '200':
+          description: The filed action.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/actions/decision:
+    post:
+      tags: [actions]
+      operationId: action.decide
+      x-status: implemented
+      x-required-role: [human]
+      summary: Approve or deny a pending action.
+      description: |
+        The only role that may decide. When a trusted runner handoff is configured, the decision also
+        carries the runner binding hash and is captured in the same transaction as the verdict.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionDecision'
+      responses:
+        '200':
+          description: The new status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/actions/review:
+    get:
+      tags: [actions]
+      operationId: action.review
+      x-status: implemented
+      x-required-role: [human]
+      summary: Read the exact request a pending action binds, before deciding it.
+      description: |
+        One named query parameter, no other spelling accepted. The answer is the stored request plus its
+        digest, so a human reviews the bytes the executor will run rather than a description of them.
+      parameters:
+        - name: action_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The reviewable request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionReview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/actions/claim:
+    post:
+      tags: [actions]
+      operationId: action.claim
+      x-status: implemented
+      x-required-role: [executor]
+      summary: Claim an approved action atomically before dispatch.
+      description: |
+        Returns the execution id and the runner token; a second claim of the same action is refused. Send
+        `Idempotency-Key` when the answer matters twice: a runner that lost its response reads back the
+        token it was already given instead of losing track of a live execution. Refused with `conflict`
+        when a handoff queue is configured, because claiming around the queue skips its binding check.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionIdentifier'
+      responses:
+        '200':
+          description: The claim.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionClaim'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/actions/execute:
+    post:
+      tags: [actions]
+      operationId: action.execute
+      x-status: implemented
+      x-required-role: [executor]
+      summary: Request durable handoff of an approved action to a configured runner.
+      description: |
+        Refuses when no trusted runner is configured. No credential is returned here; the runner holds its
+        own. Bodies on this route are parsed strictly — duplicate keys are refused, not last-wins.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActionIdentifier'
+      responses:
+        '200':
+          description: The queued handoff.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffQueued'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/runner/claim:
+    post:
+      tags: [actions]
+      operationId: action.runner.claim
+      x-status: implemented
+      x-required-role: [executor]
+      summary: Claim a queued runner request under a binding the operator configured.
+      description: |
+        A retried claim with the runner's own journaled token returns that token; a different token is a
+        refusal, not a second execution.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunnerClaim'
+      responses:
+        '200':
+          description: The runner's execution handle.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionClaim'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/runner/requests:
+    get:
+      tags: [actions]
+      operationId: action.runner_requests.list
+      x-status: implemented
+      x-required-role: [executor]
+      summary: The queue a named trusted runner may work.
+      description: Served only when a runner handoff is configured; the caller's identity must be a configured runner.
+      responses:
+        '200':
+          description: Up to 20 queued requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerQueue'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/executions/outcome:
+    post:
+      tags: [actions]
+      operationId: action.execution.outcome
+      x-status: implemented
+      x-required-role: [executor, human]
+      summary: Record what an execution did — succeeded, failed or unknown.
+      description: |
+        `unknown` is a real outcome and requires reconciliation; a process exit code alone never settles an
+        incident. Send `Idempotency-Key` when a lost acknowledgement would otherwise leave the outcome
+        ambiguous.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecutionOutcome'
+      responses:
+        '200':
+          description: The recorded outcome.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResult'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/notifications/safety:
+    get:
+      tags: [notifications]
+      operationId: config.notification_policy.read
+      x-status: implemented
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: The delivery posture — mode, per-channel breakers, suppression count, test window.
+      responses:
+        '200':
+          description: The posture.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSafety'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/notifications/retry:
+    post:
+      tags: [notifications]
+      operationId: notification.retry
+      x-status: implemented
+      x-required-role: [human]
+      summary: Re-book one exhausted delivery.
+      description: |
+        Only a `dead` delivery can be retried, and a suppressed one never can — a suppression is a
+        decision, not a failure. Idempotency matters here: a retry whose answer was lost must not become a
+        second page.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryIdentifier'
+      responses:
+        '200':
+          description: The delivery is pending again.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResult'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/notifications/reset-safety:
+    post:
+      tags: [notifications]
+      operationId: notification.safety.reset
+      x-status: implemented
+      x-required-role: [human]
+      summary: Clear this channel's flood breaker.
+      description: Takes an empty object, refuses anything else, and answers whether a backlog was replayed.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        '200':
+          description: The breaker is clear.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyReset'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+  /v1/callbacks/{channel}:
+    post:
+      tags: [notifications]
+      operationId: notification.callback.record
+      x-status: implemented
+      x-required-role: [human, proposer, executor]
+      summary: Record the intent a notified human acted on.
+      description: |
+        The single-use code travels in the body, never in the path or a query string, because both are
+        logged by everything between a phone and this process. A wrong code, an unknown channel and a code
+        minted for another channel answer with the same bytes — which of the three it was is not the
+        caller's to learn. The action stays `pending`: an intent is not a decision. This route is
+        deliberately outside the `Idempotency-Key` list — the token is itself the single-use identity, and a
+        stored success replayed after it was spent would report an intent this route exists to refuse.
+      parameters:
+        - name: channel
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallbackToken'
+      responses:
+        '200':
+          description: One approval intent, audited against the delivery that announced it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalIntent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          oneOf:
+            - $ref: '#/components/responses/Unauthorized'
+            - $ref: '#/components/responses/CallbackUnauthorised'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/setup/plan:
+    post:
+      tags: [setup]
+      operationId: administration.guided_setup.plan
+      x-status: implemented
+      x-required-role: [human, proposer]
+      summary: Render one reviewable setup plan from a profile.
+      description: |
+        Nothing is applied. The plan is stored against its own digest, and a destination that already holds
+        arbitrary data is refused rather than adopted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile:
+                  type: object
+                  description: The setup profile, bounded and parsed strictly (duplicate keys refused).
+              required: [profile]
+              additionalProperties: false
+      responses:
+        '200':
+          description: The plan and its preflight state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupPlan'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/setup/decision:
+    post:
+      tags: [setup]
+      operationId: administration.guided_setup.decide
+      x-status: implemented
+      x-required-role: [human]
+      summary: Approve or deny a plan, with an expiry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_id:
+                  type: string
+                decision:
+                  type: string
+                  enum: [approved, denied]
+                expires_at:
+                  type: string
+                  format: date-time
+              required: [plan_id, decision, expires_at]
+              additionalProperties: false
+      responses:
+        '200':
+          description: The decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /v1/setup/request:
+    post:
+      tags: [setup]
+      operationId: administration.guided_setup.request
+      x-status: implemented
+      x-required-role: [human, proposer, executor]
+      summary: Queue an approved plan for its named runner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_id:
+                  type: string
+              required: [plan_id]
+              additionalProperties: false
+      responses:
+        '200':
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/setup/apply:
+    post:
+      tags: [setup]
+      operationId: administration.guided_setup.apply
+      x-status: implemented
+      x-required-role: [executor]
+      summary: Execute the plan's exact steps as the runner it names.
+      description: The separate trusted execution boundary — this is where a setup plan becomes filesystem and service changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_id:
+                  type: string
+              required: [plan_id]
+              additionalProperties: false
+      responses:
+        '200':
+          description: The plan's execution receipt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/setup/verify:
+    post:
+      tags: [setup]
+      operationId: administration.guided_setup.verify
+      x-status: implemented
+      x-required-role: [reader, human, proposer, executor]
+      summary: Read the stored verification receipt for a plan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_id:
+                  type: string
+              required: [plan_id]
+              additionalProperties: false
+      responses:
+        '200':
+          description: The receipt, or the refusal that says none exists yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/setup/pending:
+    get:
+      tags: [setup]
+      operationId: administration.guided_setup.pending
+      x-status: implemented
+      x-required-role: [executor]
+      summary: The queued plans this runner owns.
+      responses:
+        '200':
+          description: Up to 20 plan identifiers.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plans:
+                    type: array
+                    maxItems: 20
+                    items:
+                      type: string
+                required: [plans]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/verification/binding:
+    get:
+      tags: [verification]
+      operationId: verification.binding.read
+      x-status: implemented
+      x-required-role: [reader, producer, human, proposer, executor]
+      x-admits-producer-when: 'a mounted verification policy names the producer identity'
+      summary: The rule revision captured for an action, inside that action's own transaction.
+      description: |
+        One named parameter, strict percent-decoding, 256 bytes of query at most. A `summary` credential is
+        turned away before its body would be read; with no policy mounted, reads still answer.
+      parameters:
+        - name: action_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The captured binding.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationBinding'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/VerificationStorageError'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/VerificationUnavailable'
+            - $ref: '#/components/responses/VerificationBusy'
+  /v1/verification/records:
+    get:
+      tags: [verification]
+      operationId: verification.records.list
+      x-status: implemented
+      x-required-role: [reader, producer, human, proposer, executor]
+      x-admits-producer-when: 'a mounted verification policy names the producer identity'
+      summary: The verification ids filed against one execution.
+      description: Identifiers only, never documents.
+      parameters:
+        - name: execution_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The identifier list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verification_ids:
+                    type: array
+                    items:
+                      type: string
+                required: [verification_ids]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/VerificationStorageError'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/VerificationUnavailable'
+            - $ref: '#/components/responses/VerificationBusy'
+    post:
+      tags: [verification]
+      operationId: verification.record.submit
+      x-status: implemented
+      x-required-role: [producer]
+      x-admits-producer-when: 'a mounted verification policy names the producer identity'
+      summary: Submit one observation; the server derives the verdict.
+      description: |
+        The record is parsed strictly before the store is reached — duplicate keys, non-finite numbers,
+        unbounded integers and over-deep structures are all refused. Re-posting the identical record answers
+        the same result; re-posting it with different contents is a `409`, which is why this route is not
+        also keyed by `Idempotency-Key`. A stored `cleared` is consistency with the captured read, not proof
+        that a remote read happened.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerificationRecord'
+      responses:
+        '200':
+          description: Accepted; the derived verdict is stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationSubmitted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '500':
+          $ref: '#/components/responses/VerificationStorageError'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/VerificationUnavailable'
+            - $ref: '#/components/responses/VerificationBusy'
+  /v1/verification/record:
+    get:
+      tags: [verification]
+      operationId: verification.record.read
+      x-status: implemented
+      x-required-role: [reader, producer, human, proposer, executor]
+      x-admits-producer-when: 'a mounted verification policy names the producer identity'
+      summary: One stored verification record by its digest.
+      parameters:
+        - name: verification_id
+          in: query
+          required: true
+          description: A 64-character lowercase SHA-256 digest.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/VerificationStorageError'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/VerificationBusy'
+            - $ref: '#/components/responses/VerificationUnavailable'
+  /v1/verification/candidates:
+    get:
+      tags: [verification]
+      operationId: verification.candidates.list
+      x-status: implemented
+      x-required-role: [producer]
+      x-admits-producer-when: 'a mounted verification policy names the producer identity'
+      summary: A bounded page of terminal executions with no accepted verification record.
+      description: For the follower only. Reading a candidate grants no authority to resolve anything.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: The page.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  next_after:
+                    type: ['string', 'null']
+                required: [items, next_after]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '500':
+          $ref: '#/components/responses/VerificationStorageError'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/VerificationBusy'
+            - $ref: '#/components/responses/VerificationUnavailable'
+  /v1/observer/cycles:
+    get:
+      tags: [observer]
+      operationId: investigation.cycle.list
+      x-status: implemented
+      x-required-role: [human]
+      summary: Recent investigation cycles and what still awaits review.
+      description: |
+        `human` alone: a reader may read records elsewhere and still must not see a grade. Served only when
+        this installation named an observer journal; otherwise the path is `404 not_found`.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of cycles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObserverCycleList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/cycle:
+    get:
+      tags: [observer]
+      operationId: investigation.cycle.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: One cycle, its retained evidence, its corrections and its replay.
+      parameters:
+        - name: cycle_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The cycle detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObserverCycleDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/feedback:
+    post:
+      tags: [observer]
+      operationId: investigation.review.record
+      x-status: implemented
+      x-required-role: [human]
+      summary: Append one human grade against a cycle's digest.
+      description: |
+        An append, never an edit: a withdrawn or superseded correction stays in the history, and the record
+        keeps the provenance the export needs. A cycle whose digest no longer matches is a `409`, not a
+        grade.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ObserverFeedbackRequest'
+      responses:
+        '200':
+          description: The stored feedback.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema_version:
+                    type: integer
+                    const: 1
+                  feedback:
+                    type: object
+                required: [schema_version, feedback]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/operator-auth:
+    get:
+      tags: [operator]
+      operationId: administration.authentication.read
+      x-status: implemented
+      x-required-role: []
+      security: []
+      summary: Which sign-in field the interface should show.
+      description: |
+        The one route answered without a credential, because the interface must ask it before it knows how
+        to sign in. It says `password` or `token` and nothing else — no hint about any credential.
+      responses:
+        '200':
+          description: The configured mode.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode:
+                    type: string
+                    enum: [password, token]
+                required: [mode]
+  /:
+    get:
+      tags: [operator]
+      operationId: operator.shell.read
+      x-status: implemented
+      x-required-role: []
+      security: []
+      summary: The operator interface shell.
+      description: |
+        Public by design and carrying no secret; every request it then makes is authenticated. Served with
+        `no-store`, `nosniff`, `no-referrer` and a CSP that allows no origin but this one
+        (`default-src 'self'; frame-ancestors 'none'; form-action 'none'`).
+      responses:
+        '200':
+          description: The document.
+          content:
+            text/html:
+              schema:
+                type: string
+  /ui.css:
+    get:
+      tags: [operator]
+      operationId: operator.stylesheet.read
+      x-status: implemented
+      x-required-role: []
+      security: []
+      summary: The interface stylesheet.
+      responses:
+        '200':
+          description: The stylesheet.
+          content:
+            text/css:
+              schema:
+                type: string
+  /ui.js:
+    get:
+      tags: [operator]
+      operationId: operator.script.read
+      x-status: implemented
+      x-required-role: []
+      security: []
+      summary: The interface script.
+      responses:
+        '200':
+          description: The script.
+          content:
+            text/javascript:
+              schema:
+                type: string
+  /lucide.min.js:
+    get:
+      tags: [operator]
+      operationId: operator.icon_script.read
+      x-status: implemented
+      x-required-role: []
+      security: []
+      summary: The bundled icon set.
+      description: Third-party asset; its notice is retained in `local_observe/platform/static/LUCIDE-LICENSE`.
+      responses:
+        '200':
+          description: The script.
+          content:
+            text/javascript:
+              schema:
+                type: string
+  /v1/openapi.json:
+    get:
+      tags: [identity]
+      operationId: platform.openapi.read
+      x-status: planned
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: Serve this document.
+      description: |
+        Not served. Publishing the route table to every caller that can reach the port is a decision of its
+        own, and the file in `docs/api/openapi.yaml` is the shipped artifact today.
+      responses:
+        '200':
+          description: This contract as JSON.
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/occurrences:
+    get:
+      tags: [occurrences]
+      operationId: occurrence.list
+      x-status: planned
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: Open occurrences with the acknowledgement state beside each.
+      description: |
+        Not served. The shape this product intends is the bounded page helper in
+        `local_observe/platform/api_contract.py` (`limit` plus an opaque `cursor`), over the incident and
+        condition state `state.py` already keeps.
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: One page.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoundedPage'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/occurrences/acknowledge:
+    post:
+      tags: [occurrences]
+      operationId: occurrence.acknowledge
+      x-status: planned
+      x-required-role: [human]
+      summary: Say that a human has seen this occurrence, and stop escalating it.
+      description: |
+        Not served. It will carry `Idempotency-Key` (a lost answer must not re-open or double-count an
+        acknowledgement) and `If-Match` against the incident revision, so an acknowledgement about a state
+        nobody read is refused as `stale_revision` rather than applied. No body field names the human:
+        `api_contract.assert_no_actor_claim` refuses one.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: One incident identifier and the revision it was read at. Identity fields are refused.
+      responses:
+        '200':
+          description: Acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResult'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '412':
+          $ref: '#/components/responses/StaleRevision'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/occurrences/dismiss:
+    post:
+      tags: [occurrences]
+      operationId: occurrence.dismiss
+      x-status: planned
+      x-required-role: [human]
+      summary: Close an occurrence as not-actionable, without resolving its condition.
+      description: |
+        Not served. Dismissal never resolves the underlying condition — that belongs to a recovery event or
+        a cleared verification — and a dismissed occurrence must not re-open when the same verdict is
+        replayed, which is the rule its milestone has to state.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Dismissed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResult'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '412':
+          $ref: '#/components/responses/StaleRevision'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/maintenance/windows:
+    get:
+      tags: [occurrences]
+      operationId: maintenance.window.read
+      x-status: planned
+      x-required-role: [reader, producer, proposer, human, executor]
+      summary: The live windows, each with whether its attestation can be trusted.
+      description: Not served. `platform/suppression.live_windows` already answers this question for the CLI.
+      responses:
+        '200':
+          description: The windows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoundedPage'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [occurrences]
+      operationId: maintenance.window.declare
+      x-status: planned
+      x-required-role: [human]
+      summary: Declare a bounded maintenance window.
+      description: |
+        Not served. This is the missing HTTP write the CLI's own docstring names: the library call, its
+        bounds (`MAX_WINDOW_SECONDS`, refused at declaration *and* at every use) and its audit attestation
+        exist; the route does not. A human credential is the whole point — a command line that minted a
+        human actor from a flag would be claiming a role the caller never proved.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: The declared window.
+          content:
+            application/json:
+              schema:
+                type: object
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/maintenance/windows/revoke:
+    post:
+      tags: [occurrences]
+      operationId: maintenance.window.revoke
+      x-status: planned
+      x-required-role: [human]
+      summary: Revoke a window so it stops covering immediately.
+      description: |
+        Not served. Separate from declare because a revocation has to be legible in the audit history on its
+        own, and a revoked-but-live row is the one shape a time predicate alone would keep offering.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResult'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '412':
+          $ref: '#/components/responses/StaleRevision'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        One opaque token from the mounted role file (`LO_PLATFORM_CREDENTIALS`), compared with
+        `secrets.compare_digest`. Exactly one `Authorization` header is accepted: two values are refused
+        rather than resolved by ordering, so a proxy cannot choose which credential a request used. A
+        token is never accepted from a query string, a cookie or a body field, and the retired
+        `LO_PLATFORM_CREDENTIALS_JSON` environment form is a startup refusal, not a fallback.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Run this write once, and let me read the same answer back if I lose it. Bounded to
+        `[A-Za-z0-9_.:-]{1,128}` and refused, never normalised, if malformed or repeated. Same key plus the
+        same canonical body replays the stored answer with `X-Idempotency-Replayed: true`; same key plus a
+        different body is `409 idempotency_conflict` and nothing runs; a key still in flight is
+        `409 request_in_progress`, never a wait. Only a 2xx is stored, records expire after 24 hours, and a
+        key claimed by a process that died is released to the next caller after 300 seconds.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_.:-]{1,128}$'
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        The revision this write was read at, as the `ETag` the read issued. A mismatch is
+        `412 stale_revision`; `*` means "overwrite whatever is there" and is treated as no expectation.
+      schema:
+        type: string
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Rows to return. Refused rather than clamped, so a caller never mistakes a ceiling for completeness.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    PageCursor:
+      name: cursor
+      in: query
+      required: false
+      description: An opaque continuation token from a previous page's `next_cursor`. A token this service never issued is refused.
+      schema:
+        type: string
+    AuditLimit:
+      name: limit
+      in: query
+      required: false
+      description: Rows for this page, within the audit reader's own bound.
+      schema:
+        type: integer
+    AuditCategory:
+      name: category
+      in: query
+      required: false
+      description: One member of the audit reader's closed category vocabulary, or `all`.
+      schema:
+        type: string
+    AuditSnapshot:
+      name: snapshot
+      in: query
+      required: false
+      description: The read mark this page came from; always paired with `before`.
+      schema:
+        type: integer
+    AuditBefore:
+      name: before
+      in: query
+      required: false
+      description: Continue below this audit sequence; always paired with `snapshot`.
+      schema:
+        type: integer
+  headers:
+    XRequestId:
+      description: The identifier this answer and its server-side log line share.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_.:-]{1,64}$'
+    XIdempotencyReplayed:
+      description: Set when the answer came out of the idempotency record instead of a second execution.
+      schema:
+        type: string
+        const: 'true'
+    ETag:
+      description: The revision a subsequent conditional write must send back in `If-Match`.
+      schema:
+        type: string
+  responses:
+    Unauthorized:
+      description: No credential, two `Authorization` headers, or one this service does not know.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "authentication_required"}
+    CallbackUnauthorised:
+      description: A code that is wrong, unknown, or minted for another channel. One answer for all three.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "callback_unauthorised"}
+    SummaryOnly:
+      description: A read-only summary credential reached a route that is not `/v1/me` or `/v1/overview`.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "summary_only"}
+    BadRequest:
+      description: |
+        The request was refused by the parser, the shape gate or the platform's own rules. `detail` is one of
+        this build's fixed sentences and never a value from the request.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "invalid_request", "detail": "Expected a JSON object body"}
+    NotFound:
+      description: No route answers this path, or this installation has not configured the surface it needs.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "not_found"}
+    MethodNotAllowed:
+      description: Only GET and POST are served.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "method_not_allowed"}
+    BodyTooLarge:
+      description: Refused by the chunk that crossed 64 KiB, before the body was parsed.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "body_too_large"}
+    Conflict:
+      description: |
+        The request is well formed but collides with state the caller cannot see from here — a spent token,
+        an action that is not pending, an event re-posted with different contents.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "conflict", "detail": "Action is not pending"}
+    ContractError:
+      description: |
+        A refusal the shared boundary chose, in the machine envelope: one code, one sentence, and the request
+        id. Produced only by an opt-in part of the contract, so no client that exists today receives it.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    IdempotencyConflict:
+      description: This `Idempotency-Key` already completed a different request body. Nothing ran.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example: {"error": {"code": "idempotency_conflict", "message": "This Idempotency-Key was already used for a different request body", "request_id": "0f0f0f0f-0000-4000-8000-000000000000"}}
+    RequestInProgress:
+      description: Another request holds this key right now. Nothing ran, and nothing was queued.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    StaleRevision:
+      description: The resource changed since the revision this request named. Read it again.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalError:
+      description: |
+        Nobody chose this exception. The body names only the exception class; the traceback is logged at
+        DEBUG and the log line carries this request's id.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+          example: {"error": "internal_error", "detail": "KeyError"}
+    VerificationUnavailable:
+      description: No verification policy is mounted, so nothing may be attested.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    VerificationBusy:
+      description: This process serves one synchronous verification call at a time and the slot is taken. Shed, not queued.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    VerificationStorageError:
+      description: This build's storage is failing. One fixed body; no driver text, no path.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    ObserverReviewBusy:
+      description: The observer review seam serves one journal call at a time and the slot is taken.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    ObserverStateUnavailable:
+      description: The observer's private journal could not be read.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+  schemas:
+    LegacyError:
+      type: object
+      description: The flat error shape the routes that existed before the shared boundary answer with.
+      properties:
+        error:
+          type: string
+          enum: [authentication_required, callback_unauthorised, not_authorised, summary_only,
+                 invalid_request, body_too_large, not_found, method_not_allowed, conflict,
+                 internal_error, observer_state_unavailable, observer_review_busy, operator_login_busy,
+                 verification_unavailable, verification_busy, verification_storage_error]
+        detail:
+          type: string
+      required: [error]
+      additionalProperties: false
+    ErrorEnvelope:
+      type: object
+      description: |
+        The machine envelope. Three fields and no fourth: a code to switch on, one sentence for a human, and
+        the request id that ties it to the server-side log. Never a request value, a path, a token or an
+        exception string.
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [authentication_required, callback_unauthorised, not_authorised, summary_only,
+                     invalid_request, invalid_idempotency_key, actor_claim_refused, invalid_pagination,
+                     invalid_revision, body_too_large, not_found, method_not_allowed, conflict,
+                     idempotency_conflict, request_in_progress, stale_revision, internal_error,
+                     observer_state_unavailable, observer_review_busy, operator_login_busy,
+                     verification_unavailable, verification_busy, verification_storage_error]
+            message:
+              type: string
+            request_id:
+              type: string
+              pattern: '^[A-Za-z0-9_.:-]{1,64}$'
+          required: [code, message, request_id]
+          additionalProperties: false
+      required: [error]
+      additionalProperties: false
+    ActorIdentity:
+      type: object
+      description: The actor the credential decides, never the actor a body claimed.
+      properties:
+        identity:
+          type: string
+        role:
+          type: string
+          enum: [reader, producer, proposer, human, executor, summary]
+      required: [identity, role]
+      additionalProperties: false
+    StatusCounts:
+      type: object
+      description: Status to count. An absent key means no row holds that status — not zero, not unknown.
+      propertyNames:
+        type: string
+      additionalProperties:
+        type: integer
+    PlatformStatus:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          description: The operational schema this build reads and writes.
+        incidents:
+          $ref: '#/components/schemas/StatusCounts'
+        actions:
+          $ref: '#/components/schemas/StatusCounts'
+        notifications:
+          $ref: '#/components/schemas/StatusCounts'
+      required: [schema_version, incidents, actions, notifications]
+    RuntimeSnapshot:
+      type: object
+      description: |
+        A startup filesystem snapshot, the delivery loop's own tally, and the refusal-audit counters — three
+        sources, one body. `scope` and `resets_on_restart` name the volatility of the last group; a shed
+        refusal is counted and has no row.
+      properties:
+        schema_version:
+          type: integer
+        pid:
+          type: integer
+        observed_at:
+          type: string
+        code_root:
+          type: string
+        startup_source_sha256:
+          type: string
+        source_pin_verified:
+          type: boolean
+        notification_mode:
+          type: string
+          enum: [off, recording, live]
+        sender_configured:
+          type: boolean
+        refusal_audit:
+          type: object
+        refusal_audit_dispatch:
+          type: object
+        delivery_loop_failures:
+          type: integer
+        delivery_loop_last_failure_at:
+          type: ['string', 'null']
+      required: [schema_version, notification_mode, sender_configured]
+      additionalProperties: true
+    PortalSummary:
+      type: object
+      description: Portal summary v1. A missing coverage never implies zero failures or a verified backup.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        generated_at:
+          type: string
+        open_incidents:
+          type: integer
+        pending_approvals:
+          type: integer
+        pending_deliveries:
+          type: integer
+        dead_deliveries:
+          type: integer
+        suppressed_deliveries:
+          type: ['integer', 'null']
+        last_verified_backup:
+          type: ['string', 'null']
+        failed_jobs:
+          type: ['integer', 'null']
+        resident_model:
+          type: ['string', 'null']
+        jobs_status:
+          type: string
+        jobs_scope:
+          type: string
+      required: [schema_version, generated_at, open_incidents, pending_approvals, pending_deliveries]
+    AuditRow:
+      type: object
+      properties:
+        sequence:
+          type: integer
+        at:
+          type: string
+        actor:
+          type: string
+        operation:
+          type: string
+        subject:
+          type: string
+        detail:
+          type: object
+        omitted:
+          type: string
+          description: Present instead of `detail` when the per-row width bound cut the stored document.
+      required: [sequence]
+    AuditPage:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditRow'
+        snapshot:
+          type: integer
+          description: The read mark this page and its cursor belong to.
+        next_before:
+          type: ['integer', 'null']
+          description: The position to continue from, or null when this page is the last.
+        scanned:
+          type: integer
+          description: Positions examined to build the page — the cost, stated, so a short page is not a claim of absence.
+      required: [rows, snapshot, next_before, scanned]
+    RecordWindow:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            description: |
+              One stored row, its secret columns (token hashes, claim tokens, callback token hashes) removed
+              before the page was built, plus `display` where a projection applies.
+      required: [rows]
+    InventoryWindow:
+      type: object
+      properties:
+        rows:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              kind:
+                type: string
+              name:
+                type: string
+              display:
+                type: object
+            required: [id, kind, name]
+      required: [rows]
+    BoundedPage:
+      type: object
+      description: |
+        The bounded page the shared pagination helper composes — rows, the limit that was applied, how many
+        came back, and a cursor only when a full page did.
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+        limit:
+          type: integer
+        returned:
+          type: integer
+        next_cursor:
+          type: string
+      required: [rows, limit, returned]
+    EvidenceSample:
+      type: object
+      description: The whole retained context of one observation. Anything wider is refused, not truncated.
+      properties:
+        sample_id:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        ok:
+          type: boolean
+        value:
+          type: ['boolean', 'number', 'null']
+      required: [sample_id, observed_at, ok, value]
+      additionalProperties: false
+    EvidenceCreated:
+      type: object
+      properties:
+        evidence_id:
+          type: string
+      required: [evidence_id]
+    EvidenceStatus:
+      type: object
+      oneOf:
+        - type: object
+          properties:
+            status:
+              type: string
+              const: available
+            sample:
+              $ref: '#/components/schemas/EvidenceSample'
+            expires_at:
+              type: string
+          required: [status, sample, expires_at]
+        - type: object
+          properties:
+            status:
+              type: string
+              enum: [expired, unavailable]
+          required: [status]
+    CanonicalEvent:
+      type: object
+      description: |
+        The closed canonical field set (`docs/CONTRACTS.md` §4). `kind` and `severity` are closed
+        vocabularies and a word outside either is refused with the crosswalk's own sentence; a field the
+        shape does not list is refused too, so no payload text becomes an operator-visible label.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        source:
+          type: string
+        source_event_id:
+          type: string
+        resource_id:
+          type: ['string', 'null']
+          description: A declared UUID, or an explicit null meaning "unresolved" — the answer, not a refusal.
+        observed_at:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum: [availability, coverage, threshold, drift, anomaly, security]
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        data_class:
+          type: string
+        evidence:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+      required: [schema_version, source, source_event_id, resource_id, observed_at, kind, severity]
+    SourceEnvelope:
+      type: object
+      description: |
+        One source's own shape — Alertmanager's `{"alerts": [...]}` today, CrowdSec beside it. Envelope-level
+        fields and annotations are not read; a payload with nothing keepable becomes a `coverage` event about
+        the intake path rather than a verdict about the thing it was watching.
+      properties:
+        alerts:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+      additionalProperties: true
+    EventIntakeResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [accepted, duplicate]
+        event_id:
+          type: string
+          format: uuid
+        incident_id:
+          type: ['string', 'null']
+          format: uuid
+        transition:
+          type: ['string', 'null']
+          description: opened, resolved or null — the change this event made to incident state, not the event's own status.
+      required: [status, event_id]
+    IntakeBatchResult:
+      type: object
+      properties:
+        source:
+          type: string
+        events:
+          type: array
+          maxItems: 50
+          items:
+            allOf:
+              - $ref: '#/components/schemas/EventIntakeResult'
+              - type: object
+                properties:
+                  resource_link:
+                    type: string
+                    enum: [resolved, unknown, conflict, no_alias, index_unavailable, not_configured]
+                    description: Where a name that did not become a UUID is visible. The canonical event must not gain a field for it.
+                required: [resource_link]
+      required: [source, events]
+    ActionRequest:
+      type: object
+      description: |
+        An action a human is being asked to approve. No identity field: the requester is the credential.
+        The exact required fields, the action allowlist and the target opt-in are enforced by the state and
+        policy layers, and refused with the sentence each one raised.
+      properties:
+        incident_id:
+          type: string
+          format: uuid
+        retry_key:
+          type: string
+          description: The caller's durable deduplication name, scoped to this requester.
+        action:
+          type: string
+        version:
+          type: string
+        targets:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            format: uuid
+        parameters:
+          type: object
+        evidence:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            format: uuid
+        expires_at:
+          type: string
+          format: date-time
+    ActionStatus:
+      type: object
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, approved, denied, expired, executing, succeeded, failed, unknown]
+      required: [action_id, status]
+    ActionIdentifier:
+      type: object
+      properties:
+        action_id:
+          type: string
+          format: uuid
+      required: [action_id]
+      additionalProperties: false
+    ActionDecision:
+      type: object
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        decision:
+          type: string
+          enum: [approved, denied]
+        binding_sha256:
+          type: string
+          description: Required when a trusted runner handoff is configured.
+      required: [action_id, decision]
+      additionalProperties: false
+    ActionReview:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [manual, runner]
+        action_id:
+          type: string
+          format: uuid
+        request:
+          type: object
+          description: The stored request document, byte-for-byte what an approval binds.
+        request_sha256:
+          type: string
+      required: [mode, action_id, request, request_sha256]
+    ActionClaim:
+      type: object
+      properties:
+        execution_id:
+          type: string
+        runner_token:
+          type: string
+          description: Shown once, to the credential that earned it. It is stored hashed.
+        status:
+          type: string
+          const: executing
+        request:
+          type: object
+      required: [execution_id, status]
+    HandoffQueued:
+      type: object
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        queued:
+          type: boolean
+      required: [action_id, status, queued]
+    RunnerClaim:
+      type: object
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        binding_sha256:
+          type: string
+        runner_token:
+          type: string
+          description: The caller's own previously journaled token, which is what makes a retried claim safe.
+      required: [action_id, binding_sha256, runner_token]
+      additionalProperties: false
+    RunnerQueue:
+      type: object
+      properties:
+        requests:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              action_id:
+                type: string
+              binding_sha256:
+                type: string
+      required: [requests]
+    ExecutionOutcome:
+      type: object
+      properties:
+        execution_id:
+          type: string
+        outcome:
+          type: string
+          enum: [succeeded, failed, unknown]
+        runner_token:
+          type: string
+      required: [execution_id, outcome]
+      additionalProperties: false
+    StatusResult:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+    DeliveryIdentifier:
+      type: object
+      properties:
+        delivery_id:
+          type: string
+      required: [delivery_id]
+      additionalProperties: false
+    ChannelSafety:
+      type: object
+      properties:
+        circuit_open:
+          type: boolean
+        delivery_mode:
+          type: string
+          enum: [off, recording, live]
+        max_attempts:
+          type: integer
+        window_seconds:
+          type: integer
+      required: [circuit_open, delivery_mode]
+    NotificationSafety:
+      type: object
+      properties:
+        channel:
+          type: string
+        delivery_mode:
+          type: string
+          enum: [off, recording, live]
+        circuit_open:
+          type: boolean
+        suppressed:
+          type: integer
+        synthetic_default:
+          type: string
+        test_window:
+          type: ['string', 'null']
+        channels:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ChannelSafety'
+      required: [channel, delivery_mode, circuit_open, suppressed]
+    SafetyReset:
+      type: object
+      properties:
+        status:
+          type: string
+          const: reset
+        backlog_replayed:
+          type: boolean
+      required: [status, backlog_replayed]
+    CallbackToken:
+      type: object
+      properties:
+        token:
+          type: string
+          description: The single-use code, in the body. Never in a path or a query string.
+        action_id:
+          type: string
+          format: uuid
+      required: [token, action_id]
+      additionalProperties: false
+    ApprovalIntent:
+      type: object
+      properties:
+        status:
+          type: string
+          const: intent_recorded
+        action_id:
+          type: string
+          format: uuid
+        delivery_id:
+          type: string
+        decided:
+          type: boolean
+          description: Always false. Receipt of a callback is not an approval and not a completion.
+      required: [status, action_id, delivery_id, decided]
+    SetupPlan:
+      type: object
+      properties:
+        plan_id:
+          type: string
+        plan:
+          type: object
+        status:
+          type: string
+          enum: [pending, approved, denied, queued, executing, completed, partial, expired]
+        preflight:
+          type: object
+          description: |
+            Exactly what the plan checked, and what it did not touch — endpoints not-contacted, secret values
+            not-read.
+          properties:
+            filesystem:
+              type: string
+            endpoints:
+              type: string
+            secret_values:
+              type: string
+            services:
+              type: string
+          required: [filesystem, endpoints, secret_values, services]
+      required: [plan_id, plan, status, preflight]
+    SetupStatus:
+      type: object
+      properties:
+        plan_id:
+          type: string
+        status:
+          type: string
+      required: [plan_id, status]
+    VerificationBinding:
+      type: object
+      description: |
+        The rule revision and captured read that a later submitted observation is judged against. Recorded
+        inside the proposal's own transaction, so the verdict is bound to what was seen when the action was
+        approved.
+      properties:
+        binding_sha256:
+          type: string
+        rule_revision:
+          type: string
+      required: [binding_sha256, rule_revision]
+    VerificationRecord:
+      type: object
+      description: |
+        One submitted observation, parsed strictly (duplicate keys, non-finite numbers and unbounded
+        integers are refused) and bounded by `verification_records.MAX_RECORD_BYTES`. The server derives the
+        verdict; a stored `cleared` means "consistent with the captured read".
+    VerificationSubmitted:
+      type: object
+      description: |
+        The digest the record is stored under, and whether this submission created it. Re-posting the
+        identical record answers the same body with `created` false; re-posting it with different contents is
+        a `409`. The derived verdict itself is the verification unit's contract
+        (`verification_records.py`, docs/units/verification-api.md).
+      properties:
+        verification_id:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        created:
+          type: boolean
+      required: [verification_id, created]
+      additionalProperties: false
+    ObserverCycleList:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        cycles:
+          type: array
+          items:
+            type: object
+            description: One cycle summary — status, coverage, whether it is reviewable, and the latest feedback id if any.
+        limit:
+          type: integer
+        returned:
+          type: integer
+        total_cycles:
+          type: integer
+        truncated:
+          type: boolean
+        next_after:
+          type: ['string', 'null']
+      required: [schema_version, cycles, limit, returned, total_cycles, truncated, next_after]
+    ObserverCycleDetail:
+      type: object
+      description: |
+        One cycle with its retained redacted evidence, its corrections newest-last, and the digest the grade
+        must name. `feedback_truncated` says the feedback list is a page, not the history.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        cycle_sha256:
+          type: string
+        reviewable:
+          type: boolean
+        latest_feedback_id:
+          type: ['string', 'null']
+        feedback_total:
+          type: integer
+        feedback_truncated:
+          type: boolean
+        replay:
+          type: ['object', 'null']
+      required: [schema_version, cycle_sha256, reviewable, feedback_total, feedback_truncated]
+    ObserverFeedbackRequest:
+      type: object
+      description: |
+        One human grade against the named cycle digest. No identity field is read: the reviewer is the
+        credential, and a `reader` or `summary` token is refused before the cycle is looked up. The exact
+        accepted fields and their bounds belong to `observer_review.py` and its contract in
+        docs/units/observer.md.

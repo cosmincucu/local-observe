@@ -311,11 +311,13 @@ class GroupingMigrationTests(unittest.TestCase):
                                        ).fetchone()[0], 0)
 
     def test_a_v1_file_travels_the_whole_chain_and_arrives_at_grouping(self):
-        """Nine steps, one audit row each, and not one v1 finding, condition or incident rewritten.
+        """Every step this build ships, one audit row each, and not one v1 finding, condition or incident rewritten.
 
         Not rewound to the v7 build like the step-7 tests above: this is the file a very old install
         holds, and the claim it can make belongs to the newest build — every step it has ever shipped,
-        applied in order, on one live-looking file.
+        applied in order, on one live-looking file. The step list below is the one place a new schema
+        step must be named, which is how the v11 step (the API boundary's `api_idempotency` table) said
+        hello.
         """
         self.at(1)
         before = self.snapshot(tables=('events', 'conditions', 'incidents', 'evidence'))
@@ -329,7 +331,7 @@ class GroupingMigrationTests(unittest.TestCase):
         self.assertEqual(self.audit_rows()[:len(audit_before)], audit_before,
                         'audit is append-only: the v1 rows are a prefix of the migrated ones')
         steps = [row['subject'] for row in moved.records('audit') if row['operation'] == 'schema.migrated']
-        self.assertEqual(sorted(steps, key=int), ['2', '3', '4', '5', '6', '7', '8', '9', '10'])
+        self.assertEqual(sorted(steps, key=int), ['2', '3', '4', '5', '6', '7', '8', '9', '10', '11'])
         # v3 added four columns to `outbox`; the seven v1-era values a row already held must be the same
         # rows in the same order, with this build's defaults filled in beside them.
         after = self.rows_of('outbox')

@@ -1,0 +1,536 @@
+# Capability census: every operation this product supports, and the one that is planned next.
+#
+# One row per operation. `docs/api/COVERAGE.md` explains each column, `docs/api/openapi.yaml` is the
+# contract for the rows whose `surface` is `http` and whose `status` is `implemented`, and
+# `tests/test_api_coverage.py` fails when a row, the OpenAPI document and the served routes disagree.
+#
+# Flow style is deliberate: 120 rows in block style would be 1 200 lines a reviewer cannot scan, and a
+# row is one sentence, not a tree.
+schema_version: 1
+updated: "2026-10-30"
+
+# The closed vocabularies a row must choose from. The test reads them from here, so a new value is a
+# change to this file first and never a one-off spelling in a row.
+vocabularies:
+  surfaces: [http, cli, mcp, ui]
+  access: [read, write]
+  status: [implemented, planned, excluded]
+  owner_areas:
+    - foundation
+    - occurrences
+    - maintenance
+    - resources-queries-rules-config
+    - investigations-notifications-actions
+    - administration
+  # For an http row this names the credential role a bearer must carry. For cli, mcp and ui rows it
+  # names the authority the surface reaches: `local` is the operator's own file access, `bearer` is a
+  # mounted credential the caller holds, `none` is deliberately unauthenticated.
+  authority: [reader, producer, proposer, human, executor, summary, local, bearer, none]
+  # Which artifact is expected to describe this row. `openapi` means docs/api/openapi.yaml must carry the
+  # same operationId under the same path and method; `none` means the row is a cross-cutting rule, a
+  # third-party surface or a browser-side render, and no OpenAPI operation is owed for it. A row with no
+  # `contract` key is treated as `openapi` when its surface is http and its path is a single route.
+  contract: [openapi, none]
+
+operations:
+  # ------------------------------------------------------------------------------------------
+  # foundation — identity, health, the transport boundary itself
+  # ------------------------------------------------------------------------------------------
+  - {operation_id: platform.identity.read, surface: http, method: GET, path: /v1/me, resource: identity,
+     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor, summary],
+     side_effects: none, state_source: "credential file (no database read)", status: implemented, owner_area: foundation,
+     notes: "The only route a summary credential may call besides /v1/overview; it answers who the bearer is."}
+  - {operation_id: platform.status.read, surface: http, method: GET, path: /v1/status, resource: platform,
+     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite: incidents, actions, outbox counts", status: implemented, owner_area: foundation}
+  - {operation_id: platform.runtime.read, surface: http, method: GET, path: /v1/runtime, resource: platform,
+     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "startup filesystem snapshot, in-process delivery/refusal counters", status: implemented, owner_area: foundation,
+     notes: "Process-local counters reset when the process does; they are not durable history."}
+  - {operation_id: platform.overview.read, surface: http, method: GET, path: /v1/overview, resource: portal-summary,
+     module: local_observe/platform/overview.py, access: read, required_role: [reader, producer, proposer, human, executor, summary],
+     side_effects: none, state_source: "sqlite counts, optional overview document", status: implemented, owner_area: foundation,
+     notes: "Portal summary v1 (docs/CONTRACTS.md). Unknown, disabled and stale observations carry null values."}
+  - {operation_id: platform.audit.read, surface: http, method: GET, path: /v1/audit, resource: audit,
+     module: local_observe/platform/audit_reader.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite audit table, read-only connection", status: implemented, owner_area: administration,
+     notes: "Bounded page over append-only history; the parser refuses before any file is opened."}
+  - {operation_id: platform.openapi.read, surface: http, method: GET, path: /v1/openapi.json, resource: api-contract,
+     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "docs/api/openapi.yaml, shipped as package data", status: planned, owner_area: foundation,
+     notes: "Serving the contract is a separate decision: it publishes the route table to every caller that can reach the port, and F1 ships the document without the route."}
+  - {operation_id: foundation.request_identity.apply, surface: http, method: GET, path: "any /v1 route", resource: api-contract,
+     module: local_observe/platform/api_contract.py, access: read, required_role: [reader, producer, proposer, human, executor, summary],
+     side_effects: none, state_source: none, status: implemented, owner_area: foundation, contract: none,
+     notes: "Cross-cutting: one x-request-id per request, echoed on every answer and carried into the server-side log line. It is a rule over every route, not an addressable operation."}
+  - {operation_id: foundation.idempotent_write.apply, surface: http, method: POST, path: "the routes listed in api.IDEMPOTENT_POST_ROUTES", resource: api-contract,
+     module: local_observe/platform/api_contract.py, access: write, required_role: [producer, proposer, human, executor],
+     side_effects: "one api_idempotency row per keyed write", state_source: "sqlite: api_idempotency (schema v11)", status: implemented, owner_area: foundation, contract: none,
+     notes: "Opt-in by header. A route not listed ignores the header, so no client that exists today changes behaviour. Each keyed route is documented in its own row."}
+
+  # ------------------------------------------------------------------------------------------
+  # occurrences — findings, incidents, escalation of an unanswered one
+  # ------------------------------------------------------------------------------------------
+  - {operation_id: incident.records.read, surface: http, method: GET, path: "/v1/records/{table}", resource: incident,
+     module: local_observe/platform/presentation.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite: events, incidents, actions, executions, audit, outbox, notification_attempts", status: implemented, owner_area: occurrences,
+     notes: "One capped newest-first window over a closed table list; secret columns are dropped on read."}
+  - {operation_id: occurrence.create, surface: http, method: POST, path: /v1/events, resource: occurrence,
+     module: local_observe/platform/state.py, access: write, required_role: [producer],
+     side_effects: "event, condition, incident, outbox and audit rows; a grouping link when the declared graph agrees", state_source: "sqlite operational store", status: implemented, owner_area: occurrences,
+     notes: "Canonical event admission. Idempotent by (source, source_event_id), which is why it takes no Idempotency-Key."}
+  - {operation_id: occurrence.intake, surface: http, method: POST, path: "/v1/intake/{source}", resource: occurrence,
+     module: local_observe/platform/intake.py, access: write, required_role: [producer],
+     side_effects: "evidence rows and admitted events, in payload order; audit rows", state_source: "sqlite operational store, optional built index for linking", status: implemented, owner_area: occurrences,
+     notes: "External envelopes (Alertmanager today, CrowdSec beside it) are normalised here or become a coverage event. The path must name the caller's own identity."}
+  - {operation_id: evidence.sample.create, surface: http, method: POST, path: /v1/evidence, resource: evidence,
+     module: local_observe/platform/state.py, access: write, required_role: [producer],
+     side_effects: "one bounded evidence row with a 15-day expiry", state_source: "sqlite evidence table", status: implemented, owner_area: occurrences,
+     notes: "Honours Idempotency-Key: a producer that lost the answer reads its own evidence id back."}
+  - {operation_id: evidence.sample.read, surface: http, method: GET, path: /v1/evidence, resource: evidence,
+     module: local_observe/platform/state.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite evidence table", status: implemented, owner_area: occurrences,
+     notes: "Answers available, expired or unavailable — an expired sample was real and is gone."}
+  - {operation_id: occurrence.escalate, surface: cli, method: run, path: "lo-platform escalate", resource: occurrence,
+     module: local_observe/platform/escalation.py, access: write, required_role: [local],
+     side_effects: "one stage event per rung advanced, and the delivery it books", state_source: "sqlite + the producer's own cursor file", status: implemented, owner_area: occurrences,
+     notes: "Files an event; never sends a notification itself."}
+  - {operation_id: occurrence.history.read, surface: cli, method: read, path: "lo-platform --database <path> status", resource: occurrence,
+     module: local_observe/platform/state.py, access: read, required_role: [local],
+     side_effects: none, state_source: "sqlite counts", status: implemented, owner_area: occurrences}
+  - {operation_id: occurrence.list, surface: http, method: GET, path: /v1/occurrences, resource: occurrence,
+     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite: incidents, conditions, acknowledgement state", status: planned, owner_area: occurrences,
+     notes: "Milestone F2. Bounded page over open occurrences with the acknowledgement state beside each row."}
+  - {operation_id: occurrence.acknowledge, surface: http, method: POST, path: /v1/occurrences/acknowledge, resource: occurrence,
+     module: local_observe/platform/api.py, access: write, required_role: [human],
+     side_effects: "acknowledgement state on the incident, one audit row, the escalation that stops", state_source: "sqlite operational store", status: planned, owner_area: occurrences,
+     notes: "Milestone F2. Today an acknowledgement exists only as the action.approval_intent a callback carries; there is no HTTP verb for 'a human has seen this'."}
+  - {operation_id: occurrence.dismiss, surface: http, method: POST, path: /v1/occurrences/dismiss, resource: occurrence,
+     module: local_observe/platform/api.py, access: write, required_role: [human],
+     side_effects: "closed occurrence state, one audit row, no re-open on the next replay of the same verdict", state_source: "sqlite operational store", status: planned, owner_area: occurrences,
+     notes: "Milestone F2. Dismissal is a human judgement about a verdict this platform holds; it must not resolve the underlying condition, which belongs to a recovery event or a cleared verification."}
+  - {operation_id: occurrence.acknowledge.mcp, surface: mcp, method: tool, path: planned, resource: occurrence,
+     module: local_observe/platform/tools.py, access: write, required_role: [bearer],
+     side_effects: "as the HTTP route, attributed to the agent that called", state_source: "sqlite operational store", status: excluded, owner_area: occurrences,
+     notes: "Excluded on purpose: §5 says a payload field cannot claim that an agent is a human, and an acknowledgement is exactly that claim. An agent may read and propose; only a human credential may acknowledge."}
+
+  # ------------------------------------------------------------------------------------------
+  # maintenance — declared windows, suppression, flap accounting
+  # ------------------------------------------------------------------------------------------
+  - {operation_id: maintenance.window.declare_cli, surface: cli, method: run, path: "python -m local_observe.platform.suppression (no declare command)", resource: maintenance-window,
+     module: local_observe/platform/suppression.py, access: write, required_role: [local],
+     side_effects: "none available from a command line", state_source: "sqlite notification_control", status: excluded, owner_area: maintenance,
+     notes: "The read-only CLI refuses to declare: minting Actor(identity,'human') from a flag would claim a role the caller never proved. declare_window is reached by a caller holding a real human actor."}
+  - {operation_id: maintenance.window.declare, surface: http, method: POST, path: /v1/maintenance/windows, resource: maintenance-window,
+     module: local_observe/platform/suppression.py, access: write, required_role: [human],
+     side_effects: "one maintenance:<id> control document, one maintenance.declared audit row it is attested against", state_source: "sqlite notification_control", status: planned, owner_area: maintenance,
+     notes: "Milestone F2. The library call, its bounds and its attested read exist; the HTTP write route is the missing half `suppression.main` names as a follow-up."}
+  - {operation_id: maintenance.window.revoke, surface: http, method: POST, path: /v1/maintenance/windows/revoke, resource: maintenance-window,
+     module: local_observe/platform/suppression.py, access: write, required_role: [human],
+     side_effects: "revoked marker on the control document plus its audit row; a live window stops covering immediately", state_source: "sqlite notification_control", status: planned, owner_area: maintenance,
+     notes: "Milestone F2. Revoke is a separate operation from declare because a revocation must be legible in the audit history on its own."}
+  - {operation_id: maintenance.window.read, surface: http, method: GET, path: /v1/maintenance/windows, resource: maintenance-window,
+     module: local_observe/platform/suppression.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite notification_control", status: planned, owner_area: maintenance,
+     notes: "Milestone F2. The same `live_windows` answer the CLI gives, over the credential the platform already issues."}
+  - {operation_id: maintenance.window.list, surface: cli, method: read, path: "python -m local_observe.platform.suppression windows", resource: maintenance-window,
+     module: local_observe/platform/suppression.py, access: read, required_role: [local],
+     side_effects: none, state_source: "sqlite notification_control + audit attestation", status: implemented, owner_area: maintenance,
+     notes: "Names every live window and whether its attestation can be trusted."}
+  - {operation_id: maintenance.decision.inspect, surface: cli, method: read, path: "python -m local_observe.platform.suppression inspect", resource: suppression-decision,
+     module: local_observe/platform/suppression.py, access: read, required_role: [local],
+     side_effects: none, state_source: "sqlite + optional built index for dependency suppression", status: implemented, owner_area: maintenance,
+     notes: "Answers 'would this finding page?' and files nothing."}
+  - {operation_id: maintenance.stats.read, surface: cli, method: read, path: "python -m local_observe.platform.suppression stats", resource: suppression-decision,
+     module: local_observe/platform/suppression.py, access: read, required_role: [local],
+     side_effects: none, state_source: "sqlite events, incidents, incident_members", status: implemented, owner_area: maintenance}
+
+  # ------------------------------------------------------------------------------------------
+  # resources-queries-rules-config — declarations, the built index, queries, rule documents
+  # ------------------------------------------------------------------------------------------
+  - {operation_id: resource.inventory.read, surface: http, method: GET, path: /v1/inventory, resource: resource,
+     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "built inventory index (read-only SQLite)", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "100 rows, ordered by name, each with its display projection. Served only when an index is configured."}
+  - {operation_id: resource.declaration.validate, surface: cli, method: run, path: "lo-inventory validate <declarations>", resource: resource,
+     module: local_observe/inventory/validation.py, access: read, required_role: [local],
+     side_effects: none, state_source: "declared YAML", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.index.build, surface: cli, method: run, path: "lo-inventory build", resource: resource-index,
+     module: local_observe/inventory/index.py, access: write, required_role: [local],
+     side_effects: "a new SQLite index file, atomically replacing the served snapshot", state_source: "declared YAML", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "The derived index is rebuildable and never holds approvals."}
+  - {operation_id: resource.alias.resolve, surface: cli, method: read, path: "lo-inventory resolve", resource: resource,
+     module: local_observe/inventory/index.py, access: read, required_role: [local],
+     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.dependents.read, surface: cli, method: read, path: "lo-inventory dependents", resource: resource,
+     module: local_observe/topology.py, access: read, required_role: [local],
+     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.observation.record, surface: cli, method: run, path: "lo-inventory observe", resource: observed-resource,
+     module: local_observe/inventory/discovery.py, access: write, required_role: [local],
+     side_effects: "observed rows with source and observed_at; declarations are never edited", state_source: "observed dataset", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.drift.evaluate, surface: cli, method: run, path: "lo-inventory drift", resource: observed-resource,
+     module: local_observe/inventory/validation.py, access: read, required_role: [local],
+     side_effects: none, state_source: "built index + observed dataset", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.proposal.build, surface: cli, method: run, path: "lo-inventory propose", resource: resource,
+     module: local_observe/inventory/forge.py, access: write, required_role: [local],
+     side_effects: "one proposal document on disk; no declaration is edited", state_source: "built index + observed dataset", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.discovery.docker, surface: cli, method: run, path: "lo-inventory discover-docker", resource: observed-resource,
+     module: local_observe/inventory/docker_provider.py, access: write, required_role: [local],
+     side_effects: "observations from one allowlisted socket read", state_source: "docker daemon socket, observed dataset", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.proposal.publish, surface: cli, method: run, path: "lo-inventory publish-proposal", resource: resource,
+     module: local_observe/inventory/forge.py, access: write, required_role: [local],
+     side_effects: "one reviewed proposal sent to a named repository", state_source: "proposal document", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.query.series, surface: mcp, method: tool, path: signal_series, resource: signal-sample,
+     module: local_observe/platform/tools.py, access: read, required_role: [reader],
+     side_effects: none, state_source: "ClickHouse through the bounded read-only client", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "No query text, table or statement is accepted; an empty window says so in rows and error."}
+  - {operation_id: resource.query.topology, surface: mcp, method: tool, path: topology_neighbourhood, resource: resource,
+     module: local_observe/platform/tools.py, access: read, required_role: [reader],
+     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "Names which bound cut the answer off in truncated_by."}
+  - {operation_id: resource.inventory.mcp, surface: mcp, method: tool, path: inventory, resource: resource,
+     module: local_observe/platform/tools.py, access: read, required_role: [reader],
+     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: resource.dataset.read, surface: http, method: GET, path: "planned (third-party Datasette surface)", resource: resource,
+     module: local_observe/inventory/api.py, access: read, required_role: [bearer],
+     side_effects: none, state_source: "built index, immutable", status: implemented, owner_area: resources-queries-rules-config, contract: none,
+     notes: "The read-only Datasette/GraphQL reference app: SQL execution, downloads and CSV streaming are off, pages are capped. Its route shapes belong to Datasette, not to this product, so they are not written into docs/api/openapi.yaml."}
+  - {operation_id: rule.detection.evaluate, surface: cli, method: run, path: "lo-platform evaluate", resource: rule,
+     module: local_observe/platform/detections.py, access: write, required_role: [local],
+     side_effects: "one verdict event per condition, with its evidence sample", state_source: "rule document, samples, built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: rule.sustained.evaluate, surface: cli, method: run, path: "lo-platform conditions", resource: rule,
+     module: local_observe/platform/conditions.py, access: write, required_role: [local],
+     side_effects: "firing/clear events and the producer's own cursor", state_source: "rule document, cursor, built index", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "Static tiers, absence rules and learned bands. Off unless a document is named."}
+  - {operation_id: rule.config_drift.evaluate, surface: cli, method: run, path: "lo-platform drift", resource: rule,
+     module: local_observe/platform/configdrift.py, access: write, required_role: [local],
+     side_effects: "drift events filed under the source identity named", state_source: "snapshot tree, cursor, built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: rule.pathcheck.evaluate, surface: cli, method: run, path: "lo-platform pathcheck", resource: rule,
+     module: local_observe/platform/pathcheck.py, access: write, required_role: [local],
+     side_effects: "availability/coverage events and the replay-carrying cursor", state_source: "probe reports, cursor, built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: rule.slo.evaluate, surface: cli, method: run, path: "lo-platform slo", resource: rule,
+     module: local_observe/slo/alerts.py, access: write, required_role: [local],
+     side_effects: "threshold events for attainment and the fast-burn pair, plus the cursor", state_source: "objectives document, ClickHouse, built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: rule.forecast.evaluate, surface: cli, method: run, path: "lo-platform forecast", resource: rule,
+     module: local_observe/forecast/timetothreshold.py, access: write, required_role: [local],
+     side_effects: ".predicted conditions and the cursor", state_source: "rules document, ClickHouse, built index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: rule.sigma.compile, surface: cli, method: run, path: "lo-platform --help shows no compile verb; the compiler is a library and a pinned tier", resource: rule,
+     module: local_observe/platform/sigma_compile.py, access: read, required_role: [local],
+     side_effects: none, state_source: "Sigma rules and the field mapping", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "build_gate refuses any nonempty input-binding declaration until input binding exists."}
+  - {operation_id: config.deployment.render, surface: cli, method: run, path: "lo-deployment render", resource: deployment-config,
+     module: local_observe/deployment/content.py, access: write, required_role: [local],
+     side_effects: "rendered configuration under the chosen output directory", state_source: "content lock and overlays", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: config.deployment.plan, surface: cli, method: run, path: "lo-deployment plan", resource: deployment-config,
+     module: local_observe/deployment/release.py, access: write, required_role: [local],
+     side_effects: "one drift-aware upgrade plan", state_source: "content lock and live state", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: config.deployment.lock, surface: cli, method: run, path: "lo-deployment lock", resource: deployment-config,
+     module: local_observe/deployment/content.py, access: write, required_role: [local],
+     side_effects: "a draft content lock for review; fetches and trusts nothing", state_source: "declared content", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: config.deployment.export, surface: cli, method: run, path: "lo-deployment export-storage|export-signoz|export-homepage|export-dashboard", resource: deployment-config,
+     module: local_observe/deployment/dashboard_review.py, access: write, required_role: [local],
+     side_effects: "exported artifacts for review in the operator's own repository", state_source: "rendered configuration", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: config.notification_policy.read, surface: http, method: GET, path: /v1/notifications/safety, resource: notification-policy,
+     module: local_observe/platform/notification_safety.py, access: read, required_role: [reader, producer, proposer, human, executor],
+     side_effects: none, state_source: "sqlite notification_control", status: implemented, owner_area: investigations-notifications-actions}
+
+  # ------------------------------------------------------------------------------------------
+  # investigations-notifications-actions — observer, notifications, action lifecycle, verification
+  # ------------------------------------------------------------------------------------------
+  - {operation_id: investigation.run, surface: cli, method: run, path: "lo-observer run", resource: investigation,
+     module: local_observe/observer/runtime.py, access: write, required_role: [local],
+     side_effects: "one bounded cycle: journal rows, retained redacted evidence, delivery state", state_source: "observer journal (private 0700 directory)", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.serve, surface: cli, method: run, path: "lo-observer serve", resource: investigation,
+     module: local_observe/observer/runtime.py, access: write, required_role: [local],
+     side_effects: "scheduled cycles on the same journal", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.replay, surface: cli, method: run, path: "lo-observer replay <cycle_id>", resource: investigation,
+     module: local_observe/observer/journal.py, access: write, required_role: [local],
+     side_effects: "a re-run of one recorded cycle; the original record stays", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.check, surface: cli, method: read, path: "lo-observer check", resource: investigation,
+     module: local_observe/observer/journal.py, access: read, required_role: [local],
+     side_effects: none, state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.feedback.record, surface: cli, method: run, path: "lo-observer feedback <cycle_id>", resource: investigation-review,
+     module: local_observe/observer/journal.py, access: write, required_role: [local],
+     side_effects: "one versioned human correction; the model's own claim is never rewritten", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.retrieve, surface: cli, method: read, path: "lo-observer retrieve", resource: investigation,
+     module: local_observe/observer/journal.py, access: read, required_role: [local],
+     side_effects: none, state_source: "observer journal (eligible corrected cases)", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.export, surface: cli, method: run, path: "lo-observer export", resource: investigation,
+     module: local_observe/observer/journal.py, access: write, required_role: [local],
+     side_effects: "a provenance-preserving export file inside the private state directory", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.quality.accept, surface: cli, method: run, path: "lo-observer quality-accept|quality-revoke", resource: investigation-quality,
+     module: local_observe/observer/acceptance.py, access: write, required_role: [local],
+     side_effects: "one acceptance record, or its withdrawal; a pooled cycle is refused", state_source: "evaluation report and journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.deliver, surface: cli, method: run, path: "lo-observer deliver <cycle_id>", resource: investigation-delivery,
+     module: local_observe/observer/delivery.py, access: write, required_role: [local],
+     side_effects: "one model-assisted message on the configured channel, when acceptance and the daily floor allow it", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.delivery_status.read, surface: cli, method: read, path: "lo-observer delivery-status", resource: investigation-delivery,
+     module: local_observe/observer/delivery.py, access: read, required_role: [local],
+     side_effects: none, state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.disarm, surface: cli, method: run, path: "lo-observer disarm", resource: investigation-delivery,
+     module: local_observe/observer/delivery.py, access: write, required_role: [local],
+     side_effects: "delivery is disarmed for this journal; nothing further may send", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.reconcile, surface: cli, method: run, path: "lo-observer reconcile", resource: investigation-delivery,
+     module: local_observe/observer/delivery.py, access: write, required_role: [local],
+     side_effects: "one reconciled session/epoch against its external effects, with the attestation recorded", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.cycle.list, surface: http, method: GET, path: /v1/observer/cycles, resource: investigation,
+     module: local_observe/platform/observer_review.py, access: read, required_role: [human],
+     side_effects: none, state_source: "observer journal, read-only", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "human only: a reader may read records elsewhere and still must not see a grade."}
+  - {operation_id: investigation.cycle.read, surface: http, method: GET, path: /v1/observer/cycle, resource: investigation,
+     module: local_observe/platform/observer_review.py, access: read, required_role: [human],
+     side_effects: none, state_source: "observer journal, read-only", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.review.record, surface: http, method: POST, path: /v1/observer/feedback, resource: investigation-review,
+     module: local_observe/platform/observer_review.py, access: write, required_role: [human],
+     side_effects: "one appended human grade against the cycle's digest", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.explain, surface: cli, method: run, path: "lo-platform rca", resource: explanation,
+     module: local_observe/platform/rca.py, access: write, required_role: [local],
+     side_effects: "one explanation record per incident with a rule floor; no model is asked without one", state_source: "sqlite + optional built index", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: notification.deliver, surface: cli, method: run, path: "lo-platform notify", resource: notification,
+     module: local_observe/platform/notifications.py, access: write, required_role: [local],
+     side_effects: "one outbox claim and the provider call behind it, only when the mode says live", state_source: "sqlite outbox", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: notification.retry, surface: http, method: POST, path: /v1/notifications/retry, resource: notification,
+     module: local_observe/platform/state.py, access: write, required_role: [human],
+     side_effects: "one re-booked delivery for a dead or failed attempt", state_source: "sqlite outbox", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key: a lost answer must not become a second page."}
+  - {operation_id: notification.safety.reset, surface: http, method: POST, path: /v1/notifications/reset-safety, resource: notification-policy,
+     module: local_observe/platform/state.py, access: write, required_role: [human],
+     side_effects: "one cleared flood breaker, audited", state_source: "sqlite notification_control", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key."}
+  - {operation_id: notification.callback.record, surface: http, method: POST, path: "/v1/callbacks/{channel}", resource: approval-intent,
+     module: local_observe/platform/state.py, access: write, required_role: [human, proposer, executor],
+     side_effects: "one action.approval_intent audit row against an action that stays pending", state_source: "sqlite audit", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Single-use code in the body, never the path or a query string. Deliberately outside the idempotency list: a stored success replayed after the token was spent would report an intent this route is defined to refuse."}
+  - {operation_id: action.propose, surface: http, method: POST, path: /v1/actions, resource: action,
+     module: local_observe/platform/state.py, access: write, required_role: [proposer, human],
+     side_effects: "one pending action, its verification binding, audit rows", state_source: "sqlite actions + verification binding", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Deduplicates on (requester, retry_key), so it takes no Idempotency-Key: one write would then have two answers to 'which name identifies this proposal?'."}
+  - {operation_id: action.decide, surface: http, method: POST, path: /v1/actions/decision, resource: action,
+     module: local_observe/platform/state.py, access: write, required_role: [human],
+     side_effects: "approved/denied transition, or the runner binding a handoff requires", state_source: "sqlite actions", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: action.claim, surface: http, method: POST, path: /v1/actions/claim, resource: action-execution,
+     module: local_observe/platform/state.py, access: write, required_role: [executor],
+     side_effects: "one atomic claim: execution id and runner token; a second claim is refused", state_source: "sqlite actions + executions", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key, which is the whole point: a runner that lost its claim response reads its own token back instead of losing the action."}
+  - {operation_id: action.review, surface: http, method: GET, path: /v1/actions/review, resource: action,
+     module: local_observe/platform/api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "sqlite actions, or the configured handoff", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: action.execute, surface: http, method: POST, path: /v1/actions/execute, resource: action-execution,
+     module: local_observe/platform/runner_handoff.py, access: write, required_role: [executor],
+     side_effects: "one durable runner request under a binding hash", state_source: "sqlite runner_requests", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: action.runner.claim, surface: http, method: POST, path: /v1/runner/claim, resource: action-execution,
+     module: local_observe/platform/runner_handoff.py, access: write, required_role: [executor],
+     side_effects: "the journaled runner token is returned to the runner that holds the binding", state_source: "sqlite runner_requests + executions", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key."}
+  - {operation_id: action.runner_requests.list, surface: http, method: GET, path: /v1/runner/requests, resource: action-execution,
+     module: local_observe/platform/runner_handoff.py, access: read, required_role: [executor],
+     side_effects: none, state_source: "sqlite runner_requests", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: action.execution.outcome, surface: http, method: POST, path: /v1/executions/outcome, resource: action-execution,
+     module: local_observe/platform/state.py, access: write, required_role: [executor, human],
+     side_effects: "executing → succeeded/failed/unknown, audited; unknown requires reconciliation", state_source: "sqlite executions", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key: a lost acknowledgement is the case §5 refuses to answer with a re-dispatch."}
+  - {operation_id: action.approve.mcp, surface: mcp, method: tool, path: planned, resource: action,
+     module: local_observe/platform/tools.py, access: write, required_role: [bearer],
+     side_effects: "none — refused", state_source: none, status: excluded, owner_area: investigations-notifications-actions,
+     notes: "No MCP tool approves or decides. Read tokens cannot approve, and a human credential in an agent's hands is the failure §5 exists against (tests/test_chat_approval_separation.py)."}
+  - {operation_id: action.propose.mcp, surface: mcp, method: tool, path: propose_action, resource: action,
+     module: local_observe/platform/tools.py, access: write, required_role: [proposer],
+     side_effects: "one pending proposal filed as the calling agent", state_source: "sqlite actions", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Carries its own retry_key, which is the durable idempotency key the boundary also speaks."}
+  - {operation_id: action.execute.mcp, surface: mcp, method: tool, path: execute_action, resource: action-execution,
+     module: local_observe/platform/tools.py, access: write, required_role: [executor],
+     side_effects: "one durable handoff request; refuses when no runner is configured", state_source: "sqlite runner_requests", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: verification.binding.read, surface: http, method: GET, path: /v1/verification/binding, resource: verification-binding,
+     module: local_observe/platform/verification_api.py, access: read, required_role: [reader, human, proposer, executor, producer],
+     side_effects: none, state_source: "sqlite verification_bindings", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "A producer is admissible only while the mounted policy names it; summary never is."}
+  - {operation_id: verification.records.list, surface: http, method: GET, path: /v1/verification/records, resource: verification-record,
+     module: local_observe/platform/verification_api.py, access: read, required_role: [reader, human, proposer, executor, producer],
+     side_effects: none, state_source: "sqlite verification_records", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: verification.record.read, surface: http, method: GET, path: /v1/verification/record, resource: verification-record,
+     module: local_observe/platform/verification_api.py, access: read, required_role: [reader, human, proposer, executor, producer],
+     side_effects: none, state_source: "sqlite verification_records", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: verification.record.submit, surface: http, method: POST, path: /v1/verification/records, resource: verification-record,
+     module: local_observe/platform/verification_api.py, access: write, required_role: [producer],
+     side_effects: "one immutable verdict row; the server derives the verdict", state_source: "sqlite verification_records", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Owns its replay rule at the storage layer (a changed re-post is refused), so the transport key is deliberately not also applied here."}
+  - {operation_id: verification.candidates.list, surface: http, method: GET, path: /v1/verification/candidates, resource: verification-record,
+     module: local_observe/platform/verification_candidates.py, access: read, required_role: [producer],
+     side_effects: none, state_source: "sqlite executions", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: verification.binding.cli, surface: cli, method: run, path: "lo-platform verification binding|records|record", resource: verification-record,
+     module: local_observe/platform/verification_cli.py, access: read, required_role: [bearer],
+     side_effects: none, state_source: "a remote platform over HTTPS", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "HTTPS-only, one request per invocation, no local database and no credential on a command line."}
+  - {operation_id: verification.record.submit_cli, surface: cli, method: run, path: "lo-platform verification submit", resource: verification-record,
+     module: local_observe/platform/verification_cli.py, access: write, required_role: [bearer],
+     side_effects: "one submitted observation", state_source: "a remote platform over HTTPS", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: verification.observe.follow, surface: cli, method: run, path: "lo-platform verify-follow", resource: verification-record,
+     module: local_observe/platform/verification_follower.py, access: write, required_role: [bearer],
+     side_effects: "one saved post-terminal observation, replayed unchanged after a lost acknowledgement", state_source: "local saved-history file + remote platform", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: verification.derive, surface: cli, method: run, path: "verification through lo-platform (LO_VERIFY_CONFIG)", resource: verification-record,
+     module: local_observe/platform/verification.py, access: write, required_role: [local],
+     side_effects: "the post-action verdict and its evidence, off unless a file is named", state_source: "sqlite + ClickHouse reads", status: implemented, owner_area: investigations-notifications-actions}
+
+  # ------------------------------------------------------------------------------------------
+  # administration — the operator surface, credentials, state lifecycle, bootstrap and recovery
+  # ------------------------------------------------------------------------------------------
+  - {operation_id: administration.authentication.read, surface: http, method: GET, path: /v1/operator-auth, resource: operator-session,
+     module: local_observe/platform/operator.py, access: read, required_role: [],
+     side_effects: none, state_source: "process configuration", status: implemented, owner_area: administration,
+     notes: "Answers password or token and nothing else, which is why it needs no credential: the sign-in form cannot ask it with one."}
+  - {operation_id: administration.ui.shell, surface: ui, method: render, path: "/ (the four assets below)", resource: operator-session,
+     module: local_observe/platform/static/ui.js, access: read, required_role: [none],
+     side_effects: none, state_source: "packaged static assets", status: implemented, owner_area: administration, contract: none,
+     notes: "The browser-side render, over the four served assets below. Every request it then makes is authenticated."}
+  - {operation_id: operator.shell.read, surface: http, method: GET, path: /, resource: operator-session,
+     module: local_observe/platform/operator.py, access: read, required_role: [],
+     side_effects: none, state_source: "packaged static asset", status: implemented, owner_area: administration,
+     notes: "Public by design and carrying no secret; served no-store, nosniff, no-referrer with a CSP that allows no origin but this one."}
+  - {operation_id: operator.stylesheet.read, surface: http, method: GET, path: /ui.css, resource: operator-session,
+     module: local_observe/platform/operator.py, access: read, required_role: [],
+     side_effects: none, state_source: "packaged static asset", status: implemented, owner_area: administration}
+  - {operation_id: operator.script.read, surface: http, method: GET, path: /ui.js, resource: operator-session,
+     module: local_observe/platform/operator.py, access: read, required_role: [],
+     side_effects: none, state_source: "packaged static asset", status: implemented, owner_area: administration}
+  - {operation_id: operator.icon_script.read, surface: http, method: GET, path: /lucide.min.js, resource: operator-session,
+     module: local_observe/platform/operator.py, access: read, required_role: [],
+     side_effects: none, state_source: "packaged third-party asset", status: implemented, owner_area: administration,
+     notes: "Third-party icon set; its notice ships beside it as LUCIDE-LICENSE."}
+  - {operation_id: administration.session.sign_in, surface: ui, method: interact, path: "sign-in form → any /v1 route", resource: operator-session,
+     module: local_observe/platform/static/ui.js, access: read, required_role: [none],
+     side_effects: "one PBKDF2 check on a worker thread when a password account is mounted", state_source: "mounted operator account", status: implemented, owner_area: administration,
+     notes: "The substituted bearer never leaves the process; at most two checks are in flight and excess attempts answer 503."}
+  - {operation_id: administration.action.approve, surface: ui, method: interact, path: "Approve / Deny / Withdraw approval", resource: action,
+     module: local_observe/platform/static/ui.js, access: write, required_role: [human],
+     side_effects: "the same /v1/actions/decision write the API documents", state_source: "sqlite actions", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "The browser gate (scripts/check_approval_browser.py) refuses to pass when these workflows skip, on desktop and mobile."}
+  - {operation_id: administration.execution.outcome_record, surface: ui, method: interact, path: "Record outcome", resource: action-execution,
+     module: local_observe/platform/static/ui.js, access: write, required_role: [executor, human],
+     side_effects: "the same /v1/executions/outcome write", state_source: "sqlite executions", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: administration.notification.retry, surface: ui, method: interact, path: "Retry delivery", resource: notification,
+     module: local_observe/platform/static/ui.js, access: write, required_role: [human],
+     side_effects: "the same /v1/notifications/retry write", state_source: "sqlite outbox", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: administration.investigation.review, surface: ui, method: interact, path: "observer review form", resource: investigation-review,
+     module: local_observe/platform/static/ui.js, access: write, required_role: [human],
+     side_effects: "the same /v1/observer/feedback append", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Phone-usable, escaped evidence, stale-session protection (scripts/check_observer_browser.py gate)."}
+  - {operation_id: administration.evidence.read, surface: ui, method: interact, path: "evidence availability lookup", resource: evidence,
+     module: local_observe/platform/static/ui.js, access: read, required_role: [reader],
+     side_effects: none, state_source: "sqlite evidence table", status: implemented, owner_area: occurrences}
+  - {operation_id: administration.credential.configure, surface: cli, method: run, path: "mount the role file named by LO_PLATFORM_CREDENTIALS", resource: credential,
+     module: local_observe/platform/api.py, access: write, required_role: [local],
+     side_effects: "none at runtime; the service refuses to start on a short, repeated or role-sick list", state_source: "mounted file", status: implemented, owner_area: administration,
+     notes: "The retired LO_PLATFORM_CREDENTIALS_JSON environment form is a boot refusal, not a fallback: a token in an environment value is visible in docker inspect and /proc."}
+  - {operation_id: administration.operator_account.create, surface: cli, method: run, path: "lo-operator-setup --output <private-directory>", resource: operator-account,
+     module: local_observe/deployment/operator_setup.py, access: write, required_role: [local],
+     side_effects: "one private account directory with the mounted account and its bearer", state_source: "filesystem", status: implemented, owner_area: administration}
+  - {operation_id: administration.mcp.serve, surface: mcp, method: tool, path: "platform_status|platform_overview|records|inventory|evidence_window|component_boundary", resource: platform,
+     module: local_observe/platform/tools.py, access: read, required_role: [reader],
+     side_effects: none, state_source: "sqlite, built index, optional ClickHouse reader", status: implemented, owner_area: administration,
+     notes: "A tool whose input the process cannot reach is not registered, so the exposed set is the registered set. reader_registry() is the four-tool v0.1 surface a single shared token keeps serving."}
+  - {operation_id: administration.boundary.read, surface: mcp, method: tool, path: component_boundary, resource: api-contract,
+     module: local_observe/platform/tools.py, access: read, required_role: [reader],
+     side_effects: none, state_source: "declared exclusions", status: implemented, owner_area: foundation,
+     notes: "The machine-readable 'this absence is a decision' answer; call it before concluding an absent tool is a missing feature."}
+  - {operation_id: administration.state.backup, surface: cli, method: run, path: "lo-platform --database <path> backup --output <file>", resource: state,
+     module: local_observe/platform/state.py, access: write, required_role: [local],
+     side_effects: "one new file, integrity-checked; an existing destination is never replaced", state_source: "sqlite online backup API", status: implemented, owner_area: administration}
+  - {operation_id: administration.state.migrate, surface: cli, method: run, path: "lo-platform --database <path> migrate", resource: state,
+     module: local_observe/platform/cli.py, access: write, required_role: [local],
+     side_effects: "the pre-migration verified copy, then one audited transaction per step", state_source: "sqlite user_version", status: implemented, owner_area: administration,
+     notes: "Offline bootstrap and recovery step one: an older file is refused until this runs, and an older binary needs the copy rather than a downgrade."}
+  - {operation_id: administration.state.status, surface: cli, method: read, path: "lo-platform --database <path> status", resource: state,
+     module: local_observe/platform/cli.py, access: read, required_role: [local],
+     side_effects: none, state_source: "sqlite counts", status: implemented, owner_area: administration}
+  - {operation_id: administration.event.intake_offline, surface: cli, method: run, path: "lo-platform --database <path> intake --source <id> --event <file> [--index <path>]", resource: occurrence,
+     module: local_observe/platform/cli.py, access: write, required_role: [local],
+     side_effects: "the same admission the HTTP route runs, including grouping when --index is given", state_source: "sqlite operational store", status: implemented, owner_area: occurrences,
+     notes: "The offline path for a producer that cannot reach the service; omitting --index files the pre-grouping behaviour, which the flag leaves open rather than silently losing."}
+  - {operation_id: administration.state.upgrade_rehearsal, surface: cli, method: run, path: "python3 -B scripts/upgrade_rehearsal.py", resource: state,
+     module: scripts/upgrade_rehearsal.py, access: write, required_role: [local],
+     side_effects: "a migrated copy of a copy: the live file is not opened for writing", state_source: "sqlite copy", status: implemented, owner_area: administration}
+  - {operation_id: administration.state.upgrade_drive, surface: cli, method: run, path: "python3 -B scripts/upgrade_driver.py", resource: state,
+     module: scripts/upgrade_driver.py, access: write, required_role: [local],
+     side_effects: "the approved upgrade sequence against injected boundaries; no live host is implied", state_source: "version contract", status: implemented, owner_area: administration}
+  - {operation_id: administration.state.upgrade_accept, surface: cli, method: run, path: "python3 -B scripts/upgrade_acceptance.py", resource: state,
+     module: scripts/upgrade_acceptance.py, access: write, required_role: [local],
+     side_effects: "one acceptance receipt naming schema, indexes and the reads that must still work", state_source: "candidate sqlite file", status: implemented, owner_area: administration}
+  - {operation_id: administration.state.gate, surface: cli, method: run, path: "lo-deployment state-gate", resource: state,
+     module: local_observe/deployment/live.py, access: read, required_role: [local],
+     side_effects: none, state_source: "candidate state copy", status: implemented, owner_area: administration}
+  - {operation_id: administration.state.copy, surface: cli, method: run, path: "lo-deployment check-live", resource: state,
+     module: local_observe/deployment/state_copy.py, access: read, required_role: [local],
+     side_effects: none, state_source: "a running service's copied state", status: implemented, owner_area: administration}
+  - {operation_id: administration.recovery.conformance, surface: cli, method: run, path: "python3 -B scripts/conformance_recovery.py", resource: state,
+     module: scripts/conformance_recovery.py, access: write, required_role: [local],
+     side_effects: "a restore into scratch, proven by reading it back", state_source: "backup artifact", status: implemented, owner_area: administration}
+  - {operation_id: administration.backup.conformance, surface: cli, method: run, path: "python3 -B scripts/conformance_backup.py", resource: state,
+     module: scripts/conformance_backup.py, access: write, required_role: [local],
+     side_effects: "the declared state manifest's coverage answer, measured not asserted", state_source: "deployment state", status: implemented, owner_area: administration}
+  - {operation_id: administration.migration.prepare, surface: cli, method: run, path: "python3 -B scripts/prepare_migration.py", resource: state,
+     module: scripts/prepare_migration.py, access: write, required_role: [local],
+     side_effects: "the staged copy a migration is proven on", state_source: "staging host", status: implemented, owner_area: administration}
+  - {operation_id: administration.migration.check, surface: cli, method: run, path: "python3 -B scripts/check_migration.py", resource: state,
+     module: scripts/check_migration.py, access: read, required_role: [local],
+     side_effects: none, state_source: "staged migration", status: implemented, owner_area: administration}
+  - {operation_id: administration.anomaly.migrate, surface: cli, method: run, path: "python -m local_observe.platform.anomaly_migrate", resource: anomaly-state,
+     module: local_observe/platform/anomaly_migrate.py, access: write, required_role: [local],
+     side_effects: "learned-band state carried forward, dry run by default", state_source: "anomaly state file", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: administration.security_schema.apply, surface: cli, method: run, path: "python -m local_observe.security.cli apply-schema", resource: security-store,
+     module: local_observe/security/cli.py, access: write, required_role: [local],
+     side_effects: "the owned security_events table, applied by a store administrator", state_source: "ClickHouse", status: implemented, owner_area: administration}
+  - {operation_id: administration.security_retention.verify, surface: cli, method: run, path: "python -m local_observe.security.cli verify-ttl|count|verify-backup|print-schema", resource: security-store,
+     module: local_observe/security/cli.py, access: read, required_role: [local],
+     side_effects: none, state_source: "ClickHouse system.tables readback", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.plan, surface: http, method: POST, path: /v1/setup/plan, resource: setup-plan,
+     module: local_observe/deployment/guided.py, access: write, required_role: [human, proposer],
+     side_effects: "one durable plan document awaiting a human decision", state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.decide, surface: http, method: POST, path: /v1/setup/decision, resource: setup-plan,
+     module: local_observe/deployment/guided.py, access: write, required_role: [human],
+     side_effects: "approved/denied/expired transition bound to the plan digest", state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.request, surface: http, method: POST, path: /v1/setup/request, resource: setup-plan,
+     module: local_observe/deployment/guided.py, access: write, required_role: [human, proposer, executor],
+     side_effects: "one queued handoff to the named trusted runner", state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.apply, surface: http, method: POST, path: /v1/setup/apply, resource: setup-plan,
+     module: local_observe/deployment/guided.py, access: write, required_role: [executor],
+     side_effects: "the plan's exact steps executed by the runner, with a receipt", state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.verify, surface: http, method: POST, path: /v1/setup/verify, resource: setup-plan,
+     module: local_observe/deployment/guided.py, access: write, required_role: [reader, human, proposer, executor],
+     side_effects: "one verification receipt stored against the plan", state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.pending, surface: http, method: GET, path: /v1/setup/pending, resource: setup-plan,
+     module: local_observe/deployment/guided.py, access: read, required_role: [executor],
+     side_effects: none, state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
+  - {operation_id: administration.guided_setup.cli, surface: cli, method: run, path: "lo-guided-setup plan|decision|request|apply|verify", resource: setup-plan,
+     module: local_observe/deployment/guided_cli.py, access: write, required_role: [bearer],
+     side_effects: "the same five operations over HTTPS with one mounted token", state_source: "a remote platform", status: implemented, owner_area: administration}
+  - {operation_id: administration.runner.run, surface: cli, method: run, path: "lo-trusted-runner --config <0400 file> --once|--poll", resource: runner,
+     module: local_observe/platform/runner_cli.py, access: write, required_role: [bearer],
+     side_effects: "claims and dispatches approved actions under one process ownership lock", state_source: "remote platform + the runner's own config", status: implemented, owner_area: administration}
+  - {operation_id: administration.deadman.probe, surface: cli, method: run, path: "python -m local_observe.platform.deadman", resource: liveness,
+     module: local_observe/platform/deadman.py, access: read, required_role: [bearer],
+     side_effects: "one GET /v1/status and its heartbeat check-in", state_source: "remote platform", status: implemented, owner_area: administration,
+     notes: "Absence of the check-in is the verdict; the probe files nothing about what it could not reach."}
+  - {operation_id: administration.ci_failures.poll, surface: cli, method: run, path: "python -m local_observe.ci_failures", resource: ci-failure,
+     module: local_observe/ci_failures/cli.py, access: write, required_role: [bearer],
+     side_effects: "polled pipeline facts, and cards only when --file-cards says so", state_source: "local store + remote CI", status: implemented, owner_area: administration}
+  - {operation_id: administration.evaluation.report, surface: cli, method: run, path: "python -B -m local_observe.evaluation", resource: evaluation-report,
+     module: local_observe/evaluation/eval.py, access: write, required_role: [local],
+     side_effects: "one report document; a quality report cannot authorize notifications", state_source: "corpus + observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: administration.component.serve, surface: cli, method: run, path: "uvicorn local_observe.platform.api:app_factory (lo-platform-api)", resource: platform,
+     module: local_observe/platform/api.py, access: write, required_role: [none],
+     side_effects: "opens the operational database under one exclusive owner lock and starts the delivery loop", state_source: "sqlite operational store", status: implemented, owner_area: foundation,
+     notes: "Startup refuses the retired credential environment value, a blank mode declaration, a wrong code pin, an unusable role list and an unreadable rules document before it serves a request."}
+  - {operation_id: administration.component.serve_operator, surface: cli, method: run, path: "uvicorn local_observe.platform.operator:app_factory", resource: operator-session,
+     module: local_observe/platform/operator.py, access: read, required_role: [none],
+     side_effects: "the same service behind the static shell", state_source: "sqlite operational store", status: implemented, owner_area: administration}
+  - {operation_id: administration.component.serve_inventory, surface: cli, method: run, path: "uvicorn local_observe.inventory.api:app_factory", resource: resource,
+     module: local_observe/inventory/api.py, access: read, required_role: [bearer],
+     side_effects: "none; the index is opened immutable", state_source: "built inventory index", status: implemented, owner_area: resources-queries-rules-config}
+  - {operation_id: administration.audit.read, surface: ui, method: interact, path: "audit view", resource: audit,
+     module: local_observe/platform/static/ui.js, access: read, required_role: [reader],
+     side_effects: none, state_source: "sqlite audit", status: implemented, owner_area: administration}
+  - {operation_id: administration.write_via_summary, surface: http, method: POST, path: "/v1/actions, /v1/actions/decision, /v1/actions/claim, /v1/executions/outcome", resource: action,
+     module: local_observe/platform/api.py, access: write, required_role: [summary],
+     side_effects: "one audited refusal attempt, counted whether or not a row was admitted", state_source: "sqlite audit + in-process counters", status: implemented, owner_area: administration, contract: none,
+     notes: "The gate runs before the body is read, so a summary credential is answered identically for valid and invalid bytes. It is the role rule over four documented routes, not a route of its own."}
