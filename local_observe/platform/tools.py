@@ -683,6 +683,20 @@ def topology_tool(agent: Agent, *, index_path: Any = None, resource_id: str, dir
                                          source=agent.identity))
 
 
+def boundary_document() -> dict[str, Any]:
+    """Return the declared-boundary document: which capabilities this product does not carry, and who owns each.
+
+    One source, every transport. The MCP tool below and `GET /v1/boundary` (`platform/administration_api.py`)
+    both answer from here, so an agent that asks the tool and an agent that asks the route cannot be handed
+    two different lists of what this product refuses to do — which is the only way the answer is worth more
+    than the absence it explains.
+    """
+    return {'schema_version': 1,
+            'capabilities': {key: dict(value) for key, value in COMPONENT_BOUNDARY.items()},
+            'rule': 'a capability named here is not implemented here, and nothing in this '
+                    'response was inferred from a store this process cannot read'}
+
+
 def boundary_tool(agent: Agent) -> ToolResult:
     """Say which capabilities this surface deliberately does not have, without being asked to guess.
 
@@ -691,10 +705,7 @@ def boundary_tool(agent: Agent) -> ToolResult:
     returns something *answer-shaped* about a source it cannot read is not. Its provenance is a read's,
     because a description is also a claim a reader may want to date.
     """
-    return ToolResult({'schema_version': 1,
-                       'capabilities': {key: dict(value) for key, value in COMPONENT_BOUNDARY.items()},
-                       'rule': 'a capability named here is not implemented here, and nothing in this '
-                               'response was inferred from a store this process cannot read'},
+    return ToolResult(boundary_document(),
                       Provenance(query_type='product-contract', parameters={'shape': 'boundary'},
                                  source=agent.identity))
 

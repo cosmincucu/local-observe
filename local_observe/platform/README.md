@@ -459,7 +459,7 @@ a candidate whose state pin differs from what is live, so migrating is a separat
 taken before a release whose pin already names the version that migration produces. Rollback is the
 pre-migration copy, not a code rollback.
 
-`VERSION` is 12. Migration 2 is the first real one: it moves the runtime control of notification
+`VERSION` is 14. Migration 2 is the first real one: it moves the runtime control of notification
 delivery out of the audit log. It creates `notification_control` (the delivery mode under `mode`, one
 flood breaker per channel under `circuit:<channel>`, one approved human-channel test window under
 `test_window:<id>`), `notification_reservations` (every send slot already taken) and
@@ -583,9 +583,35 @@ classes. `tests/test_state_migration.py` moves its table pin for the new name, a
 `tests/test_incident_grouping_migration.py` now ends a v1 file's walk at step '12'. What the routes on top of
 this table promise is [docs/api/maintenance.md](../../docs/api/maintenance.md).
 
-The paragraphs above stop at migration 9; migrations 3 to 11 are described in
-`docs/CONTRACTS.md` §5 and [docs/api/DECISIONS.md](../../docs/api/DECISIONS.md), and the exact SQL of every step
-lives beside it as a `MIGRATIONS` entry.
+Migration 13 (planned maintenance: the two report reads) is described in
+[docs/api/maintenance.md](../../docs/api/maintenance.md#schema-v13-the-schedule-table-and-the-two-report-reads)
+and `docs/CONTRACTS.md` §5: it moved the schedule version table, not the window, and rewrote nothing.
+
+Migration 14 (the administration surface) adds two tables and rewrites nothing. `platform_jobs` is a ledger,
+not a queue: one row per act an operator approved by digest — a verified copy of this database, or the
+restore-and-read proof of a copy an earlier row wrote — carrying its state (`accepted`, `running`, `succeeded`,
+`failed`, `cancelled`, `unknown`), the plan digest that approved it, who approved it, and a bounded receipt.
+The state machine's edges are CHECK constraints, including the timestamp ordering, so a row cannot claim to
+have finished before it started, and `unknown` exists because a process that died holding a job cannot be
+answered for: `recover()` marks those rows at startup rather than guessing `succeeded` (a durability claim
+nobody observed) or `failed` (which would discard a copy that may exist). `credential_revocations` is a
+deny-list keyed on identity — who signed the revocation, when, and a required one-line reason — consulted on
+the way in, so a revoked bearer is refused on its next request by every process reading this file, not merely
+by the one that recorded it.
+
+Both are typed tables rather than `notification_control` keys for the reason v11 was: a job has a state
+machine and a page boundary, and a revocation must be answerable with one indexed lookup per request — each
+needs a column a caller can read and a CHECK a bad row cannot violate. Neither carries an index, and that is
+a measurement: the two reads that matter are a lookup by primary key and a newest-first walk, a deployment
+holds tens of rows, and `maintenance`'s indexes arrived when a read had a scan to bound rather than before.
+`tests/test_state_migration.py` pins both table names and `tests/test_incident_grouping_migration.py` now
+ends a v1 file's walk at step '14'. What the routes on top of these tables promise — the approval digests,
+the 202 that books work, the revocation that cannot be undone — is
+[docs/api/administration.md](../../docs/api/administration.md).
+
+The paragraphs above stop at migration 14 for the tables this package owns; migrations 3 to 11 are described
+in `docs/CONTRACTS.md` §5 and [docs/api/DECISIONS.md](../../docs/api/DECISIONS.md), and the exact SQL of every
+step lives beside it as a `MIGRATIONS` entry.
 
 Copy discipline is unchanged and stricter than it looks. `Store.backup()` — the online backup API,
 which reads the `-wal` — stays the only safe copy of a running database. `Store.__init__` now refuses

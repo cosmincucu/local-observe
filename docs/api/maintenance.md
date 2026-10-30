@@ -26,7 +26,7 @@ edited a rule last week.
 | What did the silence achieve? | [Outcomes](#outcomes), [Attribution and overlap](#attribution-and-overlap) |
 | What was planned around a past instant? | [Historical reads](#historical-reads) |
 | Which error answers which mistake? | [Errors](#errors) |
-| What changed in the state file? | [Schema v13](#schema-v13-the-schedule-table-and-the-two-report-reads) |
+| What changed in the state file? | [Schema v13](#schema-v13-the-schedule-table-and-the-two-report-reads), and v14 in [`administration.md`](administration.md) |
 | What does this build not do? | [Limitations](#limitations) |
 
 The rules themselves are machine-readable in [`openapi.yaml`](openapi.yaml) and
@@ -36,9 +36,11 @@ The rules themselves are machine-readable in [`openapi.yaml`](openapi.yaml) and
 
 ## Prerequisites
 
-* A platform database at **schema v13** (`GET /v1/health` reports `schema_version`; if it is lower, run
+* A platform database at **schema v14** (`GET /v1/health` reports `schema_version`; if it is lower, run
   `lo-platform --database <path> migrate`, which verifies a copy of the file first and refuses to open a
-  database newer than the build). No stored window, incident or audit row is rewritten by that step.
+  database newer than the build). No stored window, incident or audit row is rewritten by that step — the
+  steps above v13 add the two administration tables (`platform_jobs`, `credential_revocations`), which this
+  family neither reads nor writes (`docs/api/administration.md`).
 * A credential whose role is **`human`** for every write. `producer` may neither write nor read this route
   family; `reader`, `proposer`, `human` and `executor` may read it; a `summary` credential is refused on
   every path, including the reads.
@@ -413,7 +415,7 @@ leaves the last committed version readable. A database newer than the build is r
 downgrade, and rollback is the pre-migration copy, not a code rollback. `docs/CONTRACTS.md` §5 and the
 migration notes in `local_observe/platform/README.md` carry the same step count; `tests/test_state_migration.py`
 pins the table set and `tests/test_incident_grouping_migration.py` pins the `schema.migrated` subjects a v1
-file walks to reach v13.
+file walks to reach the current version.
 
 ## Limitations
 

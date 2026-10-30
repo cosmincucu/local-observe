@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 13
+VERSION = 14
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -814,11 +814,116 @@ CREATE INDEX {MAINTENANCE_ATTRIBUTION_INDEX} ON audit({MAINTENANCE_ATTRIBUTION_W
     WHERE operation='{MAINTENANCE_SUPPRESSED_OPERATION}';
 '''
 
+# Schema v14 (the administration surface: a job an operator approved, and a credential an operator cut):
+# two tables, and no change to any existing row, column or business value.
+#
+# `platform_jobs` answers a question no existing table can. A state backup and the verification of one are
+# work the service *does* rather than a fact it holds: the answer arrives seconds or minutes after the
+# request that asked for it, and the caller who asked may not be there when it finishes. `runner_requests`
+# is the nearest neighbour and the reason this is not folded into it — that table is an *approval* keyed by
+# action id, claimed by a named external runner, and its whole shape says so (`action_id PRIMARY KEY
+# REFERENCES actions(id)`). Nothing here is an action, nothing here is claimed off-queue: the job runs in
+# the process that owns the database, and `docs/CONTRACTS.md` §5's single writer is what makes "who is
+# running this" answerable from the row. `outbox` is the other neighbour, and it is a queue of *messages*
+# with leases and retries; a job has no lease, because two state copies running at once is not a
+# throughput option but a corrupted artifact. So: a row per job, with the state machine in the column.
+#
+# The `state` vocabulary is the six words `docs/api/openapi.yaml` publishes, and `unknown` is in the CHECK
+# because a job whose runner died must be reportable as *that* rather than as a run that never ended — the
+# same honesty `executions` already owes (§5: an unknown outcome requires reconciliation, it does not
+# require a guess). `plan_sha256` is the digest the human approved; keeping it beside the job is what lets
+# a later reader say "this copy was made from the plan that was reviewed", and it is why the column is
+# NOT NULL on a row this table can hold at all: a job appears only once an approval exists.
+#
+# The three time CHECKs say what an operator reads back — a run that reported an end before it began is a
+# broken row, not a fast job — and none of them is a clock discipline: the instants are written by this
+# process in `validation.utc_text`'s fixed-width UTC, which is why text comparison is sound here. `subject`
+# is what a job acts on, and it is an id rather than a path: `state` for a backup of the whole file, and the
+# job id of the backup whose artifact a verification restores. No request ever names a path, so the only way
+# a job can reach a file is through a receipt this table already holds.
+#
+# `credential_revocations` is the deny-list half of enrollment. The mounted role file stays the authority
+# for who *may* call (it is read once at boot, and the service refuses to start on a sick list); this table
+# is the record of who may no longer, written by a human over HTTP and consulted on every request that
+# matched a bearer. It is a table rather than a `notification_control` key for the v11 reason: the value is
+# not a small declaration the delivery path reads, it is an *authorization* fact with a reason field whose
+# width matters, one row per identity must be a PRIMARY KEY rather than a discipline, and a
+# `control_declare` collision answer ("something already lives under this key") is the wrong answer to
+# "this credential was already revoked by somebody else". Revocation has no un-revoke column and no route
+# that clears the row: restoring a revoked bearer would be a route that can hand back a leaked token, and
+# the fix for a wrong revocation is re-enrollment by whoever holds the role file.
+#
+# Why these two tables share one step: both serve the one capability this area was missing — an operator
+# acting on the platform *from* the platform, without a shell — and neither is useful alone. A step that
+# added only the job table would leave `GET /v1/credentials` reporting a state the server could not act
+# on, and a step that added only revocations would leave every long-running administration task reachable
+# only by somebody with a shell on the host.
+#
+# The checklist a new step must answer (the v7 preamble's, applied here): this step **does** move
+# `tests/test_state_migration.py`'s `CURRENT_TABLES` pin — two tables joined the schema, named there, and
+# `tests/test_maintenance_windows.py` takes that pin by import — and it moves
+# `tests/test_incident_grouping_migration.py`'s list of `schema.migrated` subjects for a v1 file walking
+# the whole chain, which now ends at '14'. It adds no index at all (the walk is by rowid, the read is by
+# primary key), so nothing that names an index changes: `escalation_reader`'s `INDEXED BY` statements,
+# `tests/test_escalation_history.py` (rewound to steps 1..6) and
+# `tests/test_upgrade_acceptance.py`'s `INDEX_NAMES` are unmoved; `tests/test_maintenance_history.py`
+# (rewound to 5) and `tests/test_verification_records_migration.py` (to 4) compare a fresh file against one
+# migrated to *their own* pinned version, so a step above theirs changes nothing. The documents that state
+# the schema number — `docs/CONTRACTS.md` §5, `local_observe/platform/README.md`, `docs/api/COVERAGE.md`
+# and the rows of `docs/api/coverage.yaml` that quote a version — move with it, and `docs/api/COVERAGE.md`
+# states what the two tables are for.
+PLATFORM_JOB_TABLE = 'platform_jobs'
+CREDENTIAL_REVOCATION_TABLE = 'credential_revocations'
+#: The asynchronous work this build can run, spelled once: the CHECK, the route body, the plan derivation
+#: and `platform/jobs.py` cannot disagree about it. A third kind is a new capability with its own plan,
+#: digest and receipt, and is a contract change rather than a value.
+PLATFORM_JOB_KINDS = ('state.backup', 'state.backup_verification')
+#: The six states one job row passes through. `accepted` is booked and not started, `running` is claimed by
+#: this process, the last four are terminal — and `unknown` is terminal *and* reconcilable, the same
+#: distinction `executions` makes (§5 of the unit document).
+PLATFORM_JOB_STATES = ('accepted', 'running', 'succeeded', 'failed', 'cancelled', 'unknown')
+PLATFORM_JOB_TERMINAL_STATES = PLATFORM_JOB_STATES[2:]
+#: Characters one stored receipt may hold: the column width the idempotency reply, a verification payload
+#: and a schedule document already carry, and `jobs.py` refuses an oversized receipt rather than letting
+#: SQLite truncate what an operator was promised.
+PLATFORM_JOB_RECEIPT_LIMIT = 65_536
+#: The audit operation a job transition takes, named once so a reader of `audit`, a test and the writer
+#: cannot disagree about its spelling. `platform/jobs.py` is its only author.
+PLATFORM_JOB_OPERATION = 'administration.job'
+#: Characters one revocation reason may hold — the width a disposition reason carries, because both are
+#: the sentence a later operator reads about a decision somebody else made at a distance.
+CREDENTIAL_REVOCATION_REASON_LIMIT = 400
+#: The audit operation of one revocation, and the word `GET /v1/credentials` answers for an identity in
+#: this table. Spelled once: the read, the write, the authentication check and the tests use the same text.
+CREDENTIAL_REVOCATION_OPERATION = 'credential.revoked'
+CREDENTIAL_REVOKED_STATE = 'revoked'
+CREDENTIAL_ACTIVE_STATE = 'active'
+
+_JOB_KIND_SQL = ','.join(f"'{kind}'" for kind in PLATFORM_JOB_KINDS)
+_JOB_STATE_SQL = ','.join(f"'{state}'" for state in PLATFORM_JOB_STATES)
+ADMINISTRATION_SCHEMA = f'''
+CREATE TABLE {PLATFORM_JOB_TABLE} (id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ({_JOB_KIND_SQL})),
+    state TEXT NOT NULL CHECK(state IN ({_JOB_STATE_SQL})),
+    plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+    subject TEXT NOT NULL CHECK(length(subject) BETWEEN 1 AND 64),
+    approved_by TEXT NOT NULL,
+    admitted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+    receipt TEXT CHECK(receipt IS NULL
+        OR length(CAST(receipt AS BLOB)) BETWEEN 2 AND {PLATFORM_JOB_RECEIPT_LIMIT}),
+    CHECK(state IN ('accepted','running') OR finished_at IS NOT NULL),
+    CHECK(started_at IS NULL OR started_at >= admitted_at),
+    CHECK(finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at));
+CREATE TABLE {CREDENTIAL_REVOCATION_TABLE} (identity TEXT PRIMARY KEY,
+    revoked_by TEXT NOT NULL, revoked_at TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND {CREDENTIAL_REVOCATION_REASON_LIMIT}));
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
                               7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
                               10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA, 12: OCCURRENCE_DISPOSITION_SCHEMA,
-                              13: MAINTENANCE_SCHEDULES_SCHEMA}
+                              13: MAINTENANCE_SCHEDULES_SCHEMA, 14: ADMINISTRATION_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
@@ -2213,6 +2318,22 @@ class Store:
         """
         from .audit_reader import audit_page
         return audit_page(self.path, limit=limit, category=category, snapshot=snapshot, before=before)
+
+    def revoked(self, identity: str) -> bool:
+        """Whether one identity is refused at the door, answered from a read-only connection.
+
+        Delegation, in the shape `audit_page` above establishes: `platform/administration.py` owns the
+        statement and its connection discipline, and this method exists so the transport asks the store it was
+        handed instead of reaching for a path. It is the one database read that runs on every authenticated
+        request (`docs/api/administration.md`, decision D14 in `docs/api/DECISIONS.md`), which is why it takes
+        no write lock: `transaction()` opens `BEGIN IMMEDIATE`, and a per-request bookkeeping lookup must not
+        serialise the platform's writers behind it.
+
+        Raises whatever SQLite raises rather than returning `False`: falling open would make a locked or
+        damaged file a way to keep using a bearer somebody revoked.
+        """
+        from .administration import revoked as revocation_read
+        return revocation_read(self.path, identity)
 
     def backup(self, destination: Path | str) -> None:
         destination = Path(destination)

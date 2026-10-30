@@ -49,7 +49,8 @@ OPENAPI = ROOT / 'docs' / 'api' / 'openapi.yaml'
 #: whole package would either forgive a missing document entry or demand one for someone else's API.
 SERVED_TRANSPORTS = ('local_observe/platform/api.py', 'local_observe/platform/verification_api.py',
                      'local_observe/platform/observer_review.py', 'local_observe/platform/operator.py',
-                     'local_observe/platform/maintenance_api.py')
+                     'local_observe/platform/maintenance_api.py',
+                     'local_observe/platform/administration_api.py')
 
 READER = {'identity': 'reader', 'role': 'reader', 'token': 'r' * 32}
 PRODUCER = {'identity': 'test-detector', 'role': 'producer', 'token': 'p' * 32}
@@ -102,7 +103,15 @@ CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
             # so its 200 body is the one the document's schema is checked against.
             '/v1/maintenance-intervals': ('/v1/maintenance-intervals',
                                           (f'resource={UNKNOWN_WINDOW}'
-                                           f'&from=2026-03-01&to=2026-03-08').encode())}
+                                           f'&from=2026-03-01&to=2026-03-08').encode()),
+            # An identity no role file mounts and a job id nothing booked: both are well-formed, so the probe
+            # reaches the read and hears "no such thing" rather than being turned away by a parser. Naming a
+            # live credential or a live job here would test the fixture instead of the transport, and for the
+            # revocation route it would spend a real revocation on a documentation check.
+            '/v1/credentials/{identity}': ('/v1/credentials/never-mounted', b''),
+            '/v1/credentials/{identity}/revocations': ('/v1/credentials/never-mounted/revocations', b''),
+            '/v1/jobs/{job_id}': (f'/v1/jobs/{UNKNOWN_WINDOW}', b''),
+            '/v1/jobs/{job_id}/cancellations': (f'/v1/jobs/{UNKNOWN_WINDOW}/cancellations', b'')}
 
 #: Implemented read routes a plain app serves without an optional seam mounted, and the credential each
 #: needs. Their 200 bodies are validated against the schema the document claims for them.
@@ -113,6 +122,12 @@ ANSWERABLE_READS = {
     # One of the three maintenance reads: the bounded interval query, because it answers 200 over an empty
     # store and its body is the one place the outcome vocabulary and the read bounds are both visible.
     '/v1/maintenance-intervals': 'reader',
+    # The administration family's reads, all six of which answer 200 over a plain app with no optional seam
+    # mounted: `GET /v1/health` says what is absent rather than 503-ing for it, and the ledger reads answer
+    # an honest empty. Their bodies are where the capability vocabulary, the job-state vocabulary and the
+    # "no token material anywhere" promise can be checked against what the code returns.
+    '/v1/health': 'reader', '/v1/boundary': 'reader', '/v1/credentials': 'human', '/v1/state': 'human',
+    '/v1/state/backup-plan': 'human', '/v1/jobs': 'human',
 }
 
 REQUIRED_ROW_FIELDS = ('operation_id', 'surface', 'method', 'path', 'resource', 'module', 'access',

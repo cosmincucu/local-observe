@@ -219,3 +219,102 @@ scope, so anything it needed would join every request's critical path and every 
 `requirements-test-base.txt`, so the census, the contract and the conformance test needed nothing new. The
 one runtime artifact the milestone did add — the `api_idempotency` table — arrived as migration v11 through
 `state.MIGRATIONS`, with the pre-migration verified copy that every other step gets.
+
+## D12 — A capability that stays off HTTP says why, in a word the census owns
+
+**Status:** accepted, 2026-11-02.
+
+Every non-HTTP row in `coverage.yaml` now carries exactly one of two fields. `http_via` names the HTTP
+operations that already answer the capability, so the missing second route is a decision someone kept.
+`no_http` chooses one reason from a closed `vocabularies.exclusion_reasons` — `long_lived_process`,
+`offline_bootstrap`, `unvalidated_proxy`, `human_approval_only` — and travels with a `notes` sentence saying
+what an operator does instead. `tests/test_api_surface_parity.py` fails the file when a row in the two areas it
+is scoped to carries neither, or both, or a reason the vocabulary does not define, and when a `module` it names
+is not in the repository.
+
+The pressure was the census's own silence: an HTTP row was checked against the contract and against the served
+routes, and a `cli` row was checked for nothing except that it was well-formed. That makes "we decided not to"
+and "nobody has got to it" one indistinguishable pile of rows, which is the failure mode a coverage document is
+supposed to be the antidote to. The alternative considered was marking the unreachable rows `excluded` —
+rejected, because `excluded` means *this product refuses the capability*, and these capabilities ship and work;
+only their surface is different. A second rejected alternative was a free-text `reason` per row: unreadable in
+aggregate, and unfalsifiable by a test.
+
+**Cost:** annotating 27 rows in two areas, and the gate covers only those two areas for now — widening
+`ASSIGNED_AREAS` in that test will fail rows in the other four areas until they are annotated, which is the
+intent. Each reason also has to stay used (`test_every_reason_in_the_vocabulary_is_used_by_a_real_capability`),
+so the vocabulary cannot accrete a hedge word.
+
+## D13 — A long job is a booking: 202, a durable row, and an approval naming a derived plan
+
+**Status:** accepted, 2026-11-02.
+
+`POST /v1/state/backups` and `POST /v1/state/verifications` answer `202` with a job id. They do not answer the
+outcome, and they do not run the work inside the request. Three parts, each chosen against an alternative:
+
+* **The plan is derived, never stored.** `GET /v1/state/backup-plan` computes the binding — source version,
+  target version, artifact naming rule, "an existing destination is never replaced" — and digests it; the write
+  recomputes it and refuses `412 stale_revision` on a mismatch. A stored plan row would need an expiry, an
+  adoption rule and a race answered, and an approval that named a stale digest would still have to be
+  re-checked anyway.
+* **The row is durable before the work starts.** `accepted` survives a restart and the next process's delivery
+  loop picks it up. Running the copy inside the request would have made a caller's timeout the durability bound
+  of a database copy, and an in-memory queue would have lost an approved act on a crash between the answer and
+  the file.
+* **`unknown` is a state, not a bug.** A process that died holding a `running` job cannot be answered for:
+  `recover()` marks it at startup rather than claiming `succeeded` (a durability claim nobody observed) or
+  `failed` (which would discard a copy that may exist). A cancellation of a `running` job is `409` for the same
+  reason — the copy is one SQLite call holding a file, and this build has no way to stop one mid-flight and
+  still report what its output contains. A flag meaning "please stop when convenient" would be a promise about
+  work already happening.
+
+The runner is the delivery loop, last in each iteration, one job per tick: expire, deliver, then the copy, so a
+state backup cannot sit in front of a page. There is no scheduler, no lease and no worker pool — two concurrent
+copies of one database is corruption, not throughput.
+
+**Cost:** `accepted` is only honest while a lifespan is running the loop, and `tests/test_api_only_lifecycle.py`
+is the test that says so. A deployment that cannot accept a long copy delaying the next delivery attempt uses
+`lo-platform backup`, which names its own destination and stays the offline form. Copies land beside the state
+file, which is recovery from a bad migration and not from a lost volume; the plan says so in `destination`
+rather than the page hoping nobody notices.
+
+## D14 — Revocation is reachable over HTTP; enrollment and un-revocation are not
+
+**Status:** accepted, 2026-11-02.
+
+`POST /v1/credentials/{identity}/revocations` is the one authority-changing write this surface offers, and it
+only ever subtracts. The read side is the mounted role list joined to `credential_revocations`; the enforcement
+is one `mode=ro` lookup by primary key per authenticated request, run *after* the bearer matches, so an
+unauthenticated request never becomes a database reader of the deny-list, let alone a writer, and a revoked
+bearer gets the identical `401` bytes an unknown token gets.
+
+Revocation is the act an incident needs inside the first minute — a leaked agent token has to stop working
+before anybody can reach a host — while enrollment needs the file itself, which is why
+`administration.credential.configure` stays a `cli` row. An un-revoke route was considered and refused: it is a
+route that can hand back a token this product was told is compromised, and re-enrollment by whoever holds the
+role file is a decision with an author. There is no `dry_run` either, for the reason D9 gives for an actor
+claim: a body field that pretends to book work is a gap between what was asked and what ran.
+
+**Cost:** three things, and the last one changed a status code that was already pinned.
+
+A `revoked` row cannot be undone by this build, so a mistaken revocation is an outage for that identity until
+the role file is edited — stated here because an operator discovering it at 03:00 will read it as a bug.
+
+One lookup per admitted request costs a read-only connection to the state file (`mode=ro`, one statement by
+primary key, no write lock and no read mark held between requests — the same connection discipline
+`audit_reader` uses). The alternative, an in-process cache, would have made a revocation take effect only on
+the process that served the write, which is exactly the window an incident spends.
+
+The lookup runs **ahead of routing**, after the bearer comparison and before the role gates, so a revoked
+credential reaches no route at all — including the two the `summary` role may otherwise read. That ordering was
+a deliberate trade against a cost property three existing tests measured: "a refusal opened no database
+connection at all", counted by patching `sqlite3.connect`. Because that patch reaches the shared `sqlite3`
+module rather than one importer, the door's read lands inside their counters, and a ledger that cannot be
+opened would now turn an early `403 summary_only` into a `500`. The security property won: the tests now stub
+the door's answer (`door_stub()` in `tests/test_refusal_audit.py`, and the same scoping in
+`tests/test_audit_reader_api.py`) — a stub that returns what the real lookup returns for their fixtures, since
+none of them holds a revocation — and they assert the door was consulted rather than missing. What the counters
+still measure is the thing they were written to measure: that a refusal writes nothing and reads nothing it
+does not have to. `tests/test_administration_api.py` pins the ordering itself, both directions: one read per
+admitted request, none for a bearer that did not match, and a `500` rather than a pass when the ledger is
+unreadable.

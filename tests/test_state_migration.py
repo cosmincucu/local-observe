@@ -55,7 +55,7 @@ CURRENT_TABLES = V1_TABLES | {'notification_control', 'notification_reservations
                               'runner_requests', 'setup_plans', 'api_idempotency',
                               'occurrence_dispositions', 'occurrence_disposition_history',
                               'occurrence_dismissals', 'occurrence_projections',
-                              'maintenance_schedules'}
+                              'maintenance_schedules', 'platform_jobs', 'credential_revocations'}
 PROBE_V2 = 'CREATE TABLE migration_probe(x);\n'
 PROBE_V3 = 'CREATE TABLE migration_probe_v3(x);\n'
 PROBE_V4 = 'CREATE TABLE migration_probe_v4(x);\n'
