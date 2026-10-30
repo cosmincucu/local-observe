@@ -87,9 +87,12 @@ condition, and both artifacts must agree because the test compares them as sets.
 **Status:** accepted, 2026-10-30.
 
 `x-status: planned` marks operations the document proposes and the transport does not serve:
-`GET /v1/openapi.json`, `GET /v1/occurrences`, `POST /v1/occurrences/acknowledge`,
-`POST /v1/occurrences/dismiss`, `GET`/`POST /v1/maintenance/windows`,
-`POST /v1/maintenance/windows/revoke`.
+`GET /v1/openapi.json`, `POST /v1/alert-occurrences/{id}/dismissal-revocation`,
+`GET`/`POST /v1/maintenance/windows`, `POST /v1/maintenance/windows/revoke`. The occurrence operation is the
+backward step: the five routes that make and read a disposition are `x-status: implemented`, and the census
+row for it carries the `planned:` prefix on its gap id so the family is not double-counted as served.
+The projection drain is planned on the other side of the boundary — `surface: cli`, `contract: none` —
+because a drain belongs beside `lo-platform escalate` and not in a request handler.
 
 The alternative — a separate proposals file — reads more honestly but stops being checked, and an
 unchecked proposal becomes a guess with a URL. Keeping them here means the same rules apply: a planned row

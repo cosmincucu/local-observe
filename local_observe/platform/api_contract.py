@@ -331,7 +331,8 @@ def expected_revision(scope: Mapping[str, Any], body: Any = None) -> str | None:
     which is what it means: the caller asked to overwrite whatever is there.
 
     Raises:
-        ContractError: The header appears twice or carries a value no tag can be read out of.
+        ContractError: The header appears twice, carries a value no tag can be read out of, or the body field
+            names something that is not text.
     """
     offered = [value.decode('utf-8', 'replace') for name, value in _headers(scope) if name == REVISION_HEADER]
     raw: str | None = None
@@ -343,11 +344,20 @@ def expected_revision(scope: Mapping[str, Any], body: Any = None) -> str | None:
         raw = body[REVISION_FIELD]
     if raw is None:
         return None
+    if not isinstance(raw, str):
+        # A JSON body may name a number, a list or an object where a tag belongs. An `If-Match` header cannot:
+        # it arrives as text by definition. So this refusal is only reachable through `body=`, and it is the
+        # difference between telling a client its revision expectation was unusable and answering
+        # `internal_error` because `'int' object has no attribute 'encode'`.
+        raise ContractError(400, 'invalid_revision',
+                            f'{REVISION_FIELD} must be the revision tag this service gave, in text')
     if len(raw.encode()) > MAX_HEADER_VALUE_BYTES or raw.strip() == '*':
         return None
     matched = TAG_PATTERN.fullmatch(_tag_text(raw.strip()))
     if matched is None:
-        raise ContractError(400, 'invalid_revision', 'At most one If-Match value is understood')
+        raise ContractError(400, 'invalid_revision',
+                            'At most one If-Match value is understood' if offered else
+                            f'{REVISION_FIELD} carries no revision tag this service could read')
     return matched.group(1)
 
 

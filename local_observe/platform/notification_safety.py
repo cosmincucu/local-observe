@@ -6,6 +6,12 @@ for the send slots already taken and `notification_suppressions` for deliveries 
 sent. All of them are written in the same transaction as the outbox claim, beside the audit rows that
 stay the history of those decisions. A crash consumes a slot, never creates a free send.
 
+One refusal in `reserve` reads a table that is not control state: `occurrence_dismissals` (schema v12), the
+durable record of a human closing one alert episode. It is asked here rather than remembered in a mode
+because the question is asked of a row a *later* verdict may book, possibly in a process that knows nothing
+about the decision — and `docs/api/occurrences.md` says why the lookup is keyed on the episode and its
+condition together, which is what keeps a dismissal from outliving the episode it dismissed.
+
 Every budget, breaker and slot here is already per channel; since schema v3 (ledger notifications) a store may
 be configured with more than one, and `reserve_route` is what walks them in the operator's order.
 """
@@ -16,8 +22,9 @@ import sqlite3
 from typing import Any
 
 from local_observe.inventory.validation import canonical, timestamp, utc_text
-from .state import (StateError, Store, circuit_key, control_read, control_write, label,
-                    record_reservation, test_window_key)
+from .state import (OCCURRENCE_DISMISSAL_CAUSE, StateError, Store, circuit_key, control_read, control_write,
+                    episode_dismissed, label, record_reservation, test_window_key)
+from .suppression import condition_key as event_condition_key
 
 SAFETY_CONTRACT = 2
 # The two states of a channel's flood breaker, as stored under `circuit:<channel>`.
@@ -25,6 +32,11 @@ CIRCUIT_OPEN = 'open'
 CIRCUIT_CLOSED = 'closed'
 # The destination a refusal names when no slot was ever taken: a refusal is always about the human channel.
 HUMAN_DESTINATION = 'human'
+#: The suppression reason one delivery carries when a human dismissed the episode it announces. One token
+#: like every other reason `reserve` raises, and `state.OCCURRENCE_DISMISSAL_CAUSE` is the same string: the
+#: fold at disposition time and the refusal on a later claim must be told apart from a window or a flap by one
+#: word, and not by two spellings of it.
+OCCURRENCE_SUPPRESSED = OCCURRENCE_DISMISSAL_CAUSE
 
 
 @dataclass(frozen=True)
@@ -152,6 +164,19 @@ def reserve(store: Store, db: sqlite3.Connection, row: sqlite3.Row, policy: Noti
         return detail, 'restricted-channel-policy-required'
     if (now - timestamp(event['observed_at'])).total_seconds() > policy.max_event_age_seconds:
         return detail, 'event-too-old'
+    # A dismissed episode is refused here and not merely at the moment of the dismissal, because the durable
+    # question this row asks is "has a human already closed this episode?" and a verdict arriving after an API
+    # restart, a notifier restart or a replay asks it of the same file. One primary-key lookup on
+    # (episode, condition) answers it, and the pair is the whole point: the same condition in a *new* episode
+    # — the next boot, or a re-fire after a genuine clear — is not covered and still takes the route below.
+    # `suppression.condition_key` is the one definition of that identity, imported rather than re-folded here.
+    #
+    # It sits after the mode, classification and age refusals on purpose: those are facts about the channel and
+    # the event that were true before any human spoke, and an operator reading a suppression reason should get
+    # the reason that would have applied anyway. It sits before the recording-sink branch because a fold is not
+    # a routing decision — a dismissed episode must not accumulate sink receipts that read as deliveries.
+    if episode_dismissed(db, row['incident_id'], event_condition_key(event)):
+        return detail, OCCURRENCE_SUPPRESSED
     if policy.delivery_mode == 'recording':
         detail['destination'] = 'recording-sink'
         _reserve_slot(store, db, row['id'], detail, now)

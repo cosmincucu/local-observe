@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 11
+VERSION = 12
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -617,10 +617,135 @@ CREATE TABLE {API_IDEMPOTENCY_TABLE} (actor TEXT NOT NULL, key TEXT NOT NULL,
 CREATE INDEX api_idempotency_expiry ON {API_IDEMPOTENCY_TABLE}(completed_at);
 '''
 
+# Schema v12 (alert-occurrence dispositions): four tables, two indexes, and no existing row, column or
+# business value touched. What they hold is the answer to "what has a named human decided about this
+# episode?", which is the one of the three states of an occurrence that no table could carry before: the
+# measurement lives in `incidents`/`conditions` and the delivery lives in `outbox`, and between them there
+# was nothing for an acknowledgement to attach to except an `actions` row that was not about acknowledging
+# anything and an `action.approval_intent` audit row written by whoever tapped a page link
+# (`docs/api/occurrences.md` §6 says why neither can be an actor-and-reason record).
+#
+# `occurrence_dispositions` is keyed by the **incident id**, and that key is the episode identity: an
+# incident is opened by one firing verdict and closed when its last condition reports `resolved`, so one
+# incident row already is one episode, and it is durable across an API restart, a notifier restart and a
+# replay of the verdicts that produced it. A disposition therefore needs no identity of its own, and giving
+# it a second one would be the defect: message text and evaluation windows change between two reports of
+# one episode, so an identity built from them would forget every acknowledgement on the next verdict.
+#
+# `occurrence_dismissals` is keyed by **(incident id, condition key)** and not by the condition key alone.
+# That is the whole dismissal contract in one key choice: a tombstone on a condition would silence every
+# future episode of that condition — including the next boot and the next real failure — forever, which is
+# the inverse of what an operator asked for. Keyed on the pair, the dismissed episode stays quiet through
+# restarts and replays, and a re-fire after a genuine clear (a new incident, §1 of the unit document) or a
+# discrete occurrence with a new boot identity (a new condition *and* a new incident) pages.
+#
+# `occurrence_projections` holds the two statements the committed action must eventually reach — a
+# telemetry metric and the rule's operator-visible card — as retryable records rather than as calls made
+# inside the disposition transaction. A downstream that is down must not be able to undo an operator's
+# decision, so it gets a row instead of a rollback, and the row's status is what the read surface reports.
+#
+# Why a typed table here when the maintenance-window note above chose a control key: that argument was
+# "no CHECK anybody needed". Three of these columns *are* CHECKs the contract needs in the file — the two
+# disposition kinds, the projection targets and the revision the conditional write compares against — and
+# the tables they relate are three, not one document.
+#
+# The checklist the v7 preamble promised every new step must answer, and what this one moved: this step
+# **does** move `tests/test_state_migration.py`'s `CURRENT_TABLES` pin (four tables joined the schema, all
+# named there) and `tests/test_maintenance_windows.py` takes that pin by import, so it moves with it, as do
+# the two files that compare a fresh file's table set against a pinned older one
+# (`tests/test_maintenance_history.py`, `tests/test_verification_records_migration.py`), whose assertions
+# now exclude the v12 set explicitly rather than by accident. `tests/test_escalation_history.py` rewinds
+# `MIGRATIONS` to steps 1..6 and is unmoved; `tests/test_upgrade_acceptance.py`'s `INDEX_NAMES` names the
+# four escalation/maintenance indexes and is unmoved, because neither new index is guarded by `INDEXED BY`
+# (see below). `platform/escalation_reader.py` does read one of the new tables, and it checks the table is
+# there rather than naming an index, so a file this build has not migrated escalates exactly as it did
+# before instead of holding every incident. `tests/test_idempotency_migration.py`'s successor for this step
+# is `tests/test_occurrence_disposition_migration.py`. The documents that state the schema number —
+# `docs/api/COVERAGE.md`, `docs/api/DECISIONS.md`, `local_observe/platform/README.md` and
+# `docs/api/coverage.yaml` rows — move with it.
+#
+# Neither new index is named with `INDEXED BY`, for the v8/v9/v11 reason: both serve reads with an honest
+# answer to give when they cannot be served cheaply (a history page is still a page, and a projection drain
+# that scans is a drain that costs more, not one that lies), and an SQLite refusal would turn a slow read
+# into a failed one.
+OCCURRENCE_DISPOSITION_TABLE = 'occurrence_dispositions'
+OCCURRENCE_DISPOSITION_HISTORY_TABLE = 'occurrence_disposition_history'
+OCCURRENCE_DISMISSAL_TABLE = 'occurrence_dismissals'
+OCCURRENCE_PROJECTION_TABLE = 'occurrence_projections'
+#: The two dispositions an operator may record, spelled once here so the CHECK in the file, the routes,
+#: `dispositions.py` and `platform/escalation_reader.py` cannot disagree about the vocabulary. A third kind
+#: would be a new answer to "what did the human decide?", which is a contract change and not a value.
+OCCURRENCE_ACKNOWLEDGED = 'acknowledged'
+OCCURRENCE_DISMISSED = 'dismissed'
+OCCURRENCE_DISPOSITION_KINDS = (OCCURRENCE_ACKNOWLEDGED, OCCURRENCE_DISMISSED)
+#: The two downstream statements a committed disposition owes. Bounded by the column CHECK for the same
+#: reason as the kinds: a projection target nobody named is a claim about an integration that may not exist.
+OCCURRENCE_PROJECTION_KINDS = ('telemetry-metric', 'rule-card')
+#: Characters one stored `reason` may hold — the bound `dispositions.MAX_REASON_CHARS` refuses before
+#: writing, repeated here so the promise is a property of the file and not of one caller's discipline (the
+#: v4 verification-payload and v7 rationale precedents). 400 is `suppression.MAX_SUPPRESSION_CHARS`: a
+#: disposition reason and a suppression reason are read in the same operator surface and should be able to
+#: say the same amount.
+OCCURRENCE_REASON_LIMIT = 400
+#: Characters one stored projection statement may hold. The document is an id-and-a-decision — occurrence,
+#: kind, actor, reason, instants — never an event payload, and 64 KiB is the width every other stored
+#: document in this file refuses above.
+OCCURRENCE_PROJECTION_LIMIT = 65_536
+#: Attempts one projection record may account for. This is a bound on the *reported* number, not a give-up
+#: rule: a projection stays retryable whatever its count, because a downstream that was down for a week is
+#: not a reason to forget an operator's decision. A value above it is a row this build did not write.
+OCCURRENCE_PROJECTION_ATTEMPTS = 1000
+#: The one audit operation a disposition takes, named here so a reader of `audit`, a test and the writer
+#: cannot disagree about its spelling. `dispositions.py` is its only author.
+OCCURRENCE_DISPOSITION_OPERATION = 'occurrence.disposed'
+#: The one suppression cause word a folded delivery carries. `suppression.CAUSES` belongs to the causes that
+#: module measures (window, dependency, flap); a disposition is a human judgement, and an operator reading
+#: `presentation.delivery_route` should be able to tell the two apart.
+OCCURRENCE_DISMISSAL_CAUSE = 'occurrence-dismissed'
+OCCURRENCE_DISMISSAL_ACK_CAUSE = 'occurrence-acknowledged'
+#: The evidence word an escalation round carries in `escalation.acknowledged` for each disposition kind. These
+#: are the two cause words above, and deliberately one spelling: "a human acknowledged this episode" is the
+#: same fact whether the sentence is a folded delivery's `cause` or a held ladder's `evidence`, and two
+#: vocabularies for one fact is how an operator ends up reading them differently.
+OCCURRENCE_DISPOSITION_EVIDENCE = {OCCURRENCE_ACKNOWLEDGED: OCCURRENCE_DISMISSAL_ACK_CAUSE,
+                                   OCCURRENCE_DISMISSED: OCCURRENCE_DISMISSAL_CAUSE}
+
+_KIND_SQL = ",".join(f"'{kind}'" for kind in OCCURRENCE_DISPOSITION_KINDS)
+_PROJECTION_KIND_SQL = ",".join(f"'{kind}'" for kind in OCCURRENCE_PROJECTION_KINDS)
+OCCURRENCE_DISPOSITION_SCHEMA = f'''
+CREATE TABLE {OCCURRENCE_DISPOSITION_TABLE} (occurrence_id TEXT PRIMARY KEY REFERENCES incidents(id),
+    kind TEXT NOT NULL CHECK(kind IN ({_KIND_SQL})),
+    actor TEXT NOT NULL, reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND {OCCURRENCE_REASON_LIMIT}),
+    at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));
+CREATE TABLE {OCCURRENCE_DISPOSITION_HISTORY_TABLE} (sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurrence_id TEXT NOT NULL REFERENCES incidents(id),
+    kind TEXT NOT NULL CHECK(kind IN ({_KIND_SQL})),
+    actor TEXT NOT NULL, reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND {OCCURRENCE_REASON_LIMIT}),
+    at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));
+CREATE TRIGGER {OCCURRENCE_DISPOSITION_HISTORY_TABLE}_no_update BEFORE UPDATE ON {OCCURRENCE_DISPOSITION_HISTORY_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only disposition history'); END;
+CREATE TRIGGER {OCCURRENCE_DISPOSITION_HISTORY_TABLE}_no_delete BEFORE DELETE ON {OCCURRENCE_DISPOSITION_HISTORY_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only disposition history'); END;
+CREATE INDEX {OCCURRENCE_DISPOSITION_HISTORY_TABLE}_occurrence
+    ON {OCCURRENCE_DISPOSITION_HISTORY_TABLE}(occurrence_id, sequence);
+CREATE TABLE {OCCURRENCE_DISMISSAL_TABLE} (occurrence_id TEXT NOT NULL REFERENCES incidents(id),
+    condition_key TEXT NOT NULL CHECK(length(condition_key) = 64),
+    actor TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (occurrence_id, condition_key));
+CREATE TABLE {OCCURRENCE_PROJECTION_TABLE} (occurrence_id TEXT NOT NULL REFERENCES incidents(id),
+    kind TEXT NOT NULL CHECK(kind IN ({_PROJECTION_KIND_SQL})),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 2 AND {OCCURRENCE_PROJECTION_LIMIT}),
+    status TEXT NOT NULL CHECK(status IN ('pending','sent')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND {OCCURRENCE_PROJECTION_ATTEMPTS}),
+    available_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    last_error TEXT NOT NULL CHECK(length(last_error) BETWEEN 0 AND 64),
+    PRIMARY KEY (occurrence_id, kind));
+CREATE INDEX {OCCURRENCE_PROJECTION_TABLE}_due ON {OCCURRENCE_PROJECTION_TABLE}(status, available_at);
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
                               7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
-                              10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA}
+                              10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA, 12: OCCURRENCE_DISPOSITION_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
@@ -693,6 +818,29 @@ def record_suppression(connection: sqlite3.Connection, outbox_id: str, reason: s
     """Mark one delivery as never sendable, beside the audit row that records the same reason."""
     connection.execute('INSERT OR IGNORE INTO notification_suppressions(outbox_id,reason,at) VALUES (?,?,?)',
                        (outbox_id, reason, utc_text(now)))
+
+
+def episode_dismissed(connection: sqlite3.Connection, incident_id: str, condition_key: str) -> bool:
+    """Whether a dismissal covers one booked delivery, answered by the pair's primary key.
+
+    The delivery rail's question (`platform/notification_safety.reserve`) is "may this row ever reach a
+    human?", and this answers it for a dismissed episode without reading a reason, an actor or a document:
+    one primary-key lookup, one bit, so the durable no an operator gave outlives the process that recorded
+    it and survives an API restart, a notifier restart and a replay of the verdict that booked the row.
+
+    The pair, not the condition: `occurrence_dismissals` is keyed on (episode, condition) precisely so that
+    the *next* episode of this condition — a re-fire after a genuine clear, or the next discrete occurrence
+    of a producer that puts its boot identity in `condition` — is not covered by this answer. A lookup that
+    ignored `incident_id` would be a dismissal that outlived its own incident, which is the one thing this
+    table exists not to be.
+
+    Raises:
+        sqlite3.Error: The table cannot be read. Deliberately not swallowed: a claim that could not check
+            the tombstone must fail loudly rather than decide that nobody dismissed anything.
+    """
+    return connection.execute(f'SELECT 1 FROM {OCCURRENCE_DISMISSAL_TABLE}'
+                              ' WHERE occurrence_id=? AND condition_key=?',
+                              (incident_id, condition_key)).fetchone() is not None
 
 
 def notification_id(event_id: str) -> str:

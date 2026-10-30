@@ -51,12 +51,12 @@ Counted from the file, so this table cannot drift from it silently:
 | Owner area | Rows | Implemented | Planned | Excluded |
 | --- | --- | --- | --- | --- |
 | `foundation` — identity, health, the transport boundary | 9 | 8 | 1 | 0 |
-| `occurrences` — events, incidents, escalation, acknowledgement | 13 | 9 | 3 | 1 |
+| `occurrences` — events, incidents, escalation, acknowledgement | 17 | 14 | 2 | 1 |
 | `maintenance` — declared windows, suppression, flap accounting | 7 | 3 | 3 | 1 |
 | `resources-queries-rules-config` — inventory, queries, rules, deployment config | 27 | 27 | 0 | 0 |
 | `investigations-notifications-actions` — bounded investigations, delivery, the approval lifecycle | 46 | 45 | 0 | 1 |
 | `administration` — credentials, sessions, state, migration, backup, setup, runner | 38 | 38 | 0 | 0 |
-| **Total** | **140** | **130** | **7** | **3** |
+| **Total** | **144** | **135** | **6** | **3** |
 
 By surface: 53 HTTP, 70 CLI, 9 MCP, 8 UI. The OpenAPI document describes 46 paths and 49 operations —
 42 `implemented` plus the 7 proposed ones — which is 46 HTTP census rows minus the four cross-cutting
@@ -140,10 +140,12 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
 
 ## Gaps, stated plainly
 
-* **Acknowledgement and dismissal do not exist over HTTP.** `occurrence.acknowledge`,
-  `occurrence.dismiss`, `occurrence.list` are `planned`. The state layer already keeps incidents,
-  conditions and escalation history, and the escalation round already holds work whose acknowledgement is
-  incomplete — so the durable half exists and the route half does not. This is the F2 target.
+* **A recorded disposition can be read and made, but not taken back.** `occurrence.dismiss.revoke` and
+  `occurrence.disposition.projection.drain` are `planned`. The five routes that answer are
+  `/v1/alert-occurrences{,/{id},/{id}/history}` and the two writes, and they hold up under restart, replay
+  and a re-fire (`docs/api/occurrences.md`); what is missing is the backward step. A revoked dismissal is
+  not on the list because a tombstone cannot be unsaid — only replaced, by the next episode — and a caller
+  that wants to drain a stalled projection must reach for `dispositions.drain` in code.
 * **A maintenance window cannot be declared by a caller.** `maintenance.window.declare.http` and
   `.revoke` are `planned`; `declare_window` is reachable from library code that holds a real human `Actor`,
   and `maintenance.window.declare_cli` is `excluded` because minting `Actor(identity, 'human')` from a

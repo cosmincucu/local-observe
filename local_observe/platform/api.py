@@ -22,7 +22,7 @@ from local_observe.credentials import read_credential
 from local_observe.http import TransportError
 from local_observe.inventory.validation import InvalidInventory, canonical
 from local_observe.log import get_logger
-from . import api_contract, intake
+from . import api_contract, dispositions, intake
 from .policy import action_policy
 from .refusal_dispatch import RefusalAuditDispatcher
 from .refusals import SUMMARY_ONLY
@@ -63,6 +63,78 @@ CALLBACK_PREFIX = '/v1/callbacks/'
 #: before can post one now.
 INTAKE_PREFIX = '/v1/intake/'
 
+#: The alert-occurrence surface (`docs/api/occurrences.md`): one episode of one condition, read three ways
+#: and written two. The prefix is one constant because five routes share it, and a literal spelled five ways is
+#: five chances for `openapi.yaml`, the census and this dispatcher to disagree about an address. An occurrence
+#: id **is** an incident id — the episode identity `Store.intake` already mints — and nothing below accepts a
+#: second name for it.
+OCCURRENCE_PREFIX = '/v1/alert-occurrences'
+#: The same family one level down, spelled as its own literal rather than computed from the constant above.
+#: `tests/test_api_openapi_conformance.py` proves a documented templated path is served by matching it
+#: against a literal the transport names (`match()` reads the source, not the running dispatcher), and
+#: `OCCURRENCE_PREFIX + '/'` is an expression: true at runtime, invisible to the census, and the three
+#: `{id}` routes would read as documented-but-unreachable. `INTAKE_PREFIX` and `CALLBACK_PREFIX` are the
+#: two precedents for naming the trailing-slash form directly.
+OCCURRENCE_CHILD_PREFIX = '/v1/alert-occurrences/'
+#: The two dispositions a caller may post, and the command each names. A path segment and not a body field,
+#: because the two write different durable facts (a dismissal tombstones, an acknowledgement does not) and a
+#: caller must be able to tell which one they called from the URL they sent.
+OCCURRENCE_COMMANDS = {'acknowledgements': 'acknowledge', 'dismissals': 'dismiss'}
+#: The whole body a disposition write may carry. `reason` is required; `expected_revision` is the
+#: conditional-write opt-in `api_contract.expected_revision` reads when no `If-Match` arrived. Anything else is
+#: refused rather than ignored — `docs/api/COVERAGE.md` records the 404-instead-of-400 fall-through this
+#: product already dislikes, and a new route must not widen it. An identity field is refused further upstream
+#: by `api_contract.assert_no_actor_claim`, which every disposition write opts into.
+OCCURRENCE_BODY_KEYS = frozenset({'reason', 'expected_revision'})
+#: The sentence one path under the prefix gets when it names neither an episode nor its history. Named here
+#: because `occurrence_target` raises it before the dispatcher reaches the module that owns the rest of the
+#: vocabulary, and a refusal that exists only at its raise site cannot be pinned by a test.
+OCCURRENCE_SHAPE_REFUSAL = 'This path names no occurrence and no occurrence history'
+
+
+def occurrence_write(path: str) -> tuple[str, str] | None:
+    """Return the ``(command, occurrence id)`` one POST path names, or None when it names neither.
+
+    The id is validated by `dispositions`, not here: this function decides only *which command* a path is, so a
+    malformed id keeps travelling to the one place that knows the difference between "not this route" and "no
+    such occurrence" — and that place answers both with the same 404, so no caller learns which of the two the
+    store holds.
+    """
+    if not path.startswith(OCCURRENCE_CHILD_PREFIX):
+        return None
+    segments = path.removeprefix(OCCURRENCE_CHILD_PREFIX).split('/')
+    if len(segments) != 2 or not segments[0] or segments[1] not in OCCURRENCE_COMMANDS:
+        return None
+    return OCCURRENCE_COMMANDS[segments[1]], segments[0]
+
+
+def occurrence_target(path: str) -> tuple[str, bool]:
+    """Return the occurrence id one GET path names, and whether its history was asked for.
+
+    Two shapes exist under the prefix — an episode and its history — and a third is a refusal rather than a
+    best-effort guess, for the reason every other unrecognised path here gets a 404: an unexpected segment must
+    not silently read something the caller did not ask for.
+
+    An empty id is not refused as a shape problem. It is the same question as an id that names no episode
+    (`/v1/alert-occurrences//history` has always reached `dispositions` and answered 404 there), and
+    `docs/api/occurrences.md` §7 makes that answer deliberately identical so the route is not an oracle for
+    id shape — a path with no id in it names no occurrence either.
+
+    Raises:
+        api_contract.ContractError: 404 `not_found` when the path carries no id, 400 `invalid_request` for a
+            trailing segment that is not `history`. Both in the machine envelope, because this whole route
+            family has spoken the envelope since its first answer; a StateError here would have been answered
+            in the flat shape the routes that predate the boundary use, which is two error shapes behind one
+            address.
+    """
+    remainder = path.removeprefix(OCCURRENCE_CHILD_PREFIX).strip('/')
+    segments = remainder.split('/') if remainder else ['']
+    if len(segments) > 2 or (len(segments) == 2 and segments[1] != 'history'):
+        raise api_contract.ContractError(400, 'invalid_request', OCCURRENCE_SHAPE_REFUSAL)
+    if not segments[0]:
+        raise api_contract.ContractError(404, 'not_found', dispositions.UNKNOWN_OCCURRENCE)
+    return segments[0], len(segments) == 2
+
 #: The four write routes a `summary` credential is turned away from *before* any `Store` method is
 #: entered . The path names the attempt word the durable refusal row carries, and nothing
 #: else: no route string, body or token is written. This is the only refusal the transport audits —
@@ -97,14 +169,26 @@ REFUSAL_POST_ROUTES = {'/v1/actions': 'propose', '/v1/actions/decision': 'decide
 #: * The verification and observer-review seams own their own body parsing, size gates and replay rules
 #:   (`verification_api` refuses a changed re-post, `observer_review` refuses a re-graded cycle), so a
 #:   gate in front of them would be a second copy of a rule that already exists and is already tested.
+#: * The pre-existing acknowledgement surfaces (`/v1/actions/decision`, `/v1/callbacks/<channel>`) bind a
+#:   decision or an intent of their own and stay out for the reasons above; they are not dispositions, and
+#:   `docs/api/occurrences.md` §6 says what the difference is.
 IDEMPOTENT_POST_ROUTES = frozenset({'/v1/events', '/v1/evidence', '/v1/actions/claim',
                                     '/v1/notifications/retry', '/v1/notifications/reset-safety',
                                     '/v1/executions/outcome', '/v1/runner/claim'})
 
 
 def idempotency_enabled(path: str) -> bool:
-    """Whether one POST route honours `Idempotency-Key`, as the two lists above decided."""
-    return path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
+    """Whether one POST route honours `Idempotency-Key`, as the two lists above decided.
+
+    The two disposition writes are in **by shape** and not by enumeration, because their paths carry an
+    identifier: `POST /v1/alert-occurrences/<id>/acknowledgements` is exactly the kind of write a lost answer
+    makes dangerous — a durable, attributed, non-repeatable human statement — and a console that retried it
+    without this header would either append a second decision about one question or be refused by the
+    revision check, which is a worse way to say "already done". `occurrence_write` is the same test the
+    dispatcher uses to route, so a path cannot honour the header without also being served by it.
+    """
+    return (path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
+            or occurrence_write(path) is not None)
 
 
 def _retrieve_execution(future: Any) -> None:
@@ -807,6 +891,23 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(200, store.audit_page(
                         limit=page['limit'], category=page['category'],
                         snapshot=page['snapshot'], before=page['before']))
+                if path == OCCURRENCE_PREFIX or path.startswith(OCCURRENCE_CHILD_PREFIX):
+                    # The alert-occurrence reads (`docs/api/occurrences.md` §7): three routes, one module, and
+                    # the boundary's own parser ahead of two of them. `page_params` judges the raw query bytes
+                    # and refuses before any connection is opened, and because it admits only `limit` and
+                    # `cursor` there is no filter on these routes to forget — an operator narrows the answer by
+                    # paging through it, and `returned`/`next_cursor` say which of "there is no more" and "I
+                    # stopped looking" the page means. `ETag` rides the single-episode read so the write that
+                    # follows it can name the revision it read; the list and the history carry a cursor instead.
+                    if path == OCCURRENCE_PREFIX:
+                        return await respond(200, dispositions.page(store, **api_contract.page_params(scope)))
+                    target, wants_history = occurrence_target(path)
+                    if wants_history:
+                        return await respond(200, dispositions.history(store, target,
+                                                                       **api_contract.page_params(scope)))
+                    document = dispositions.occurrence(store, target)
+                    return await respond(200, document,
+                                         [(b'etag', api_contract.revision_tag(document['revision']))])
                 if path.startswith('/v1/records/'):
                     params = query_params(scope)
                     try:
@@ -933,6 +1034,26 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 result = guided_setup.request(path, body, actor)
             elif path == '/v1/notifications/retry' and set(body) == {'delivery_id'}:
                 result = store.retry_notification(body['delivery_id'], actor)
+            elif occurrence_write(path) is not None:
+                # The two dispositions (`docs/api/occurrences.md`). The role test, the reason bound and the
+                # revision comparison all live in `dispositions`, so this branch adds exactly one thing the
+                # routes above do not have: a stated body shape, refused before the state layer is asked.
+                # Every refusal it raises is already a `ContractError` carrying its status, so the flat
+                # sentence-matching classifier in `stable_code` never sees a disposition refusal — which is the
+                # difference between an envelope a client can switch on and a guess about English wording.
+                command, target = occurrence_write(path)
+                if set(body) - OCCURRENCE_BODY_KEYS:
+                    raise api_contract.ContractError(
+                        400, 'invalid_request',
+                        f'A disposition takes a reason and an optional {api_contract.REVISION_FIELD}')
+                expect = api_contract.expected_revision(scope, body)
+                context = api_contract.request_context(scope, actor)
+                if command == 'acknowledge':
+                    result = dispositions.acknowledge(store, target, body.get('reason'), context,
+                                                      expected_revision=expect)
+                else:
+                    result = dispositions.dismiss(store, target, body.get('reason'), context,
+                                                  expected_revision=expect)
             elif path == '/v1/notifications/reset-safety' and not body:
                 result = store.reset_notification_guard(actor)
             elif path.startswith(CALLBACK_PREFIX) and set(body) == {'token', 'action_id'}:

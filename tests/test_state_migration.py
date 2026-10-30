@@ -41,14 +41,18 @@ V1_TABLES = {'actions', 'audit', 'conditions', 'events', 'evidence', 'executions
 # plus the two tables wave 6  added at v4 — a binding captured per action and the immutable
 # statements filed against it — plus the one table correlation added at v7 to hold why several conditions are
 # one incident, plus the one table the API boundary added at v11 to hold a write this process already
-# performed (`api_idempotency`, so a lost response can be replayed instead of re-executed). A new table
-# changes what this pin means, so all are named here and the content of each step is verified in its own
-# migration test (`tests/test_verification_records_migration.py`,
-# `tests/test_incident_grouping_migration.py`, `tests/test_idempotency_migration.py`).
+# performed (`api_idempotency`, so a lost response can be replayed instead of re-executed), plus the four
+# tables schema v12 adds for an operator's disposition of one alert episode (`occurrence_dispositions`, its
+# append-only `occurrence_disposition_history`, the `occurrence_dismissals` tombstones and the retryable
+# `occurrence_projections`). A new table changes what this pin means, so all are named here and the content
+# of each step is verified in its own migration test (`tests/test_verification_records_migration.py`,
+# `tests/test_incident_grouping_migration.py`, `tests/test_occurrence_disposition_migration.py`).
 CURRENT_TABLES = V1_TABLES | {'notification_control', 'notification_reservations',
                               'notification_suppressions', 'verification_bindings',
                               'verification_records', 'incident_members', 'runner_approvals',
-                              'runner_requests', 'setup_plans', 'api_idempotency'}
+                              'runner_requests', 'setup_plans', 'api_idempotency',
+                              'occurrence_dispositions', 'occurrence_disposition_history',
+                              'occurrence_dismissals', 'occurrence_projections'}
 PROBE_V2 = 'CREATE TABLE migration_probe(x);\n'
 PROBE_V3 = 'CREATE TABLE migration_probe_v3(x);\n'
 PROBE_V4 = 'CREATE TABLE migration_probe_v4(x);\n'

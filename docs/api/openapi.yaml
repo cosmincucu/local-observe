@@ -1490,47 +1490,136 @@ paths:
                 type: object
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/occurrences:
+  /v1/alert-occurrences:
     get:
       tags: [occurrences]
       operationId: occurrence.list
-      x-status: planned
-      x-required-role: [reader, producer, proposer, human, executor]
-      summary: Open occurrences with the acknowledgement state beside each.
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: One bounded page of alert episodes, each with its disposition and its delivery roll-up.
       description: |
-        Not served. The shape this product intends is the bounded page helper in
-        `local_observe/platform/api_contract.py` (`limit` plus an opaque `cursor`), over the incident and
-        condition state `state.py` already keeps.
+        An occurrence is one episode of one condition, and its id is the incident id `Store.intake` mints
+        (`docs/api/occurrences.md` §1). Three separate axes are reported beside it — what the source
+        measures, what a human has decided, and what has been delivered — and none of them is the other.
+        There is no filter: the boundary's page parser admits `limit` and `cursor` only, and refuses rather
+        than clamps, so an operator narrows the answer by paging through it. Oldest episode first, walked by
+        a stored monotonic position, so a page can neither lose an episode nor repeat one.
+
+        The role list is the transport's whole-`GET` gate, which admits four roles and not five: a
+        `producer` credential is answered `400` with the flat `{"error":"not_authorised"}` body every other
+        read in this API gives it (a producer files verdicts and reads nothing), and a `summary` credential
+        is answered `403 {"error":"summary_only"}` by the gate that runs ahead of routing. Both refusals are
+        the transport's, not this module's, and so are not in the machine envelope.
       parameters:
         - $ref: '#/components/parameters/PageLimit'
         - $ref: '#/components/parameters/PageCursor'
       responses:
         '200':
-          description: One page.
+          description: One page of occurrences.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OccurrencePage'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/alert-occurrences/{id}:
+    get:
+      tags: [occurrences]
+      operationId: occurrence.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: One alert episode, with `ETag` set to the revision a write must send back.
+      description: |
+        An identifier that is not a canonical UUID, an identifier this platform never opened, and an address
+        under the prefix that carries no identifier at all answer the same way (`404`), so the route is not
+        an oracle for id shape; an address that names neither an episode nor its history is `400
+        invalid_request`, because a path this family does not have is a broken caller and not an absent
+        episode. `legacy_evidence` names what the
+        pre-existing acknowledgement reads saw — a decided action, a tapped page link — without either
+        standing for a disposition: neither names an actor or carries a reason
+        (`docs/api/occurrences.md` §6). The four read roles above are the whole-`GET` gate: a `producer`
+        credential is refused ahead of routing and a `summary` credential is refused by the summary gate.
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+      responses:
+        '200':
+          description: The occurrence.
           headers:
             ETag:
               $ref: '#/components/headers/ETag'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BoundedPage'
+                $ref: '#/components/schemas/OccurrenceDocument'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+  /v1/alert-occurrences/{id}/history:
+    get:
+      tags: [occurrences]
+      operationId: occurrence.disposition_history.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Every disposition one episode has ever carried, oldest first.
+      description: |
+        Append-only: the effective state moves past a decision and the history keeps it, so "who else
+        touched this, and what did they say?" stays answerable. A restated identical disposition added no
+        row, so the history is a record of decisions and not of retries. The four roles are the whole-`GET`
+        gate: `producer` is refused ahead of routing and `summary` by the summary gate, both in the flat
+        body the rest of this API uses for those two refusals.
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: One page of history rows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispositionHistoryPage'
         '400':
           $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
         '404':
-          $ref: '#/components/responses/NotFound'
-  /v1/occurrences/acknowledge:
+          $ref: '#/components/responses/ContractError'
+  /v1/alert-occurrences/{id}/acknowledgements:
     post:
       tags: [occurrences]
       operationId: occurrence.acknowledge
-      x-status: planned
+      x-status: implemented
       x-required-role: [human]
-      summary: Say that a human has seen this occurrence, and stop escalating it.
+      summary: Say that the human behind this credential has the episode, and stop its repeats.
       description: |
-        Not served. It will carry `Idempotency-Key` (a lost answer must not re-open or double-count an
-        acknowledgement) and `If-Match` against the incident revision, so an acknowledgement about a state
-        nobody read is refused as `stale_revision` rather than applied. No body field names the human:
-        `api_contract.assert_no_actor_claim` refuses one.
+        The actor is the credential and the reason is required: a body field naming an identity is refused
+        `400 actor_claim_refused` before anything is written, and only a `human` credential is heard at all
+        (`403` for every other role, because §5 says a payload cannot claim that an agent is a human — with
+        one split worth knowing: a `summary` credential is stopped by the transport's own gate ahead of
+        routing and answers `403 {"error":"summary_only"}` in the flat body, while `reader`, `producer`,
+        `proposer` and `executor` reach `dispositions` and get `403 not_authorised` in the envelope).
+        The disposition, its history row, the fold of the episode's still-`pending` deliveries, the audit
+        row and the projection records commit in one transaction; a delivery already on a lease is never
+        recalled and says so (`delivery.in_flight`, `delivery.uncertain`). An acknowledgement expires
+        nothing and resolves nothing: the condition stays open until a genuine `resolved` verdict arrives,
+        and that recovery is still delivered.
       parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
@@ -1538,50 +1627,110 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              description: One incident identifier and the revision it was read at. Identity fields are refused.
+              $ref: '#/components/schemas/DispositionRequest'
       responses:
         '200':
-          description: Acknowledged.
+          description: The episode as it stands after the disposition, plus `created` and `folded`.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StatusResult'
+                $ref: '#/components/schemas/DispositionResult'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/ContractError'
         '409':
           oneOf:
+            - $ref: '#/components/responses/Conflict'
             - $ref: '#/components/responses/IdempotencyConflict'
             - $ref: '#/components/responses/RequestInProgress'
         '412':
           $ref: '#/components/responses/StaleRevision'
-        '404':
-          $ref: '#/components/responses/NotFound'
-  /v1/occurrences/dismiss:
+  /v1/alert-occurrences/{id}/dismissals:
     post:
       tags: [occurrences]
       operationId: occurrence.dismiss
+      x-status: implemented
+      x-required-role: [human]
+      summary: Close one episode as not-actionable, durably, without resolving its condition.
+      description: |
+        Everything an acknowledgement does, plus a tombstone per (episode, condition) pair — which is what
+        makes the answer survive this process. A later verdict for a covered pair books a delivery that
+        `notification_safety.reserve` refuses, so an API restart, a notifier restart and a replay of the
+        verdict all stay quiet. The key is the pair and never the condition alone, so the *next* episode —
+        a re-fire after a genuine clear, or a discrete occurrence with a new boot identity — pages normally.
+        A dismissal does not write `incidents.status` or `conditions.status`, and it is final on this
+        surface: a later acknowledgement of the same episode is `409 conflict`.
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispositionRequest'
+      responses:
+        '200':
+          description: The episode as it stands after the dismissal, plus `created` and `folded`.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispositionResult'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '412':
+          $ref: '#/components/responses/StaleRevision'
+  /v1/alert-occurrences/{id}/dismissal-revocation:
+    post:
+      tags: [occurrences]
+      operationId: occurrence.dismiss.revoke
       x-status: planned
       x-required-role: [human]
-      summary: Close an occurrence as not-actionable, without resolving its condition.
+      summary: Take back a dismissal of one episode (not served).
       description: |
-        Not served. Dismissal never resolves the underlying condition — that belongs to a recovery event or
-        a cleared verification — and a dismissed occurrence must not re-open when the same verdict is
-        replayed, which is the rule its milestone has to state.
+        Not served. `docs/api/occurrences.md` §2 states the shape this write would have to settle before it
+        can exist: a dismissal folds the episode's queued deliveries and `Store.retry_notification` refuses to
+        replay a folded row, so a revocation either leaves the silence in place after saying it was withdrawn
+        — the one answer an operator cannot act on — or replays messages a human may no longer be waiting
+        for. Choosing is a contract decision, not a handler.
       parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/IfMatch'
       responses:
         '200':
-          description: Dismissed.
+          description: Revoked.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatusResult'
-        '409':
-          oneOf:
-            - $ref: '#/components/responses/IdempotencyConflict'
-            - $ref: '#/components/responses/RequestInProgress'
-        '412':
-          $ref: '#/components/responses/StaleRevision'
         '404':
           $ref: '#/components/responses/NotFound'
   /v1/maintenance/windows:
@@ -1708,6 +1857,17 @@ components:
       description: An opaque continuation token from a previous page's `next_cursor`. A token this service never issued is refused.
       schema:
         type: string
+    OccurrenceId:
+      name: id
+      in: path
+      required: true
+      description: |
+        The occurrence identifier — the incident id of one episode, a canonical UUID. An id that is not one
+        and an id this platform never opened answer the same `404`, so the route cannot be used to probe
+        which identifier shapes this build has seen.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     AuditLimit:
       name: limit
       in: query
@@ -2131,6 +2291,258 @@ components:
           type: array
           items:
             type: object
+        limit:
+          type: integer
+        returned:
+          type: integer
+        next_cursor:
+          type: string
+      required: [rows, limit, returned]
+    DispositionRequest:
+      type: object
+      description: |
+        The whole body one disposition write may carry. `reason` is required because a decision nobody can
+        explain next month is the artifact this feature replaces; `expected_revision` is the body form of the
+        conditional write (a caller may send `If-Match` instead). A field naming an identity, a role or a
+        credential is refused with `400 actor_claim_refused` before the state layer is reached, and any other
+        field is refused rather than ignored.
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 400
+          description: One printable line, required. No CR, LF or NUL.
+        expected_revision:
+          type: string
+          description: The revision tag this caller read, as the `ETag` the read issued.
+      required: [reason]
+      additionalProperties: false
+    OccurrenceDocument:
+      type: object
+      description: |
+        One alert episode, read three ways at once: what the source measures (`measured`), what a human has
+        decided (`disposition`/`state`), and what has been delivered (`delivery`). The three are separate
+        fields on purpose — `docs/api/occurrences.md` §1 to §3 is the contract that keeps them apart, and a
+        reviewer who merges any two of them builds a pager that either loses a real page or re-pages someone
+        who already answered.
+      properties:
+        occurrence_id:
+          type: string
+          description: The incident id of the episode — a canonical UUID, and the only name this surface has.
+        episode:
+          type: object
+          description: |
+            What this occurrence *is*. `identity_basis` says how the identity was delimited without the reader
+            having to guess: `incident` for a continuous condition bounded by its own recovery/re-fire
+            boundary, `discrete` for a producer that carries the occurrence identity in `condition` (a boot,
+            a session, a run), `verdict-unreadable` for an event row this build could not decode — which
+            yields null names rather than invented ones. `members` is the size of the group
+            (`platform/correlation.py`) and `rung` whether this episode is an escalation stage of another rule.
+          properties:
+            identity_basis:
+              type: string
+              enum: [incident, discrete, verdict-unreadable]
+            condition_key:
+              type: string
+            resource_id:
+              type: ['string', 'null']
+            members:
+              type: integer
+            rung:
+              type: boolean
+            source:
+              type: ['string', 'null']
+            rule_id:
+              type: ['string', 'null']
+            rule_version:
+              type: ['string', 'null']
+            condition:
+              type: ['string', 'null']
+          required: [identity_basis, condition_key, resource_id, members, rung]
+        measured:
+          type: object
+          description: |
+            The source's own answer, which nothing here may write. `condition_status` is the anchor
+            condition's latest verdict; a group stays open until its last member clears.
+          properties:
+            status:
+              type: string
+              enum: [open, resolved]
+            condition_status:
+              type: ['string', 'null']
+              enum: [firing, resolved, unknown, null]
+            opened_at:
+              type: string
+            updated_at:
+              type: string
+          required: [status, opened_at, updated_at]
+        disposition:
+          type: ['object', 'null']
+          description: |
+            The effective operator statement, or null when nobody has spoken for this episode. Durable
+            who/when/why: a repeat of the identical statement does not move `at`, `actor` or `reason`.
+          properties:
+            kind:
+              type: string
+              enum: [acknowledged, dismissed]
+            actor:
+              type: string
+              description: The identity in the bearer credential, never a body field.
+            reason:
+              type: string
+            at:
+              type: string
+            revision:
+              type: integer
+          required: [kind, actor, reason, at, revision]
+        state:
+          type: string
+          enum: [unacknowledged, acknowledged, dismissed, source-resolved]
+          description: |
+            Disposition and measurement resolved into one word, derived and never stored. `source-resolved`
+            outranks an operator's act, which is why an episode can read `measured.status = resolved` beside
+            `state = dismissed` and no stored row can disagree with the verdict that ended it.
+        revision:
+          type: string
+          description: |
+            The conditional-write tag: the disposition revision, the measured status and the episode's opening
+            instant, each visible and each moving for one reason. Send it back as `If-Match` (or in
+            `expected_revision`) to refuse a write over state nobody read.
+        delivery:
+          type: object
+          description: |
+            The episode's deliveries rolled up. `in_flight` counts rows on a lease, `dispatched` rows whose
+            attempt ended with no acknowledgement obtained, and `uncertain` is true while either is nonzero:
+            a disposition never recalls a message, and this is where the uncertainty is stated rather than
+            left to be inferred from an absence. `recalled` is false because it is always false here.
+          properties:
+            queued:
+              type: integer
+            in_flight:
+              type: integer
+            dispatched:
+              type: integer
+            sent:
+              type: integer
+            suppressed:
+              type: integer
+            exhausted:
+              type: integer
+              description: |
+                `dead` rows that carry no suppression record — attempts spent, not a human's no.
+            recalled:
+              type: boolean
+              const: false
+            uncertain:
+              type: boolean
+          required: [queued, in_flight, dispatched, sent, suppressed, exhausted, recalled, uncertain]
+        projections:
+          type: object
+          description: |
+            The two downstream statements a committed disposition owes, and where each stands. A target with
+            no record reads `unconfigured` and a target with one that no sink served reads `pending` with
+            `last_error: not-configured` — two different sentences about the world, and the reason neither is
+            a silence. A failed projection never undoes the disposition beside it.
+          properties:
+            telemetry-metric:
+              $ref: '#/components/schemas/ProjectionState'
+            rule-card:
+              $ref: '#/components/schemas/ProjectionState'
+          required: [telemetry-metric, rule-card]
+          additionalProperties: false
+        legacy_evidence:
+          type: array
+          items:
+            type: string
+            enum: [action-decided, approval-intent]
+          description: |
+            What the pre-existing acknowledgement reads saw about this episode, as words and nothing more.
+            Neither entry is a disposition: a tapped page link names no human and carries no reason
+            (`docs/CONTRACTS.md` §5), so an operator can read "somebody tapped, nobody gave a reason".
+        created:
+          type: boolean
+          description: |
+            Present on a write's answer: false for the identical statement restated.
+        folded:
+          type: integer
+          description: |
+            Present on a write's answer: deliveries this call moved out of the queue.
+      required: [occurrence_id, episode, measured, disposition, state, revision, delivery, projections,
+                 legacy_evidence]
+    DispositionResult:
+      type: object
+      description: |
+        The occurrence after the write, and the two facts only the write can state: `created` is false for the
+        identical statement restated (same kind, same actor, same reason — nothing moved, no history row
+        added), and `folded` counts the still-`pending` deliveries this call moved out of the queue. A leased
+        or already-sent delivery is in neither number; it is in `delivery.in_flight` and `delivery.uncertain`.
+      allOf:
+        - $ref: '#/components/schemas/OccurrenceDocument'
+        - type: object
+          properties:
+            created:
+              type: boolean
+            folded:
+              type: integer
+          required: [created, folded]
+    ProjectionState:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, sent, unconfigured]
+        attempts:
+          type: integer
+          description: Failed attempts at *what is pending now*; a re-disposition resets the count.
+        available_at:
+          type: ['string', 'null']
+        last_error:
+          type: string
+          description: An exception class name or a fixed word (`refused`, `not-configured`). Never a body, a URL or a credential.
+      required: [status, attempts, available_at, last_error]
+    OccurrencePage:
+      type: object
+      description: One bounded page of occurrences, oldest episode first.
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/OccurrenceDocument'
+        limit:
+          type: integer
+        returned:
+          type: integer
+        next_cursor:
+          type: string
+      required: [rows, limit, returned]
+    DispositionHistoryRow:
+      type: object
+      description: |
+        One accepted disposition, append-only. A restatement that changed nothing added no row, so this is a
+        record of decisions and not of retries.
+      properties:
+        sequence:
+          type: integer
+        kind:
+          type: string
+          enum: [acknowledged, dismissed]
+        actor:
+          type: string
+        reason:
+          type: string
+        at:
+          type: string
+        revision:
+          type: integer
+      required: [sequence, kind, actor, reason, at, revision]
+    DispositionHistoryPage:
+      type: object
+      description: One bounded page of one episode's dispositions, oldest first.
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/DispositionHistoryRow'
         limit:
           type: integer
         returned:

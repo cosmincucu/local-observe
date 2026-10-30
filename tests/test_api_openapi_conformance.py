@@ -63,6 +63,15 @@ TOKEN_BY_ROLE = {row['role']: row['token'] for row in CREDENTIALS}
 CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
             '/v1/intake/{source}': ('/v1/intake/alertmanager', b''),
             '/v1/callbacks/{channel}': ('/v1/callbacks/telegram', b''),
+            '/v1/alert-occurrences/{id}': ('/v1/alert-occurrences/00000000-0000-4000-8000-000000000000', b''),
+            '/v1/alert-occurrences/{id}/history':
+                ('/v1/alert-occurrences/00000000-0000-4000-8000-000000000000/history', b''),
+            '/v1/alert-occurrences/{id}/acknowledgements':
+                ('/v1/alert-occurrences/00000000-0000-4000-8000-000000000000/acknowledgements', b''),
+            '/v1/alert-occurrences/{id}/dismissals':
+                ('/v1/alert-occurrences/00000000-0000-4000-8000-000000000000/dismissals', b''),
+            '/v1/alert-occurrences/{id}/dismissal-revocation':
+                ('/v1/alert-occurrences/00000000-0000-4000-8000-000000000000/dismissal-revocation', b''),
             '/v1/verification/binding': ('/v1/verification/binding',
                                          b'action_id=' + b'0' * 36),
             '/v1/verification/records': ('/v1/verification/records',
@@ -77,6 +86,7 @@ CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
 ANSWERABLE_READS = {
     '/v1/me': 'reader', '/v1/status': 'reader', '/v1/overview': 'reader', '/v1/runtime': 'reader',
     '/v1/audit': 'reader', '/v1/records/{table}': 'reader', '/v1/notifications/safety': 'human',
+    '/v1/alert-occurrences': 'reader',
 }
 
 REQUIRED_ROW_FIELDS = ('operation_id', 'surface', 'method', 'path', 'resource', 'module', 'access',
@@ -366,9 +376,17 @@ class CensusRowTests(unittest.TestCase):
         for area in self.census['vocabularies']['owner_areas']:
             self.assertTrue([row for row in self.census['operations'] if row['owner_area'] == area], area)
         planned = {row['operation_id'] for row in self.census['operations'] if row['status'] == 'planned'}
-        self.assertTrue({'occurrence.list', 'occurrence.acknowledge', 'occurrence.dismiss',
-                         'maintenance.window.declare', 'maintenance.window.revoke',
-                         'maintenance.window.read', 'platform.openapi.read'} <= planned, planned)
+        self.assertTrue({'occurrence.dismiss.revoke', 'maintenance.window.declare',
+                         'maintenance.window.revoke', 'maintenance.window.read',
+                         'platform.openapi.read'} <= planned, planned)
+        # The F2 surface this build ships: five routes, so a reader of this table can see that the
+        # acknowledgement and the dismissal are census rows *and* served, not both-and-neither.
+        rows = {row['operation_id']: row for row in self.census['operations']}
+        for operation_id in ('occurrence.list', 'occurrence.read', 'occurrence.disposition_history.read',
+                             'occurrence.acknowledge', 'occurrence.dismiss'):
+            with self.subTest(row=operation_id):
+                self.assertEqual(rows[operation_id]['status'], 'implemented')
+                self.assertTrue(rows[operation_id]['path'].startswith('/v1/alert-occurrences'))
         self.assertIn('maintenance.window.declare_cli', {row['operation_id']
                                                         for row in self.census['operations']})
 
@@ -548,7 +566,7 @@ class ContractMatchesBehaviourTests(unittest.TestCase):
                                                            b'{}' if method == 'POST' else b'', query))
                 with self.subTest(operation=operation_id, call='credentialled'):
                     self.assertEqual((status, body), (404, {'error': 'not_found'}))
-        self.assertEqual(planned, 7)
+        self.assertEqual(planned, 5)
 
     def test_every_implemented_operation_answers_within_what_is_documented(self):
         """One probe per operation: whatever the app chooses to answer, the contract admits it.

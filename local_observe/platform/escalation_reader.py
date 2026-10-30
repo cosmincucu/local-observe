@@ -31,9 +31,11 @@ What is said once here, and why each part has to be this shape:
 * **Tracked incidents are read by primary key, independently of the page.** A tracked incident cannot be
   missed because it aged out of a window, and cannot be judged from a page that never reached it. Its
   status column is read from its own row, which is the only positive evidence that may end a ladder.
-* **Ack is two EXISTS questions answered in booleans.** Whether a human decided, and whether a page was
-  tapped. Both are proved by rows that stay in the table forever, whatever their age, and neither returns a
-  payload: an incident with ten thousand historical actions costs the scheduler two integers.
+* **Ack is three bounded questions answered in one value.** Whether an operator recorded a disposition, whether
+  a human decided an action, and whether a page was tapped. All three are proved by rows that stay in the table
+  forever, whatever their age, and none of them returns a payload: an incident with ten thousand historical
+  actions costs the scheduler three integers and one short word. The disposition is the only one that names an
+  actor, and the scheduler is shown the kind and nothing else.
 * **Per-incident work is budgeted, and an unfinished read is a named result.** Each incident's own queries
   run inside a fixed SQLite VM-instruction budget. Exceptional per-incident history therefore produces
   *that incident's* `incomplete` answer — which the scheduler holds — instead of a global stop, and instead
@@ -57,8 +59,8 @@ from typing import Any
 
 from local_observe.inventory.validation import timestamp
 from .state import (ESCALATION_ACTIONS_EXPRESSION, ESCALATION_ACTIONS_INDEX, ESCALATION_AUDIT_INDEX,
-                   ESCALATION_INCIDENTS_INDEX, ESCALATION_INTENT_OPERATION, StateError, identifier,
-                   label)
+                   ESCALATION_INCIDENTS_INDEX, ESCALATION_INTENT_OPERATION, OCCURRENCE_DISPOSITION_TABLE,
+                   StateError, identifier, label)
 
 #: Rows one discovery page may carry. The fixed cap the scheduler has always cost per round, now spent on
 #: *examined* rows instead of on *newest* ones: it bounds one round's work, and a large open-incident set is
@@ -78,6 +80,11 @@ PAYLOAD_MAXIMUM_BYTES = 65_536
 #: How many acknowledgement status words one read may ask about. The list arrives from the caller and
 #: becomes a fixed count of bound placeholders, so no caller text reaches a statement.
 STATUS_MAXIMUM = 16
+#: How wide one stored disposition kind may be transferred into Python. The longest word in
+#: `state.OCCURRENCE_DISPOSITION_KINDS` is ten characters, so anything wider is a row this build did not write
+#: and is read as *no disposition* rather than reasoned about. The bound is decided *inside* SQLite for the
+#: same reason `PAYLOAD_MAXIMUM_BYTES` is: a value this module may not interpret never becomes a Python string.
+DISPOSITION_KIND_MAXIMUM_CHARS = 32
 
 #: The incident read qualities. `open`/`resolved` are the stored status column, read positively; every
 #: other word is the absence of an answer, and must never be read as one.
@@ -136,6 +143,16 @@ INTENT_SQL = ('SELECT EXISTS(SELECT 1 FROM audit AS a INDEXED BY ' + ESCALATION_
               + ' AND a.subject IN (SELECT id FROM actions INDEXED BY ' + ESCALATION_ACTIONS_INDEX
               + ' WHERE ' + ESCALATION_ACTIONS_EXPRESSION + '=?))')
 
+#: The authenticated disposition an operator recorded about this incident under the alert-occurrence contract
+#: (`docs/api/occurrences.md`). Keyed on the episode, so this is the *base* incident's own disposition and never
+#: one belonging to a condition that merely happens to be grouped with it. The answer is one bounded word or
+#: NULL — never the reason and never the actor, which a scheduler has no business deciding anything about — and
+#: the lookup is an equality on the table's own primary key: the same case `INCIDENT_SQL` states for
+#: `incidents.id`, where naming `sqlite_autoindex_*` would tie this read to how SQLite implements a constraint.
+#: `plans()` reports it, so "no scan of stored rows" stays checkable from outside this file.
+DISPOSITION_SQL = (f'SELECT CASE WHEN length(kind)<={DISPOSITION_KIND_MAXIMUM_CHARS} THEN kind END'
+                   f' FROM {OCCURRENCE_DISPOSITION_TABLE} AS d WHERE d.occurrence_id=?')
+
 #: The busy timeout every other connection in this package waits, as `sqlite3.connect`'s argument. A read
 #: transaction takes no write lock, but a `-wal` still has to be read by somebody.
 _BUSY_TIMEOUT_SECONDS = 10
@@ -145,17 +162,23 @@ _BUSY_TIMEOUT_SECONDS = 10
 class Ack:
     """Whether a human has already acted on one incident, and whether that question got answered.
 
-    `decided` is an `actions` row bound to the incident whose status is past a human decision; `intent` is
-    an `action.approval_intent` audit row for one of that incident's actions. Both are EXISTS answers over
-    the whole table, so their cost and their truth do not depend on how much has happened since.
+    `disposition` is the kind an operator recorded about this episode under the alert-occurrence contract — an
+    authenticated, reasoned statement about the incident, and the only one of the three fields that names who
+    gave it and why. `decided` is an `actions` row bound to the incident whose status is past a human decision;
+    `intent` is an `action.approval_intent` audit row for one of that incident's actions. The last two are
+    durable side effects of a human *surface* and are not acknowledgements: they stay exactly what they were and
+    `escalation` still holds a ladder when it sees them, but they outrank nothing and replace nothing, because a
+    page-link tap names no human (`docs/api/occurrences.md` §6). All three are EXISTS-shaped answers over the
+    whole table, so their cost and their truth do not depend on how much has happened since.
     `complete=False` means the question was *not* answered — this incident's budget ran out, or the read was
-    refused — and then the two booleans say nothing at all. Which kind of evidence counts as an
+    refused — and then the other fields say nothing at all. Which kind of evidence counts as an
     acknowledgement, and what it does to a ladder, is the scheduler's decision and not this module's.
     """
     decided: bool = False
     intent: bool = False
     complete: bool = True
     reason: str | None = None
+    disposition: str | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +274,13 @@ class EscalationReader:
             # A deferred read transaction: this snapshot costs no write lock, and it is over before the
             # round that took it writes anything.
             self._connection.execute('BEGIN')
+            # Whether this file has the disposition table at all, read once per snapshot from `sqlite_master`
+            # and never guessed. A database migrated to an earlier schema answers "no disposition exists"
+            # rather than interrupting every incident's acknowledgement read, because holding every ladder in
+            # the file would turn `lo-platform migrate` from an upgrade into an outage — and because "nobody
+            # acknowledged it" is not what a missing table means. Any *other* read failure is still a refusal,
+            # and a refusal holds work instead of judging it.
+            self._dispositions = _table_present(self._connection, OCCURRENCE_DISPOSITION_TABLE)
         except sqlite3.Error:
             self.close()
             raise StateError(READ_FAILED) from None
@@ -344,6 +374,10 @@ class EscalationReader:
                       ('incident', INCIDENT_SQL, (PAYLOAD_MAXIMUM_BYTES, PROBE_ID)),
                       ('decision', self._decision_sql, (PROBE_ID, *self._statuses)),
                       ('intent', INTENT_SQL, (PROBE_ID,)))
+        if self._dispositions:
+            # Only for a file that has the table: an `EXPLAIN` against a missing relation raises, and a
+            # diagnostic must not become the reason a round reports no plans at all.
+            statements = statements + (('disposition', DISPOSITION_SQL, (PROBE_ID,)),)
         try:
             return {name: tuple(row[-1] for row in connection.execute(
                 'EXPLAIN QUERY PLAN ' + sql, parameters).fetchall()) for name, sql, parameters in statements}
@@ -383,12 +417,16 @@ class EscalationReader:
         if connection is None:
             return Ack(complete=False, reason=REFUSED)
         try:
+            disposition = None
+            if self._dispositions:
+                kind = connection.execute(DISPOSITION_SQL, (incident_id,)).fetchone()
+                disposition = None if kind is None else kind[0]
             decided = bool(connection.execute(self._decision_sql, (incident_id, *self._statuses))
                            .fetchone()[0])
             intent = bool(connection.execute(INTENT_SQL, (incident_id,)).fetchone()[0])
         except sqlite3.Error:
             return Ack(complete=False, reason=self._classify())
-        return Ack(decided=decided, intent=intent)
+        return Ack(decided=decided, intent=intent, disposition=disposition)
 
     def _arm(self, limit: int | None) -> None:
         """Start charging the per-incident budget, or read without one.
@@ -434,6 +472,21 @@ def _connect(path: Path) -> sqlite3.Connection:
             pass
         raise StateError(READ_FAILED) from None
     return connection
+
+
+def _table_present(connection: sqlite3.Connection, name: str) -> bool:
+    """Whether one table exists in this file, asked of `sqlite_master` inside the open snapshot.
+
+    The question is answered once per round rather than handled per statement, because the alternative —
+    letting the disposition read fail and classifying the failure — would make every tracked incident hold on
+    a ladder over a schema this build simply has not migrated yet. A missing table is the absence of that
+    table, and nothing else.
+
+    Raises:
+        sqlite3.Error: The catalogue could not be read, which the caller treats as the read refusal it is.
+    """
+    row = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,))
+    return row.fetchone() is not None
 
 
 def _is_uuid(value: Any) -> bool:

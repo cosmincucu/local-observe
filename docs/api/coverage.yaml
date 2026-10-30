@@ -98,18 +98,34 @@ operations:
   - {operation_id: occurrence.history.read, surface: cli, method: read, path: "lo-platform --database <path> status", resource: occurrence,
      module: local_observe/platform/state.py, access: read, required_role: [local],
      side_effects: none, state_source: "sqlite counts", status: implemented, owner_area: occurrences}
-  - {operation_id: occurrence.list, surface: http, method: GET, path: /v1/occurrences, resource: occurrence,
-     module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
-     side_effects: none, state_source: "sqlite: incidents, conditions, acknowledgement state", status: planned, owner_area: occurrences,
-     notes: "Milestone F2. Bounded page over open occurrences with the acknowledgement state beside each row."}
-  - {operation_id: occurrence.acknowledge, surface: http, method: POST, path: /v1/occurrences/acknowledge, resource: occurrence,
-     module: local_observe/platform/api.py, access: write, required_role: [human],
-     side_effects: "acknowledgement state on the incident, one audit row, the escalation that stops", state_source: "sqlite operational store", status: planned, owner_area: occurrences,
-     notes: "Milestone F2. Today an acknowledgement exists only as the action.approval_intent a callback carries; there is no HTTP verb for 'a human has seen this'."}
-  - {operation_id: occurrence.dismiss, surface: http, method: POST, path: /v1/occurrences/dismiss, resource: occurrence,
-     module: local_observe/platform/api.py, access: write, required_role: [human],
-     side_effects: "closed occurrence state, one audit row, no re-open on the next replay of the same verdict", state_source: "sqlite operational store", status: planned, owner_area: occurrences,
-     notes: "Milestone F2. Dismissal is a human judgement about a verdict this platform holds; it must not resolve the underlying condition, which belongs to a recovery event or a cleared verification."}
+  - {operation_id: occurrence.list, surface: http, method: GET, path: /v1/alert-occurrences, resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite: incidents, conditions, occurrence_dispositions (schema v12), outbox", status: implemented, owner_area: occurrences,
+     notes: "Bounded page over episodes, oldest first. The measurement, the operator's disposition and the delivery roll-up are three blocks of one row and are never merged."}
+  - {operation_id: occurrence.read, surface: http, method: GET, path: "/v1/alert-occurrences/{id}", resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite: incidents, conditions, occurrence_dispositions, occurrence_projections, outbox, actions, audit", status: implemented, owner_area: occurrences,
+     notes: "One episode plus its `ETag`. An id that is not a canonical UUID and an id that names nothing answer the same 404, so the route is not an oracle for identifier shape."}
+  - {operation_id: occurrence.disposition_history.read, surface: http, method: GET, path: "/v1/alert-occurrences/{id}/history", resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "sqlite: occurrence_disposition_history (append-only, schema v12)", status: implemented, owner_area: occurrences,
+     notes: "Every disposition this episode ever carried, oldest first, including kinds the effective state has moved past. A restatement that changed nothing added no row."}
+  - {operation_id: occurrence.acknowledge, surface: http, method: POST, path: "/v1/alert-occurrences/{id}/acknowledgements", resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: write, required_role: [human],
+     side_effects: "disposition + history + audit rows, the fold of this episode's pending deliveries, two projection records", state_source: "sqlite: occurrence_dispositions, occurrence_disposition_history, outbox, notification_suppressions, audit, occurrence_projections", status: implemented, owner_area: occurrences,
+     notes: "A human credential and a required reason, or nothing: an empty reason is refused because a disposition nobody can explain is the artifact this replaced. Stops repeats and holds later rungs of the same episode; resolves nothing, and an acknowledgement has no expiry — a clear followed by a re-fire is a new episode. Leased or sent messages are not recalled and the answer says so."}
+  - {operation_id: occurrence.dismiss, surface: http, method: POST, path: "/v1/alert-occurrences/{id}/dismissals", resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: write, required_role: [human],
+     side_effects: "as the acknowledgement, plus one (episode, condition) tombstone per group member and a fold that includes the recovery page", state_source: "sqlite: as the acknowledgement, plus occurrence_dismissals", status: implemented, owner_area: occurrences,
+     notes: "Durable for one episode and no wider: the tombstone is keyed on the episode and its condition together, so a verdict replayed after a restart cannot page and the next episode still does. It never writes incidents.status or conditions.status — dismissal is not resolution — and it is final on this surface (a later acknowledgement is 409)."}
+  - {operation_id: occurrence.dismiss.revoke, surface: http, method: POST, path: "/v1/alert-occurrences/{id}/dismissal-revocation", resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: write, required_role: [human],
+     side_effects: "would remove the tombstones and the effective row, with their own audit row", state_source: "sqlite: occurrence_dispositions, occurrence_dismissals", status: planned, owner_area: occurrences,
+     notes: "Not served, and the shape is unresolved rather than merely unbuilt: a revocation must say what happens to a delivery already folded by the dismissal (`Store.retry_notification` refuses to replay a folded row), and whether the episode re-arms if its condition is still firing. Both answers change what an operator can rely on, so neither is chosen in a row."}
+  - {operation_id: occurrence.disposition.projection.drain, surface: cli, method: run, path: "planned", resource: occurrence,
+     module: local_observe/platform/dispositions.py, access: write, required_role: [local],
+     side_effects: "attempts the due projection records and moves their status", state_source: "sqlite: occurrence_projections (schema v12)", status: planned, owner_area: occurrences,
+     notes: "`dispositions.drain` exists and is tested with injected sinks; nothing in this build mounts or runs it, and no address is proposed for it either — the honest shape is a command beside `lo-platform escalate`, and that is undecided. Until a caller exists, every disposition's projections stay `pending` and the occurrence read says so — the decision is downstream and unmade."}
   - {operation_id: occurrence.acknowledge.mcp, surface: mcp, method: tool, path: planned, resource: occurrence,
      module: local_observe/platform/tools.py, access: write, required_role: [bearer],
      side_effects: "as the HTTP route, attributed to the agent that called", state_source: "sqlite operational store", status: excluded, owner_area: occurrences,
@@ -435,7 +451,8 @@ operations:
      notes: "The machine-readable 'this absence is a decision' answer; call it before concluding an absent tool is a missing feature."}
   - {operation_id: administration.state.backup, surface: cli, method: run, path: "lo-platform --database <path> backup --output <file>", resource: state,
      module: local_observe/platform/state.py, access: write, required_role: [local],
-     side_effects: "one new file, integrity-checked; an existing destination is never replaced", state_source: "sqlite online backup API", status: implemented, owner_area: administration}
+     side_effects: "one new file, integrity-checked; an existing destination is never replaced", state_source: "sqlite online backup API", status: implemented, owner_area: administration,
+     notes: "The copy a rollback restores from. `Store.backup` reads the file back through SQLite's own `integrity_check` before it reports success, and `lo-platform migrate` writes its own verified pre-migration copy beside the file it is about to change — the recovery half of a schema change is that copy, never a digest rollback."}
   - {operation_id: administration.state.migrate, surface: cli, method: run, path: "lo-platform --database <path> migrate", resource: state,
      module: local_observe/platform/cli.py, access: write, required_role: [local],
      side_effects: "the pre-migration verified copy, then one audited transaction per step", state_source: "sqlite user_version", status: implemented, owner_area: administration,
