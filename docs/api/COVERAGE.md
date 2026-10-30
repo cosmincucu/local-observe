@@ -17,8 +17,11 @@ cannot see.
 A capability with rules a table cannot carry gets its own page beside these four:
 [`maintenance.md`](maintenance.md) states the planned-maintenance family in prose — which credential may
 silence what, over which scope, for how long, what happens when the clocks change, which outcomes a window
-can reach, and what a bounded historical read may and may not claim. The census row and the OpenAPI operation
-still decide what exists; the page says what they mean.
+can reach, and what a bounded historical read may and may not claim.
+[`resources.md`](resources.md) does the same for the resource, query, rule and configuration family — which
+artifact has to be mounted for an answer, what the two planes refuse to merge, which routes are dry runs and
+what they therefore never touch. The census row and the OpenAPI operation still decide what exists; the page
+says what they mean.
 
 ## Reading a row
 
@@ -42,13 +45,14 @@ where the operation happens today, not where it should happen.
 | `contract` | `openapi` (this row owes an OpenAPI operation) or `none`. Omitted means `openapi` when the row is an HTTP row with a single addressable path. |
 | `notes` | The judgement a schema cannot carry: bounds, why a refusal is worded that way, what would break. |
 
-Four HTTP rows are `contract: none` and that is deliberate, not a gap:
-`foundation.request_identity.apply` and `foundation.idempotent_write.apply` are rules that run over every
-route rather than operations you can address, `administration.write_via_summary` is the role gate across
-four documented writes, and `resource.dataset.read` is the third-party Datasette/GraphQL reference app in
-`local_observe/inventory/api.py` — its route shapes belong to Datasette and are not this product's contract.
-The browser-side rows (`administration.ui.shell` and the other `ui` rows) are renders over served assets;
-the assets themselves are HTTP rows and are documented.
+Four rows are `contract: none` and that is deliberate, not a gap. Three of them are HTTP rules that run over
+every route rather than operations you can address — `foundation.request_identity.apply`,
+`foundation.idempotent_write.apply` and `administration.write_via_summary`, the role gate across four
+documented writes. The fourth is `resource.dataset.read`, the third-party Datasette/GraphQL reference app in
+`local_observe/inventory/api.py`: its route shapes belong to Datasette and are not this product's contract —
+and it is now `excluded`, because fronting it would mean fronting arbitrary queries over the observed dataset.
+`administration.ui.shell` is the fifth, a `ui` row. The browser-side rows (`administration.ui.shell` and the
+other `ui` rows) are renders over served assets; the assets themselves are HTTP rows and are documented.
 
 ## What is in the census
 
@@ -58,15 +62,16 @@ Counted from the file, so this table cannot drift from it silently:
 | --- | --- | --- | --- | --- |
 | `foundation` — identity, health, the transport boundary | 9 | 8 | 1 | 0 |
 | `occurrences` — events, incidents, escalation, acknowledgement | 17 | 14 | 2 | 1 |
-| `maintenance` — declared windows, suppression, flap accounting | 7 | 3 | 3 | 1 |
-| `resources-queries-rules-config` — inventory, queries, rules, deployment config | 27 | 27 | 0 | 0 |
+| `maintenance` — declared windows, suppression, flap accounting | 17 | 16 | 0 | 1 |
+| `resources-queries-rules-config` — inventory, queries, rules, deployment config | 33 | 24 | 0 | 9 |
 | `investigations-notifications-actions` — bounded investigations, delivery, the approval lifecycle | 46 | 45 | 0 | 1 |
 | `administration` — credentials, sessions, state, migration, backup, setup, runner | 38 | 38 | 0 | 0 |
-| **Total** | **144** | **135** | **6** | **3** |
+| **Total** | **160** | **145** | **3** | **12** |
 
-By surface: 53 HTTP, 70 CLI, 9 MCP, 8 UI. The OpenAPI document describes 46 paths and 49 operations —
-42 `implemented` plus the 7 proposed ones — which is 46 HTTP census rows minus the four cross-cutting
-rows above, plus the seven planned.
+By surface: 89 HTTP, 56 CLI, 7 MCP, 8 UI. The OpenAPI document describes 79 paths and 85 operations, all of
+them `implemented` — which is the 89 HTTP census rows minus the four `contract: none` HTTP rows above. The
+three `planned` rows are also `contract: none` (they propose a path, not a spoken operation), so nothing in
+the document carries `x-status: proposed`.
 
 ### Why so many CLI rows
 
@@ -118,7 +123,7 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
   read, so the refusal cannot be a parser or size verdict wearing a 403.
 * **Two verbs.** `GET` reads, `POST` writes. Anything else is `405`.
 * **Six transport refusals.** `401`, `403`, `404`, `405`, `413`, `500` are stated once in
-  `x-transport-errors` rather than repeated under all 49 operations, because they are produced by the
+  `x-transport-errors` rather than repeated under all 85 operations, because they are produced by the
   dispatcher before any handler runs. Each one is proved answerable by
   `test_the_six_transport_refusals_are_all_answerable`, so the shared list cannot accrete a code this app
   never returns.
@@ -128,8 +133,11 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
   `{"error": {"code", "message", "request_id"}}`. `X-Request-Id` is on every response, both shapes, so one
   id ties a caller's complaint to a server-side log line. Which shape a response uses is a fact about
   which constructor ran, and `api_contract.LEGACY_CODES` makes the split auditable.
-* **`Idempotency-Key` is opt-in and route-listed.** `api.IDEMPOTENT_POST_ROUTES` names the writes whose
-  durable answer must survive a lost acknowledgement, plus `/v1/intake/*`. Same key plus the same canonical
+* **`Idempotency-Key` is opt-in, and guarded by shape as well as by list.**
+  `api.IDEMPOTENT_POST_ROUTES` names seven exact writes whose durable answer must survive a lost
+  acknowledgement, and `api.idempotency_enabled` adds four families that address their writes with caller
+  data a list cannot name: `/v1/intake/<source>`, the occurrence disposition writes, the maintenance family
+  (`maintenance_api.writes`) and the resource, rule and configuration family (`resources_api.writes`). Same key plus the same canonical
   body replays the stored answer with `X-Idempotency-Replayed: true`; same key plus a different body is
   `409 idempotency_conflict` and nothing runs; a key still in flight is `409 request_in_progress`, never a
   wait. Only a 2xx is stored, records expire after 24 hours, and a key claimed by a process that died is
@@ -171,8 +179,8 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
   and logged as a bug. It is logged correctly (class name out, traceback in the log, request id on both),
   and it is still the wrong status: it is the caller's error. Naming it here rather than quietly wrapping
   it, because the fix changes a status code a runner may be branching on.
-* **Idempotency covers eight route patterns, not every write.** A write outside `IDEMPOTENT_POST_ROUTES`
-  ignores the header, so a client that sends a key there gets no replay promise. Some of those routes have
+* **Idempotency covers the seven listed writes and four shape-matched families, not every write.** A write
+  outside them ignores the header, so a client that sends a key there gets no replay promise. Some of those routes have
   their own durable deduplication (`events` by `source_event_id`, verification records by digest, actions by
   `retry_key`) and say so in their rows; the ones that have neither are candidates for the list, not
   accidents.

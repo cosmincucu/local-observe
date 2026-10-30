@@ -49,7 +49,11 @@ OPENAPI = ROOT / 'docs' / 'api' / 'openapi.yaml'
 #: whole package would either forgive a missing document entry or demand one for someone else's API.
 SERVED_TRANSPORTS = ('local_observe/platform/api.py', 'local_observe/platform/verification_api.py',
                      'local_observe/platform/observer_review.py', 'local_observe/platform/operator.py',
-                     'local_observe/platform/maintenance_api.py')
+                     'local_observe/platform/maintenance_api.py',
+                     # The resources/queries/rules/configuration seam. It lives in its own module and is
+                     # imported here the same way, so a document drift names the family it belongs to instead
+                     # of a 1 300-line dispatcher.
+                     'local_observe/platform/resources_api.py')
 
 READER = {'identity': 'reader', 'role': 'reader', 'token': 'r' * 32}
 PRODUCER = {'identity': 'test-detector', 'role': 'producer', 'token': 'p' * 32}
@@ -102,7 +106,13 @@ CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
             # so its 200 body is the one the document's schema is checked against.
             '/v1/maintenance-intervals': ('/v1/maintenance-intervals',
                                           (f'resource={UNKNOWN_WINDOW}'
-                                           f'&from=2026-03-01&to=2026-03-08').encode())}
+                                           f'&from=2026-03-01&to=2026-03-08').encode()),
+            # The two templated paths of the resources seam, concretised as an identifier nothing was ever
+            # declared to be. `limit` is present on the dependents probe because the read refuses a missing
+            # bound before it looks anything up, and a probe that only exercised that refusal would prove
+            # less than the 404 it replaces.
+            '/v1/resources/{id}/dependents': (f'/v1/resources/{UNKNOWN_WINDOW}/dependents', b'limit=10'),
+            '/v1/resource-proposals/{id}': ('/v1/resource-proposals/' + '0' * 64, b'')}
 
 #: Implemented read routes a plain app serves without an optional seam mounted, and the credential each
 #: needs. Their 200 bodies are validated against the schema the document claims for them.
@@ -113,6 +123,11 @@ ANSWERABLE_READS = {
     # One of the three maintenance reads: the bounded interval query, because it answers 200 over an empty
     # store and its body is the one place the outcome vocabulary and the read bounds are both visible.
     '/v1/maintenance-intervals': 'reader',
+    # Two of the resources reads answer 200 with no artifact mounted at all, and those two bodies are where
+    # the posture this family is built on is visible: `status: unavailable` beside `complete: false` naming
+    # the variable to mount, and the capability document that separates an absent mount from a refusal.
+    '/v1/resources': 'reader',
+    '/v1/capabilities': 'reader',
 }
 
 REQUIRED_ROW_FIELDS = ('operation_id', 'surface', 'method', 'path', 'resource', 'module', 'access',
@@ -673,7 +688,8 @@ class ContractMatchesBehaviourTests(unittest.TestCase):
                                                         b'', query))
             with self.subTest(path=path):
                 self.assertEqual(status, 200, body)
-                schema = resolve(operation['responses']['200'], self.contract)
+                response = resolve(operation['responses']['200'], self.contract)
+                schema = response['content']['application/json']['schema']
                 jsonschema.validate(body, {**schema, '$schema': 'https://json-schema.org/draft/2020-12/schema'})
                 checked += 1
         self.assertEqual(checked, len(ANSWERABLE_READS))

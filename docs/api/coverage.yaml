@@ -209,84 +209,126 @@ operations:
      module: local_observe/platform/api.py, access: read, required_role: [reader, producer, proposer, human, executor],
      side_effects: none, state_source: "built inventory index (read-only SQLite)", status: implemented, owner_area: resources-queries-rules-config,
      notes: "100 rows, ordered by name, each with its display projection. Served only when an index is configured."}
-  - {operation_id: resource.declaration.validate, surface: cli, method: run, path: "lo-inventory validate <declarations>", resource: resource,
-     module: local_observe/inventory/validation.py, access: read, required_role: [local],
-     side_effects: none, state_source: "declared YAML", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.index.build, surface: cli, method: run, path: "lo-inventory build", resource: resource-index,
+  - {operation_id: resource.read, surface: http, method: GET, path: /v1/resources, resource: resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: built index, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "The bounded, filtered walk behind the MCP reader and the CLI list, with `declaration_revision`/`declaration_sha256`/`built_at` beside it. `GET /v1/inventory` keeps its unpaginated display shape untouched for the callers that already read it."}
+  - {operation_id: resource.observation.history.read, surface: http, method: GET, path: /v1/observed-snapshots, resource: observed-resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: observed dataset, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`discovery.history` as summaries, because \"how fresh is the observed plane?\" must not be an expensive question. A failed read keeps its `error_code`, which is how an absent sensor stays distinguishable from a quiet one."}
+  - {operation_id: resource.proposal.read, surface: http, method: GET, path: "/v1/resource-proposals/{id}", resource: resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: proposal document, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "Reads one drafted proposal back by the digest its own content produced, so a reviewer needs no shell access. The id is validated as a digest before a path is built, and reading cannot advance the document's `needs_review`."}
+  - {operation_id: resource.capability.read, surface: http, method: GET, path: /v1/capabilities, resource: capability,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "this process's mounted artifacts", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "One read that settles whether a missing feature is a bug, a mount or a decision: `supported`, `unavailable` with the variable that mounts it, or `excluded` with the reason and the command that does the job. Scoped to this process, and never claiming to enumerate the estate."}
+  - {operation_id: resource.declaration.validate, surface: http, method: POST, path: /v1/resource-declarations/validation, resource: resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: "none — nothing is built, written or installed", state_source: the draft declaration in the request, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "Runs the same `validation.declared` that `lo-inventory validate` runs and reports its verdict inside a 200, because a rejection is the answer rather than a failed question. The CLI keeps the file form; the route never takes a path."}
+  - {operation_id: resource.index.build, surface: cli, method: run, path: lo-inventory build, resource: resource-index,
      module: local_observe/inventory/index.py, access: write, required_role: [local],
-     side_effects: "a new SQLite index file, atomically replacing the served snapshot", state_source: "declared YAML", status: implemented, owner_area: resources-queries-rules-config,
-     notes: "The derived index is rebuildable and never holds approvals."}
-  - {operation_id: resource.alias.resolve, surface: cli, method: read, path: "lo-inventory resolve", resource: resource,
-     module: local_observe/inventory/index.py, access: read, required_role: [local],
-     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.dependents.read, surface: cli, method: read, path: "lo-inventory dependents", resource: resource,
-     module: local_observe/topology.py, access: read, required_role: [local],
-     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.observation.record, surface: cli, method: run, path: "lo-inventory observe", resource: observed-resource,
-     module: local_observe/inventory/discovery.py, access: write, required_role: [local],
-     side_effects: "observed rows with source and observed_at; declarations are never edited", state_source: "observed dataset", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.drift.evaluate, surface: cli, method: run, path: "lo-inventory drift", resource: observed-resource,
-     module: local_observe/inventory/validation.py, access: read, required_role: [local],
-     side_effects: none, state_source: "built index + observed dataset", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.proposal.build, surface: cli, method: run, path: "lo-inventory propose", resource: resource,
-     module: local_observe/inventory/forge.py, access: write, required_role: [local],
-     side_effects: "one proposal document on disk; no declaration is edited", state_source: "built index + observed dataset", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.discovery.docker, surface: cli, method: run, path: "lo-inventory discover-docker", resource: observed-resource,
+     side_effects: "a new SQLite index file, atomically replacing the served snapshot", state_source: declared YAML, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose: the derived index is the offline bootstrap artifact that every read in this area opens. An HTTP verb that rebuilt it would let a bearer replace the file under the reader serving them, and the review a declaration owes is a human step the route cannot have. The derived index stays rebuildable and never holds approvals."}
+  - {operation_id: resource.alias.resolve, surface: http, method: GET, path: /v1/resources/resolve, resource: resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: built index, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`index.resolve` under a role, with `lo-inventory resolve` unchanged beside it. `unknown` and `unknown_uuid` are answers rather than 404s: an undeclared alias is the fact a caller came for. `conflict` cannot come out of this read — the alias table is keyed on (scope, type, value) and `validation.declared` refuses a colliding normalised alias at the build, so one alias statement names at most one resource; the several-aliases-at-once case is `resource.drift.evaluate`, which reports both candidates under `identity_unresolved`."}
+  - {operation_id: resource.dependents.read, surface: http, method: GET, path: "/v1/resources/{id}/dependents", resource: resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: built index, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "The recursive read behind `lo-inventory dependents`, with `relation_types` naming the only edges it follows. `truncated` is the query's own bound, not a page bound."}
+  - {operation_id: resource.observation.record, surface: http, method: POST, path: /v1/observed-snapshots, resource: observed-resource,
+     module: local_observe/platform/resources_api.py, access: write, required_role: [producer],
+     side_effects: "observed rows keyed on (source, snapshot_id) with a payload digest; declarations are never edited", state_source: observed dataset, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`discovery.ingest`, which is what `lo-inventory observe` calls. `source` must name the credential, so the evidence half of a later drift finding cannot be filed by someone else. An identical replay answers `duplicate`; a replay that contradicts the stored row is a 409, because the row is evidence a finding may cite and not a cache entry to overwrite."}
+  - {operation_id: resource.drift.evaluate, surface: http, method: GET, path: /v1/observed-snapshots/drift, resource: observed-resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: built index + observed dataset, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`discovery.drift`, plus the coverage grade of each source: an empty findings list from a source that never reported is never printable as \"no drift\"."}
+  - {operation_id: resource.proposal.build, surface: http, method: POST, path: /v1/resource-proposals, resource: resource,
+     module: local_observe/platform/resources_api.py, access: write, required_role: [proposer],
+     side_effects: one proposal document under the mounted proposal directory; no declaration is edited, state_source: built index + observed dataset, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`discovery.propose`, the function behind `lo-inventory propose`. The caller names an observation and never a path: the location is derived from the digest of (source, observation_id). Publishing stays a human act — see resource.proposal.publish."}
+  - {operation_id: resource.discovery.docker, surface: cli, method: run, path: lo-inventory discover-docker, resource: observed-resource,
      module: local_observe/inventory/docker_provider.py, access: write, required_role: [local],
-     side_effects: "observations from one allowlisted socket read", state_source: "docker daemon socket, observed dataset", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.proposal.publish, surface: cli, method: run, path: "lo-inventory publish-proposal", resource: resource,
+     side_effects: observations from one allowlisted socket read, state_source: "docker daemon socket, observed dataset", status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose: the socket is the backend. Over HTTP the socket path, or the host it lives on, becomes a request field and a bearer token names which daemon to interrogate — a caller-chosen backend proxy, which the boundary refuses whatever the default. The allowlist stays on the operator's own command line, and the recording half is served: see resource.observation.record."}
+  - {operation_id: resource.proposal.publish, surface: cli, method: run, path: lo-inventory publish-proposal, resource: resource,
      module: local_observe/inventory/forge.py, access: write, required_role: [local],
-     side_effects: "one reviewed proposal sent to a named repository", state_source: "proposal document", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: resource.query.series, surface: mcp, method: tool, path: signal_series, resource: signal-sample,
-     module: local_observe/platform/tools.py, access: read, required_role: [reader],
-     side_effects: none, state_source: "ClickHouse through the bounded read-only client", status: implemented, owner_area: resources-queries-rules-config,
-     notes: "No query text, table or statement is accepted; an empty window says so in rows and error."}
-  - {operation_id: resource.query.topology, surface: mcp, method: tool, path: topology_neighbourhood, resource: resource,
-     module: local_observe/platform/tools.py, access: read, required_role: [reader],
-     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config,
-     notes: "Names which bound cut the answer off in truncated_by."}
+     side_effects: one reviewed proposal sent to a named repository, state_source: proposal document, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose: this is the review decision itself, and the outbound half is a push with a mounted token to a caller-named repository. Drafting is served (resource.proposal.build) and reading a draft back is served; sending one stays an act with a human on the other side of it."}
+  - {operation_id: resource.query.series, surface: http, method: GET, path: /v1/queries/signals, resource: signal-sample,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: ClickHouse through the bounded read-only client, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "The HTTP shape of the `signal_series` MCP tool over the same approved query-kind table: no query text, table or statement is accepted at any level, and an empty window says so in rows and error."}
+  - {operation_id: resource.query.topology, surface: http, method: GET, path: /v1/queries/topology, resource: resource,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: built index, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "The HTTP shape of the `topology_neighbourhood` MCP tool. Names which bound cut the answer off in `truncated_by`, and keeps the declared plane apart from the inferred edges."}
   - {operation_id: resource.inventory.mcp, surface: mcp, method: tool, path: inventory, resource: resource,
      module: local_observe/platform/tools.py, access: read, required_role: [reader],
-     side_effects: none, state_source: "built index", status: implemented, owner_area: resources-queries-rules-config}
+     side_effects: none, state_source: built index, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded from HTTP by decision, not by omission: the declared inventory is already served twice — `GET /v1/inventory` for the display page and `GET /v1/resources` for the bounded walk. The row records that the MCP tool reaches the same `ResourceIndex`, so a reader token sees one population whichever transport it arrives on; a third HTTP shape of the same table would be a third document to keep honest and no new capability."}
   - {operation_id: resource.dataset.read, surface: http, method: GET, path: "planned (third-party Datasette surface)", resource: resource,
      module: local_observe/inventory/api.py, access: read, required_role: [bearer],
-     side_effects: none, state_source: "built index, immutable", status: implemented, owner_area: resources-queries-rules-config, contract: none,
-     notes: "The read-only Datasette/GraphQL reference app: SQL execution, downloads and CSV streaming are off, pages are capped. Its route shapes belong to Datasette, not to this product, so they are not written into docs/api/openapi.yaml."}
-  - {operation_id: rule.detection.evaluate, surface: cli, method: run, path: "lo-platform evaluate", resource: rule,
-     module: local_observe/platform/detections.py, access: write, required_role: [local],
-     side_effects: "one verdict event per condition, with its evidence sample", state_source: "rule document, samples, built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: rule.sustained.evaluate, surface: cli, method: run, path: "lo-platform conditions", resource: rule,
-     module: local_observe/platform/conditions.py, access: write, required_role: [local],
-     side_effects: "firing/clear events and the producer's own cursor", state_source: "rule document, cursor, built index", status: implemented, owner_area: resources-queries-rules-config,
-     notes: "Static tiers, absence rules and learned bands. Off unless a document is named."}
-  - {operation_id: rule.config_drift.evaluate, surface: cli, method: run, path: "lo-platform drift", resource: rule,
-     module: local_observe/platform/configdrift.py, access: write, required_role: [local],
-     side_effects: "drift events filed under the source identity named", state_source: "snapshot tree, cursor, built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: rule.pathcheck.evaluate, surface: cli, method: run, path: "lo-platform pathcheck", resource: rule,
-     module: local_observe/platform/pathcheck.py, access: write, required_role: [local],
-     side_effects: "availability/coverage events and the replay-carrying cursor", state_source: "probe reports, cursor, built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: rule.slo.evaluate, surface: cli, method: run, path: "lo-platform slo", resource: rule,
-     module: local_observe/slo/alerts.py, access: write, required_role: [local],
-     side_effects: "threshold events for attainment and the fast-burn pair, plus the cursor", state_source: "objectives document, ClickHouse, built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: rule.forecast.evaluate, surface: cli, method: run, path: "lo-platform forecast", resource: rule,
-     module: local_observe/forecast/timetothreshold.py, access: write, required_role: [local],
-     side_effects: ".predicted conditions and the cursor", state_source: "rules document, ClickHouse, built index", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: rule.sigma.compile, surface: cli, method: run, path: "lo-platform --help shows no compile verb; the compiler is a library and a pinned tier", resource: rule,
+     side_effects: none, state_source: "built index, immutable", status: excluded, owner_area: resources-queries-rules-config, contract: none,
+     notes: "The read-only Datasette/GraphQL reference app: SQL execution, downloads and CSV streaming are off and pages are capped. Its route shapes belong to Datasette, not to this product, and fronting that surface over this transport would make a bearer token here a doorway onto caller-written queries over the same index. The bounded equivalents are `GET /v1/resources` and `GET /v1/queries/topology`."}
+  - {operation_id: rule.detection.evaluate, surface: http, method: POST, path: /v1/rules/detections/evaluations, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer],
+     side_effects: "none — the verdict events are returned, not filed", state_source: "rule document and sample supplied by the caller, built index", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`detections.evaluate` as a preview. `lo-platform evaluate` files one verdict event per condition; nothing is filed here. `producer` only, because the previewed events carry the identity that would file them."}
+  - {operation_id: rule.sustained.evaluate, surface: http, method: POST, path: /v1/rules/sustained/evaluations, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer],
+     side_effects: none — no cursor is read and none moves, state_source: rule document and points supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`conditions.rule` then `conditions.evaluate` over a caller-supplied series: static tiers, absence rules and learned bands. `lo-platform conditions` keeps the cursor, and a preview cannot make the next round agree with it."}
+  - {operation_id: rule.config_drift.evaluate, surface: http, method: POST, path: /v1/rules/config-drift/comparisons, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer],
+     side_effects: "none — no snapshot tree is opened, no cursor moves, the diff is logged nowhere", state_source: both configuration texts supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`configdrift.compare` with both texts in the request. The digest is of the bytes sent here, and a first sighting answers `changed: false` rather than claiming a baseline."}
+  - {operation_id: rule.pathcheck.evaluate, surface: http, method: POST, path: /v1/rules/pathcheck/evaluations, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer],
+     side_effects: "none — the finding events are returned, not filed", state_source: probe observations supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`pathcheck.classify` then `verdict_findings` over probes the caller already holds. An expected pair that reported nothing degrades the verdict and is named in `coverage_gaps`; `lo-platform pathcheck` keeps the cursor."}
+  - {operation_id: rule.slo.evaluate, surface: http, method: POST, path: /v1/rules/slo/evaluations, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer],
+     side_effects: "none — the threshold events are returned, not filed", state_source: objective and samples supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`alerts.rule` then `alerts.evaluate`: attainment and the fast-burn pair, stamped with this credential's own identity, which is why a producer and nobody else may ask."}
+  - {operation_id: rule.forecast.evaluate, surface: http, method: POST, path: /v1/rules/forecast/evaluations, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer],
+     side_effects: "none — the `.predicted` events are returned, not filed", state_source: rule and points supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`timetothreshold.rule` then `timetothreshold.evaluate`. The inner threshold rule is `conditions.rule`'s, so identity, timing and loudness come from the same checks a breach would use; the cursor belongs to the producer."}
+  - {operation_id: rule.sigma.compile, surface: cli, method: run, path: lo-platform --help shows no compile verb; the compiler is a library and a pinned tier, resource: rule,
      module: local_observe/platform/sigma_compile.py, access: read, required_role: [local],
-     side_effects: none, state_source: "Sigma rules and the field mapping", status: implemented, owner_area: resources-queries-rules-config,
-     notes: "build_gate refuses any nonempty input-binding declaration until input binding exists."}
-  - {operation_id: config.deployment.render, surface: cli, method: run, path: "lo-deployment render", resource: deployment-config,
-     module: local_observe/deployment/content.py, access: write, required_role: [local],
-     side_effects: "rendered configuration under the chosen output directory", state_source: "content lock and overlays", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: config.deployment.plan, surface: cli, method: run, path: "lo-deployment plan", resource: deployment-config,
-     module: local_observe/deployment/release.py, access: write, required_role: [local],
-     side_effects: "one drift-aware upgrade plan", state_source: "content lock and live state", status: implemented, owner_area: resources-queries-rules-config}
-  - {operation_id: config.deployment.lock, surface: cli, method: run, path: "lo-deployment lock", resource: deployment-config,
-     module: local_observe/deployment/content.py, access: write, required_role: [local],
-     side_effects: "a draft content lock for review; fetches and trusts nothing", state_source: "declared content", status: implemented, owner_area: resources-queries-rules-config}
+     side_effects: none, state_source: Sigma rules and the field mapping, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose: the compiler's output is executable SQL, its trust story is a pinned version and a reviewed field mapping, and `build_gate` refuses any nonempty input-binding declaration until input binding exists. Serving it would hand a bearer a generator for queries this product's own boundary exists to refuse; the rule families that are safe to preview are on `/v1/rules/*`."}
+  - {operation_id: config.deployment.render, surface: http, method: POST, path: /v1/deployment/renderings, resource: deployment-config,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [proposer, human],
+     side_effects: "none — `content.write_bundle` is not called and the answer says `written: false`", state_source: content lock and overlays supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`content.resolve` then `content.render`, the two functions `lo-deployment render` calls in that order, with every refusal intact. The output directory stays the operator's decision."}
+  - {operation_id: config.deployment.plan, surface: http, method: POST, path: /v1/deployment/plans, resource: deployment-config,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [proposer, human],
+     side_effects: none — no state moves and nothing is applied, state_source: "before, current and proposed documents supplied by the caller", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`content.plan` over three documents the caller owns. Its own `status` is `blocked` or `review-required` and `deploy_authorized` is false in both, which is what makes it safe to serve; the module's `scope` sentence travels with it."}
+  - {operation_id: config.deployment.lock, surface: http, method: POST, path: /v1/deployment/locks, resource: deployment-config,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [proposer, human],
+     side_effects: "none — a draft document is returned, `written: false`", state_source: package content supplied by the caller, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`content.make_lock` over packages sent in the request: fetches nothing and trusts nothing, exactly as the CLI verb says. A wider package set is locked by `lo-deployment lock`, which can read a checkout."}
   - {operation_id: config.deployment.export, surface: cli, method: run, path: "lo-deployment export-storage|export-signoz|export-homepage|export-dashboard", resource: deployment-config,
      module: local_observe/deployment/dashboard_review.py, access: write, required_role: [local],
-     side_effects: "exported artifacts for review in the operator's own repository", state_source: "rendered configuration", status: implemented, owner_area: resources-queries-rules-config}
+     side_effects: "exported artifacts for review in the operator's own repository", state_source: rendered configuration, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose for three of its four verbs: `export-storage` and `export-homepage` read a running stack through a Docker daemon reached by subprocess, and `export-signoz` calls a SigNoz URL with a mounted token. Over HTTP each becomes a caller-chosen container, command line or endpoint — a backend proxy wearing a reader token. The one pure verb is served: see config.dashboard.export."}
+  - {operation_id: rule.validate, surface: http, method: POST, path: /v1/rules/validation, resource: rule,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [producer, proposer],
+     side_effects: none — no fixture is judged and no event is filed, state_source: the draft rule in the request, status: implemented, owner_area: resources-queries-rules-config,
+     notes: "There is no second rule schema: `conditions.rule`, `alerts.rule`, `timetothreshold.rule` and `configdrift.entry_key` are what refuse a bad rule today, so the route builds with the family's own builder and reports `rule_version`. Sigma belongs to the pinned compiler tier and pathcheck's configuration is a file its worker reads; both are refused here rather than half-parsed by a weaker copy."}
+  - {operation_id: config.dashboard.export, surface: http, method: POST, path: /v1/deployment/dashboard-exports, resource: deployment-config,
+     module: local_observe/platform/resources_api.py, access: read, required_role: [proposer, human],
+     side_effects: "none — a review document is returned; no record, file or dashboard changes", state_source: "pinned record, state and definition supplied by the caller", status: implemented, owner_area: resources-queries-rules-config,
+     notes: "`content.export_dashboard`, the one export verb that is a pure function: the observed digest of the pinned record, the caller's normalised definition, and which next step its ownership implies. The sibling verbs are declined — see config.deployment.export."}
   - {operation_id: config.notification_policy.read, surface: http, method: GET, path: /v1/notifications/safety, resource: notification-policy,
      module: local_observe/platform/notification_safety.py, access: read, required_role: [reader, producer, proposer, human, executor],
      side_effects: none, state_source: "sqlite notification_control", status: implemented, owner_area: investigations-notifications-actions}
@@ -531,9 +573,10 @@ operations:
   - {operation_id: administration.migration.check, surface: cli, method: run, path: "python3 -B scripts/check_migration.py", resource: state,
      module: scripts/check_migration.py, access: read, required_role: [local],
      side_effects: none, state_source: "staged migration", status: implemented, owner_area: administration}
-  - {operation_id: administration.anomaly.migrate, surface: cli, method: run, path: "python -m local_observe.platform.anomaly_migrate", resource: anomaly-state,
+  - {operation_id: administration.anomaly.migrate, surface: cli, method: run, path: python -m local_observe.platform.anomaly_migrate, resource: anomaly-state,
      module: local_observe/platform/anomaly_migrate.py, access: write, required_role: [local],
-     side_effects: "learned-band state carried forward, dry run by default", state_source: "anomaly state file", status: implemented, owner_area: resources-queries-rules-config}
+     side_effects: "learned-band state carried forward, dry run by default", state_source: anomaly state file, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose: a one-off state migration is offline recovery work, not a request. Its own default is a dry run precisely because the real move is meant to be read by a human before it happens, and a bearer token that could rewrite what the learner has memorised would make that default decorative."}
   - {operation_id: administration.security_schema.apply, surface: cli, method: run, path: "python -m local_observe.security.cli apply-schema", resource: security-store,
      module: local_observe/security/cli.py, access: write, required_role: [local],
      side_effects: "the owned security_events table, applied by a store administrator", state_source: "ClickHouse", status: implemented, owner_area: administration}
@@ -581,9 +624,10 @@ operations:
   - {operation_id: administration.component.serve_operator, surface: cli, method: run, path: "uvicorn local_observe.platform.operator:app_factory", resource: operator-session,
      module: local_observe/platform/operator.py, access: read, required_role: [none],
      side_effects: "the same service behind the static shell", state_source: "sqlite operational store", status: implemented, owner_area: administration}
-  - {operation_id: administration.component.serve_inventory, surface: cli, method: run, path: "uvicorn local_observe.inventory.api:app_factory", resource: resource,
+  - {operation_id: administration.component.serve_inventory, surface: cli, method: run, path: "uvicorn local_observe.inventory.api:app_factory", resource: component,
      module: local_observe/inventory/api.py, access: read, required_role: [bearer],
-     side_effects: "none; the index is opened immutable", state_source: "built inventory index", status: implemented, owner_area: resources-queries-rules-config}
+     side_effects: none; the index is opened immutable, state_source: built inventory index, status: excluded, owner_area: resources-queries-rules-config,
+     notes: "Excluded on purpose: this is the long-lived server process itself. A transport cannot start, stop or reconfigure the process answering the request that asked, the deployable form is the container image, and what this surface can honestly report is `GET /v1/runtime` and `GET /v1/capabilities`."}
   - {operation_id: administration.audit.read, surface: ui, method: interact, path: "audit view", resource: audit,
      module: local_observe/platform/static/ui.js, access: read, required_role: [reader],
      side_effects: none, state_source: "sqlite audit", status: implemented, owner_area: administration}

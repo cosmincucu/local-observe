@@ -34,6 +34,19 @@ the existing operator password or human credential; it grants no model delivery 
 Back up the selected observer state before enabling writes. See the
 [review contract](../../../docs/units/observer.md#optional-authenticated-review-api) for limits.
 
+Two more optional mounts belong to the resource, query, rule and configuration routes
+([`docs/api/resources.md`](../../../docs/api/resources.md)). `LO_OBSERVED_PATH` names the SQLite observed
+dataset that `POST /v1/observed-snapshots` writes and the drift read judges; `LO_PROPOSALS_PATH` names a
+directory that must already exist and be writable, into which `POST /v1/resource-proposals` files one draft
+per observation. The default deployment adds neither mount: those writes answer `503`, the reads that need
+them answer `unavailable`, and `GET /v1/capabilities` names the variable — an install that runs no prober
+boots unchanged. Because this container is `read_only: true`, enabling either write means an explicit
+read/write bind mount on the path the variable names; the root filesystem is never the fallback. Both
+variables follow the opposite convention from `LO_OVERVIEW_PATH`: **unset means "not configured"** and a
+*blank* value refuses the boot, because a line reading `LO_OBSERVED_PATH=` in a generated environment file
+says somebody meant to mount a plane, and serving `unavailable` forever with no clue why is the failure that
+deserves a message rather than a silence.
+
 Intake v1 accepts source retry identity, nullable resource UUID, classification,
 severity, status, rule/version, bounded evaluation window and evidence references.
 The server derives event_id from source/source_event_id and assigns received_at;

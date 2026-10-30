@@ -82,6 +82,22 @@ tags:
     description: The static shell and the one question it may ask without a credential.
   - name: maintenance
     description: Declared silences, the plans that repeat them, and what became of each.
+  - name: resources
+    description: >-
+      The declared and observed planes: what a declaration says, what a prober saw, how far apart they are,
+      and what a proposal to close the gap would say.
+  - name: queries
+    description: >-
+      The two reads the inventory MCP surface has always had — one bounded signal window and one declared
+      neighbourhood — plus the document that says which operations this installation can answer.
+  - name: rules
+    description: >-
+      What a rule of each family says about a caller-supplied fixture. Every answer is a preview: nothing is
+      filed, no cursor moves, and no state changes.
+  - name: config
+    description: >-
+      The pure deployment functions — a draft lock, a content plan, a rendered tree, a dashboard review
+      document. Bytes to read, never a change to apply.
 paths:
   /v1/me:
     get:
@@ -2374,6 +2390,1126 @@ paths:
           oneOf:
             - $ref: '#/components/responses/SummaryOnly'
             - $ref: '#/components/responses/ContractError'
+  /v1/resources:
+    get:
+      tags: [resources]
+      operationId: resource.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: One bounded, filtered page of declared resources, with the declaration behind it named.
+      description: |
+        The built index seen from a URL, ordered by (name, id), each row carrying its aliases and how many
+        relations leave it. `/v1/inventory` stays what it always was (100 rows, display labels, no paging)
+        because installed callers assert that shape; this route is the bounded, filterable one, and it ships
+        `declaration_revision`, `declaration_sha256` and `built_at` in `provenance` so a caller can say which
+        declaration its answer came from.
+
+        `limit` is refused rather than clamped, and the cursor carries the first twelve characters of the
+        index's declaration digest beside its offset: a cursor issued against an index this build no longer
+        serves is `400 invalid_pagination`, not a page, because continuing a walk across a rebuilt index
+        would silently skip or repeat rows. With no index mounted the answer is a `200` whose `status` is
+        `unavailable` and whose `complete` is false — the route exists, the artifact does not, and
+        `GET /v1/capabilities` says so before a caller has to discover it.
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+        - name: kind
+          in: query
+          required: false
+          description: One inventory kind. An unknown kind returns no rows and says a filter was applied.
+          schema:
+            type: string
+            enum: [host, device, service, storage, endpoint, backup-job, credential-reference]
+        - name: name
+          in: query
+          required: false
+          description: Exact resource name. There is no substring filter, so a partial answer cannot read as a population.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The page, its bounds, and the declaration behind it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeclaredResourcePage'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/resources/resolve:
+    get:
+      tags: [resources]
+      operationId: resource.alias.resolve
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Which declared resource one alias or identifier names, including when nothing answers it.
+      description: |
+        `index.resolve`'s verdicts, shipped as it wrote them: `resolved`, `unknown` and `unknown_uuid`. A name
+        that resolves to nothing is an answer rather than a 404 — "this hostname is undeclared" is the fact a
+        caller came for, and §3 keeps an alias collision visible rather than tie-broken.
+
+        **`conflict` cannot come out of this read, and why.** The declarations are built with an alias table
+        keyed on `(scope, type, value)` and `validation.declared` refuses a colliding normalised alias before
+        a row is written, so one alias statement names at most one resource: the collision is killed at the
+        build. The verdict that needs *several* aliases at once — an observation carrying a hostname and a
+        service name that belong to two resources — is the drift read's, and it reports those two resources
+        side by side under `identity_unresolved` rather than choosing one.
+
+        `alias_type` is the closed vocabulary of the inventory schema; anything else is refused rather than
+        looked up, because a lookup that accepted a misspelling would answer "no such resource" about a typo.
+      parameters:
+        - name: id
+          in: query
+          required: false
+          description: A declared resource UUID. Mutually exclusive with the alias pair.
+          schema:
+            type: string
+            format: uuid
+        - name: alias_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [hostname, host.id, ip, legacy_id, service.name]
+        - name: alias_value
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: scope
+          in: query
+          required: false
+          description: The alias scope, empty when the declaration left it unset.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The resolution, with the declared record when exactly one answers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeclaredResourceMatch'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/resources/{id}/dependents:
+    get:
+      tags: [resources]
+      operationId: resource.dependents.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: What transitively depends on one declared resource, and whether the walk was cut off.
+      description: |
+        The recursive read `lo-inventory dependents` runs (`index.dependents`), over `runs-on` and
+        `depends-on` only, and `relation_types` says so in the answer: "nothing depends on this" and "that
+        relation is not followed here" are different claims. `truncated` is the query's own flag — the search
+        stopped at the bound — and cycles are deduplicated by the walk rather than recursed into.
+
+        An identifier that is not canonical and an identifier the index never declared answer the same `404`,
+        so this route cannot be used to learn which identifier shapes this build accepts.
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: limit
+          in: query
+          required: false
+          description: Dependents to return. The query's own ceiling is 1 000; this surface refuses above 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: The dependents, the bound, and the declaration behind them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DependentPage'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/resource-declarations/validation:
+    post:
+      tags: [resources]
+      operationId: resource.declaration.validate
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Ask whether a draft declaration would build an index. Nothing is written and nothing is built.
+      description: |
+        `validation.declared` is the function `lo-inventory build` runs before it writes a file, so `valid`
+        here means the builder will accept the document rather than merely that a second, laxer check did.
+        `declaration_sha256` is the digest of the **normalised** document — the value a built index records and
+        a later drift report cites — so two drafts differing only in key order agree, and a reviewer can pin
+        one by digest.
+
+        **An invalid draft is a `200`.** The caller asked a question and this route answered it; the verdict is
+        in `status` and the validator's own sentence in `reason`. A `400` stays reserved for a request that
+        never asked a valid question (no `declaration`, a `declaration` that is not an object, a body naming an
+        actor). The check is a `POST` because it carries a document, not because it writes one: `recorded` is
+        always false, and no key of the body is ever a path.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeclarationCheckRequest'
+      responses:
+        '200':
+          description: The verdict — `valid` or `invalid`, with the reason for the second.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeclarationCheck'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/observed-snapshots:
+    get:
+      tags: [resources]
+      operationId: resource.observation.history.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: The newest snapshots one source reported, as summaries rather than whole observation sets.
+      description: |
+        `discovery.history` over a credential. Each row is a summary — status, completeness, instant, how much
+        scope and how many observations it carries — because a stored snapshot may hold 10 000 observations and
+        "how fresh is the observed plane?" must not be an expensive question. A failed read keeps its
+        `error_code`, which is how an absent sensor stays distinguishable from a quiet one (§3).
+
+        There is no cursor: `history` reads the newest N and has nowhere to continue from, so a page exactly as
+        wide as the bound reports `truncated: true` and `complete: false` instead of implying the history ended
+        there. The bound is 20 rows — a limit on what one request may cost, not on what the store holds.
+      parameters:
+        - name: source
+          in: query
+          required: true
+          description: The discovery source whose snapshots to read, as a bounded label.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Snapshots to return. Refused rather than clamped.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 10
+      responses:
+        '200':
+          description: The summaries, and what the read could not claim.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObservedSnapshotPage'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+    post:
+      tags: [resources]
+      operationId: resource.observation.record
+      x-status: implemented
+      x-required-role: [producer]
+      summary: Record one discovery snapshot in the observed plane. Declarations are never edited.
+      description: |
+        `discovery.ingest`, which is what `lo-inventory observe` calls: the document is validated before the
+        database is opened, the row is keyed on `(source, snapshot_id)` with its payload digest, and a replay
+        of identical contents answers `duplicate` rather than refusing — the same promise `Store.intake` makes
+        about `source_event_id`. A replay under the same id with *different* contents is refused, because two
+        claims about one instant cannot both be the record.
+
+        **The source is the credential.** `source` must equal the authenticated identity, exactly as
+        `/v1/intake/<source>` requires its path to name its caller: an observed row is the evidence half of a
+        later drift finding, and a token able to file another source's observations would make "which prober
+        saw this?" a claim about a payload field. With no observed dataset mounted the write is a `503`, not a
+        `200` — a success that recorded nothing is the exact lie this route exists to avoid.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ObservedSnapshotIngest'
+      responses:
+        '200':
+          description: Recorded, or `duplicate` for the identical snapshot already stored.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObservedSnapshotRecord'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '503':
+          $ref: '#/components/responses/OperationUnavailable'
+  /v1/observed-snapshots/drift:
+    get:
+      tags: [resources]
+      operationId: resource.drift.evaluate
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Declared against observed, source by source, with each source's coverage beside its findings.
+      description: |
+        `discovery.drift` — the comparison `lo-inventory drift` prints — plus the one claim the module does not
+        make for itself: whether the answer as a whole is a population. Each named source is graded in
+        `sources` (`whole`, or the finding kind that meant it was never judged: `source_unavailable`,
+        `source_stale`, `coverage_incomplete`), and `complete` is true only when every source was judged. An
+        empty `rows` list from a source that never reported is therefore never printable as "no drift".
+
+        Desired and observed stay separate inside each finding: a `changed` finding carries the declared and the
+        observed attribute values, `undeclared` and `identity_unresolved` carry the resolution that failed, and
+        a `missing` finding is emitted only by a source that claimed completeness. Up to 8 sources per read.
+      parameters:
+        - name: source
+          in: query
+          required: true
+          description: One source to judge. Repeat the parameter for up to 8.
+          schema:
+            type: string
+        - name: max_age_seconds
+          in: query
+          required: false
+          description: How old a snapshot may be and still count as current.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 604800
+            default: 3600
+      responses:
+        '200':
+          description: The findings, the per-source coverage, and the declaration they were judged against.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriftReport'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/resource-proposals:
+    post:
+      tags: [resources]
+      operationId: resource.proposal.build
+      x-status: implemented
+      x-required-role: [proposer]
+      summary: Draft a declaration proposal for one undeclared observation. It is an offer, not a change.
+      description: |
+        `discovery.propose`, the function `lo-inventory propose` runs, with its three refusals intact: the
+        source's newest snapshot must be fresh and successful, the observation must be named, typed and free of
+        credential material, and its aliases must resolve to *nothing* — a proposal exists only for an identity
+        the declarations do not claim. A `400` carries the module's own sentence, because all three are facts
+        the caller can act on.
+
+        **The caller never names a path.** The document lands under the mounted proposal directory named by the
+        digest of `(source, observation_id)`, so retrying one body re-reads one file and a body cannot steer a
+        proposal somewhere this process was not given. The answer carries `published: false` and
+        `declared: false`: this route drafts, a human reviews, and the outbound half stays on
+        `lo-inventory publish-proposal` (`resource.proposal.publish`).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProposalDraftRequest'
+      responses:
+        '200':
+          description: The proposal, the file name it was written under, and what it still waits for.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalDraft'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '503':
+          $ref: '#/components/responses/OperationUnavailable'
+  /v1/resource-proposals/{id}:
+    get:
+      tags: [resources]
+      operationId: resource.proposal.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Read one drafted proposal back, by the digest its own content produced.
+      description: |
+        The identifier is validated as a SHA-256 digest before any path is built, and the file is opened only
+        inside the mounted directory: a caller may name a digest here, never a location. An unreadable document
+        is a `503` naming the failure class, and an unknown digest is a `404` whose one sentence covers "not a
+        proposal identifier" and "no such proposal" — so the route is not an oracle for which drafts exist.
+      parameters:
+        - $ref: '#/components/parameters/ProposalId'
+      responses:
+        '200':
+          description: The stored proposal document, still `needs_review`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalRead'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/OperationUnavailable'
+  /v1/queries/signals:
+    get:
+      tags: [queries]
+      operationId: resource.query.series
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: One bounded signal window — the rows a verdict was made from, or the reason there are none.
+      description: |
+        The HTTP shape of the MCP `signal_series` tool, over the same reader and the same approved query-kind
+        table (`tools.SERIES_SIGNALS`). `signal` selects one kind; **no query text, table, column or statement
+        is accepted at any level**, and the store facade builds its own SQL from the kind's name.
+
+        `result` is the `docs/CONTRACTS.md` §2 envelope shipped unchanged — `source`, `query_type`,
+        `parameters`, the half-open UTC `window`, `rows`, `row_limit`, `truncated`, `error` — because it is the
+        document every producer already emits. An empty window with `error: null` is an honest empty answer; a
+        non-null `error` is a refusal, and the two are never both. A process with no read-only store client
+        mounted gets the same envelope with `error` naming the missing variables, which is why this read
+        answers `200` and not `503`: the store said something, and what it said was "I was not asked".
+      parameters:
+        - name: signal
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [metrics, logs, traces]
+        - name: resource_id
+          in: query
+          required: false
+          description: |
+            A declared resource UUID. The metric kind's own read requires one and the trace kind refuses it
+            (a span names a service, not a declaration) — both requirements live in the bounded store
+            facade, so they arrive in `result.error` rather than as a second refusal rule here. Anything
+            that is not a canonical UUID is the same `404` an unknown resource would be.
+          schema:
+            type: string
+            format: uuid
+        - name: rule_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: metric_name
+          in: query
+          required: false
+          description: Narrows a metric read to one series.
+          schema:
+            type: string
+        - name: service
+          in: query
+          required: false
+          description: Narrows a trace read to one service, because a span names a service and not a declaration.
+          schema:
+            type: string
+        - name: artifact_sha256
+          in: query
+          required: false
+          description: The reviewed rule revision read, when the caller knows it.
+          schema:
+            type: string
+        - name: minutes
+          in: query
+          required: false
+          description: How far back to read, ending now. Mutually exclusive with the `from`/`to` pair.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10080
+            default: 60
+        - name: from
+          in: query
+          required: false
+          description: Explicit window start (inclusive). Always paired with `to`.
+          schema:
+            type: string
+        - name: to
+          in: query
+          required: false
+          description: Explicit window end (exclusive). Always paired with `from`.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The §2 envelope, and whether it is a whole answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignalRead'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/queries/topology:
+    get:
+      tags: [queries]
+      operationId: resource.query.topology
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: A declared neighbourhood, with the bound that cut it off named in the answer.
+      description: |
+        `topology.Topology.upstream` / `.impact` — the walk the MCP `topology_neighbourhood` tool drives — and
+        the same document it ships. `result.truncated_by` names which bound stopped the walk (depth, rows,
+        edges, search nodes), which is the only thing separating "nothing depends on this" from "the walk did
+        not look that far"; `complete` is the same claim in boolean form. An undeclared identifier is refused
+        (`404`), never answered as an empty neighbourhood.
+
+        `plane: declared` is not decoration. Inferred relations live in the observed dataset and are read by
+        `topology.observed_edges`, which this route deliberately does not merge in: an inference is an
+        observation with an instant and evidence, and flattening it into the declaration would make a guess
+        inherit a revision.
+      parameters:
+        - name: resource_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: direction
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [upstream, impact]
+            default: upstream
+        - name: depth
+          in: query
+          required: false
+          description: Hops to walk. The walk's own ceiling is 32; this surface refuses above 4, as the MCP tool does.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4
+            default: 2
+        - name: max_rows
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: The walk's own document, with the declaration revision it was answered from.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopologyRead'
+        '400':
+          $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/capabilities:
+    get:
+      tags: [queries]
+      operationId: resource.capability.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Which operations this installation can answer, which wait on a mount, and which are refused by decision.
+      description: |
+        One read that settles "is that missing feature a bug, a mount, or a decision?" — the three answers a
+        caller otherwise infers from a refusal. Each entry in `operations` is `supported`, `unavailable` (the
+        route exists and says so; `reason` names the variable to mount) or `excluded` never appears there: the
+        routes this build refuses to serve are listed separately in `declines`, with the reason and the command
+        that does the job. `artifacts` reports the four mounts and says plainly that the index is never
+        rebuilt over HTTP; `observed_dataset` also says when its mount is set but no producer has filed a
+        snapshot yet, which is a different sentence from having nothing mounted.
+
+        **The scope is this process.** A producer that runs in its own container with its own rule document,
+        cursor or mount is invisible from here, so nothing in this document claims to enumerate the estate: it
+        answers "can I ask this service for that?", not "does anything run anywhere". Process counters, the
+        delivery mode and the refusal-audit tallies stay on `GET /v1/runtime`, and the capabilities the MCP
+        surface declines are reported by its own boundary tool.
+      responses:
+        '200':
+          description: The capability document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityDocument'
+        '403':
+          $ref: '#/components/responses/SummaryOnly'
+  /v1/rules/validation:
+    post:
+      tags: [rules]
+      operationId: rule.validate
+      x-status: implemented
+      x-required-role: [producer, proposer]
+      summary: Build one rule with its own family's builder and report its identity and version.
+      description: |
+        There is no second rule schema behind this route, deliberately. `conditions.rule`, `alerts.rule`,
+        `timetothreshold.rule` and `configdrift.entry_key` are what refuse a bad rule today — every producer
+        round runs them before it judges anything — so a separate validator would be a second opinion about the
+        same document, free to disagree. `rule.version` in the answer is `rule_version` itself: a digest of
+        everything the judgement depends on, which is what a reviewer should pin.
+
+        `detection` is validated by running the rule with **no sample**, which is what its coverage verdict is:
+        a rule with no input is not silent, it reports that its input is absent. `pathcheck`'s configuration is
+        a file its own worker reads and Sigma rules belong to the pinned compiler tier, so neither family is
+        accepted here rather than half-parsed by a weaker copy.
+
+        **An invalid draft is a `400`** — the opposite of a declaration check, and that asymmetry is the point:
+        a declaration validator *returns* a report, a rule builder only *raises*. When there is nothing to
+        return but a refusal, the refusal is the answer.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuleValidationRequest'
+      responses:
+        '200':
+          description: The rule as its own family reads it, with no fixture judged.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/rules/detections/evaluations:
+    post:
+      tags: [rules]
+      operationId: rule.detection.evaluate
+      x-status: implemented
+      x-required-role: [producer]
+      summary: What one baseline rule says about one sample — the events it would file, filed by nobody.
+      description: |
+        `detections.evaluate`, which needs the built index: a detection whose resource is not declared is a
+        configuration error and refuses its round rather than filing a verdict about nothing. With no index
+        mounted the route answers `200` with `status: unavailable`, because a dry run is a read-shaped answer.
+        `events` are the canonical events intake would receive and `durable: false` sits beside them.
+
+        `producer` only: the previewed events carry this credential's identity as their `source`, which is the
+        identity the producer loop files them as. `human` does not file events at all, so a preview in a
+        human's name would be a forecast about somebody else.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectionEvaluationRequest'
+      responses:
+        '200':
+          description: The verdict and the events it earned.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectionAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/rules/sustained/evaluations:
+    post:
+      tags: [rules]
+      operationId: rule.sustained.evaluate
+      x-status: implemented
+      x-required-role: [producer]
+      summary: What a sustained condition says about a supplied series, with no cursor read or written.
+      description: |
+        `conditions.rule` then `conditions.evaluate` — the same two functions `lo-platform conditions` drives
+        one round of. The state machine is reconstructed from the points themselves (`conditions.verdict`'s
+        rule), so this route reads no cursor and writes none: a preview cannot make a producer's next round
+        agree with it, and it is not supposed to. `points` are `[epoch_seconds, value]` pairs, bounded and
+        ordered by `conditions.ordered_points`, the function a real tick judges through.
+
+        Nothing is paged because there is no store to page over: the caller supplied the fixture, so the answer
+        is whole rather than partial.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SustainedEvaluationRequest'
+      responses:
+        '200':
+          description: The verdict and the events it earned.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/rules/config-drift/comparisons:
+    post:
+      tags: [rules]
+      operationId: rule.config_drift.evaluate
+      x-status: implemented
+      x-required-role: [producer]
+      summary: The unified diff of one configuration artifact against the text it is compared with.
+      description: |
+        `configdrift.entry_key`, `configdrift.compare` and `configdrift.drift_finding` — the producer's own
+        comparison, its event builder, and a caller-supplied pair of texts, so no snapshot tree is opened and no
+        cursor moves. Three facts a reviewer needs are stated rather than assumed: the digest is taken over
+        **the UTF-8 bytes of the text in this request** (a file whose newlines were translated in transit
+        digests differently from the one on disk, and reads as changed), a **first sighting is not a change**
+        (`changed: false` with `previous_sha256: null`, because "never seen" and "unchanged" are different
+        claims), and the diff text is returned to this caller and never logged — a configuration snapshot is
+        exactly the kind of file that holds a credential, which is why the producer keeps the same rule.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigDriftComparisonRequest'
+      responses:
+        '200':
+          description: The comparison, the diff, and the event a change would earn.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigDriftComparison'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/rules/pathcheck/evaluations:
+    post:
+      tags: [rules]
+      operationId: rule.pathcheck.evaluate
+      x-status: implemented
+      x-required-role: [producer]
+      summary: Is it me or them, given these probes — with the pairs that said nothing listed.
+      description: |
+        `pathcheck.classify` then `pathcheck.verdict_findings`, the classifier and the event builder `lo-platform
+        pathcheck` drives. The caller supplies the observations, so this answers "given these probes" and never
+        implies the probes were taken. An empty set is refused: a verdict is not fabricated from no data. An
+        expected `(target, vantage)` pair that reported nothing **degrades the verdict to `indeterminate`**
+        however firm the rest of the grid looks, and `coverage_gaps` names those pairs — the difference between
+        a confident answer and a guess about silence.
+
+        `open_finding` is the caller's own statement of what it believes is already open, because whether a
+        round owes an event depends on what was open before and this route reads no cursor.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PathCheckEvaluationRequest'
+      responses:
+        '200':
+          description: The classification, the events owed, and the gaps that degraded it.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathCheckAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/rules/slo/evaluations:
+    post:
+      tags: [rules]
+      operationId: rule.slo.evaluate
+      x-status: implemented
+      x-required-role: [producer]
+      summary: What one error-budget objective says about a supplied series.
+      description: |
+        `alerts.rule` then `alerts.evaluate` — attainment plus the fast-burn pair, judged by the same code
+        `lo-platform slo` runs. The producer identity in the previewed events is **this credential's own**,
+        which is why the route answers a `producer` and nobody else: `alerts.rule` takes the source that files
+        the events, and a preview stamped with an identity that could never file them would be a forecast about
+        a stranger.
+
+        The read is a fixture, not a store read: the objective's own 7-day read, its sample floor and its
+        truncation coverage all belong to the round that has a cursor, so no `insufficient` verdict is claimed
+        here — `events` are what these points earn, no more.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SloEvaluationRequest'
+      responses:
+        '200':
+          description: The burn and attainment verdicts, and the events owed.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/rules/forecast/evaluations:
+    post:
+      tags: [rules]
+      operationId: rule.forecast.evaluate
+      x-status: implemented
+      x-required-role: [producer]
+      summary: What a predictive rule forecasts from a supplied series — `.predicted`, not paged.
+      description: |
+        `timetothreshold.rule` then `timetothreshold.evaluate`. The inner threshold rule is
+        `conditions.rule`'s, so the identity, every timing bound and the loudness come from the same checks the
+        breach rule would use; what the forecast adds is the fit and its horizon, both echoed in `rule`.
+
+        Nothing here predicts a *paging* decision. The forecast producer keeps its own cursor and its own
+        sustain steps, and a preview that could advance either would be a second opinion about a window that
+        has not happened.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForecastEvaluationRequest'
+      responses:
+        '200':
+          description: The prediction and the `.predicted` events it owes.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/deployment/locks:
+    post:
+      tags: [config]
+      operationId: config.deployment.lock
+      x-status: implemented
+      x-required-role: [proposer, human]
+      summary: Draft a content lock from the packages sent — pinning, fetching and trusting nothing.
+      description: |
+        `deployment.content.make_lock`, the function `lo-deployment lock` runs: pins, versions and digests for
+        the packages sent, with its own refusals kept (a reserved or repeated name, content outside its
+        namespace). Nothing is fetched and no trust verification happens here, exactly as the CLI verb says on
+        its own help line — which is also why the packages must arrive in the request, and why a package set
+        wider than the transport's 64 KiB body bound is locked by the CLI instead (the `413` names itself).
+
+        A lock is a review artifact: `written: false` and `deploy_authorized: false` say the route produced
+        bytes for a human to read, not a change to apply.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentLockRequest'
+      responses:
+        '200':
+          description: The draft lock, with the caller recorded as the requester and nothing more.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentLock'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/deployment/plans:
+    post:
+      tags: [config]
+      operationId: config.deployment.plan
+      x-status: implemented
+      x-required-role: [proposer, human]
+      summary: What a proposed content state would change against what is deployed, and whether it may.
+      description: |
+        `deployment.content.plan` over three documents the caller owns — what was deployed before, what is
+        there now, what is proposed. Its own `status` is `blocked` or `review-required` and its
+        `deploy_authorized` is `false` in both cases, which is what makes the route safe to serve: runtime
+        drift, unmanaged collisions and a homepage-settings change all require a human, and nothing here moves
+        a state or names a database, a secret or a removal it did not read.
+
+        The module's own `scope` sentence travels with the plan: a content plan is not a migration plan.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentPlanRequest'
+      responses:
+        '200':
+          description: The plan, its drift and its collisions — with no authority attached.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentPlan'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/deployment/renderings:
+    post:
+      tags: [config]
+      operationId: config.deployment.render
+      x-status: implemented
+      x-required-role: [proposer, human]
+      summary: Resolve a package set against its reviewed lock and return the rendered files, unwritten.
+      description: |
+        `content.resolve` then `content.render`, the two functions `lo-deployment render` calls in that order,
+        with every refusal intact: a package set that does not match the lock pin for pin, an override whose
+        `expect_sha256` no longer matches the upstream record (a `409 conflict`, because the caller's own
+        documents disagree with state they could not see), a tile pointing at an undeclared group.
+
+        What the route does **not** call is `write_bundle`: the answer is the file map and `written: false`
+        says so. The directory a deployment lands in, and the size of a package set, stay the operator's
+        decision — a checkout wider than the 64 KiB request bound is rendered by the CLI.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentRenderingRequest'
+      responses:
+        '200':
+          description: The rendered files, with the lock and deployment digest they came from.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentRendering'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
+  /v1/deployment/dashboard-exports:
+    post:
+      tags: [config]
+      operationId: config.dashboard.export
+      x-status: implemented
+      x-required-role: [proposer, human]
+      summary: Project one dashboard out of a resolved state for review, and name the next step it implies.
+      description: |
+        `content.export_dashboard` — the only verb under `lo-deployment export-*` that is a pure function, and
+        therefore the only one served. The answer is a review document: what the pinned record holds, and which
+        next step its ownership implies. It writes nothing and authorises nothing, exactly as the CLI verb does
+        when it prints to stdout, and a `400` says plainly when the state sent is not a resolved one.
+
+        The other three verbs read a Docker daemon through a subprocess or call a SigNoz URL with a mounted
+        token; over HTTP those become a caller-chosen command line and a caller-chosen endpoint, so they are
+        declined — listed in `DECLINES` and reported by `GET /v1/capabilities`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DashboardExportRequest'
+      responses:
+        '200':
+          description: The review document.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardExport'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/IdempotencyConflict'
+            - $ref: '#/components/responses/RequestInProgress'
 components:
   securitySchemes:
     bearerAuth:
@@ -2387,6 +3523,27 @@ components:
         token is never accepted from a query string, a cookie or a body field, and the retired
         `LO_PLATFORM_CREDENTIALS_JSON` environment form is a startup refusal, not a fallback.
   parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: |
+        A declared resource UUID. A non-canonical identifier and an identifier the index never declared are
+        refused the same way on `/v1/resources/{id}/dependents`, so no path through this surface reports
+        which identifiers exist.
+      schema:
+        type: string
+        format: uuid
+    ProposalId:
+      name: id
+      in: path
+      required: true
+      description: |
+        The proposal identifier — a SHA-256 digest its own content produced. It is validated as a digest
+        before any path is built, so a caller may name a draft and never a location.
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -2649,6 +3806,15 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/LegacyError'
+    OperationUnavailable:
+      description: |
+        The route exists and this build would answer it, but the artifact it reads is not mounted. The body
+        names the environment variable that mounts it, and `GET /v1/capabilities` lists every operation
+        sitting in this state. A `503` and never a `404`: the route is here, and the fix is a mount.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
   schemas:
     LegacyError:
       type: object
@@ -2681,7 +3847,8 @@ components:
                      invalid_revision, body_too_large, not_found, method_not_allowed, conflict,
                      idempotency_conflict, request_in_progress, stale_revision, internal_error,
                      observer_state_unavailable, observer_review_busy, operator_login_busy,
-                     verification_unavailable, verification_busy, verification_storage_error]
+                     verification_unavailable, verification_busy, verification_storage_error,
+                     operation_unavailable]
             message:
               type: string
             request_id:
@@ -2743,7 +3910,7 @@ components:
           type: boolean
         notification_mode:
           type: string
-          enum: [off, recording, live]
+          enum: ['off', recording, live]
         sender_configured:
           type: boolean
         refusal_audit:
@@ -3394,7 +4561,7 @@ components:
           type: boolean
         delivery_mode:
           type: string
-          enum: [off, recording, live]
+          enum: ['off', recording, live]
         max_attempts:
           type: integer
         window_seconds:
@@ -3407,7 +4574,7 @@ components:
           type: string
         delivery_mode:
           type: string
-          enum: [off, recording, live]
+          enum: ['off', recording, live]
         circuit_open:
           type: boolean
         suppressed:
@@ -4476,3 +5643,1991 @@ components:
         bound_exceeded:
           type: boolean
       required: [status, id, version, schedule, windows_revoked, windows_superseded, bound_exceeded]
+    ActorStamp:
+      description: >-
+        Who made the request, taken from the credential. It appears in answers and is refused in bodies:
+        `api_contract.assert_no_actor_claim` rejects a body that names an identity or a role.
+      type: object
+      properties:
+        identity:
+          type: string
+        role:
+          type: string
+      required: [identity, role]
+      additionalProperties: false
+    CapabilityArtifacts:
+      description: >-
+        One entry per mounted artifact: whether it is present, and for the index what it says about
+        itself. Nothing here rebuilds, repairs or writes any of them.
+      type: object
+      properties:
+        inventory_index:
+          type: object
+          properties:
+            built_at:
+              anyOf:
+              -
+                type: string
+                format: date-time
+              -
+                type: "null"
+            declaration_revision:
+              anyOf:
+              -
+                type: string
+              -
+                type: "null"
+            declaration_sha256:
+              anyOf:
+              -
+                type: string
+                pattern: ^[a-f0-9]{64}$
+              -
+                type: "null"
+            mounted:
+              description: >-
+                Whether the artifact this read needs is present in this process.
+              type: boolean
+            rebuilt_over_http:
+              type: boolean
+          required: [built_at, declaration_revision, declaration_sha256, mounted, rebuilt_over_http]
+          additionalProperties: false
+        observed_dataset:
+          type: object
+          properties:
+            mounted:
+              description: >-
+                Whether the artifact this read needs is present in this process.
+              type: boolean
+            unavailable:
+              description: >-
+                The sentence naming the missing mount, or null when the artifact is there.
+              anyOf:
+              -
+                type: string
+              -
+                type: "null"
+          required: [mounted, unavailable]
+          additionalProperties: false
+        proposal_directory:
+          type: object
+          properties:
+            mounted:
+              description: >-
+                Whether the artifact this read needs is present in this process.
+              type: boolean
+          required: [mounted]
+          additionalProperties: false
+        sigma_compiler:
+          type: object
+          properties:
+            installed:
+              type: boolean
+            owner:
+              type: string
+          required: [installed, owner]
+          additionalProperties: false
+        telemetry_reader:
+          type: object
+          properties:
+            mounted:
+              description: >-
+                Whether the artifact this read needs is present in this process.
+              type: boolean
+          required: [mounted]
+          additionalProperties: false
+      required: [inventory_index, observed_dataset, proposal_directory, sigma_compiler, telemetry_reader]
+      additionalProperties: false
+    CapabilityDecline:
+      description: >-
+        One operation this family will not serve over HTTP, why, and where the capability lives instead.
+      type: object
+      properties:
+        instead:
+          type: string
+        operation_id:
+          type: string
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+      required: [instead, operation_id, reason]
+      additionalProperties: false
+    CapabilityDocument:
+      description: >-
+        What this process can actually answer, read from its own mounts. It enumerates three states per
+        operation — `served`, `unavailable` (this build would answer it, the artifact is not mounted)
+        and `refused` (a decision, not a gap) — and names the declines so an agent can plan a call
+        instead of discovering the wall at the wall.
+      type: object
+      properties:
+        artifacts:
+          $ref: '#/components/schemas/CapabilityArtifacts'
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        declines:
+          type: array
+          items:
+              $ref: '#/components/schemas/CapabilityDecline'
+        operations:
+          type: array
+          items:
+              $ref: '#/components/schemas/CapabilityOperation'
+        reported_at:
+          type: string
+          format: date-time
+        schema_version:
+          type: integer
+        scope:
+          description: >-
+            What the answer does and does not authorise.
+          type: string
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [artifacts, complete, declines, operations, reported_at, schema_version, scope, truncated]
+      additionalProperties: false
+    CapabilityOperation:
+      description: >-
+        One operation this family answers. `supported` means the route exists **and** its input is
+        mounted; `unavailable` means the route exists, this build would answer it, and the artifact is
+        not mounted — with the sentence naming which variable. A refusal by decision is not a state
+        here: it is a row in `declines`.
+      type: object
+      properties:
+        method:
+          type: string
+        operation_id:
+          type: string
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        route:
+          type: string
+        state:
+          type: string
+          enum: ["supported", "unavailable"]
+      required: [method, operation_id, route]
+      additionalProperties: false
+    ConfigDriftComparison:
+      description: >-
+        A content-drift dry run. `changed`, the two digests and the diff come from the caller's own
+        previous/current text; the event that a real round would file is previewed, not filed.
+      type: object
+      properties:
+        actor:
+          $ref: '#/components/schemas/ActorStamp'
+        artifact:
+          type: string
+        changed:
+          type: boolean
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        current_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        diff:
+          type: string
+        digest_source:
+          type: string
+        durable:
+          description: >-
+            Always false here: a preview files nothing.
+          type: boolean
+        event_would_be:
+          $ref: '#/components/schemas/EventPreview'
+        family:
+          type: string
+        not_performed:
+          description: >-
+            What a real producer round would have done and this call deliberately did not.
+          type: array
+          items:
+              type: string
+        previous_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        schema_version:
+          type: integer
+        window:
+          $ref: '#/components/schemas/Window'
+      required: [actor, artifact, changed, complete, current_sha256, diff, digest_source, durable, event_would_be, family, not_performed, previous_sha256, schema_version, window]
+      additionalProperties: false
+    DashboardExport:
+      description: >-
+        A review document for one dashboard edit: who owns the record, the digest of what was observed,
+        and the next step a human must take. It imports nothing and calls no API.
+      type: object
+      properties:
+        deploy_authorized:
+          description: >-
+            Always false here: nothing on this route authorises a deployment.
+          type: boolean
+        id:
+          type: string
+        next_step:
+          type: string
+        observed_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        owner:
+          type: string
+        requested_by:
+          $ref: '#/components/schemas/ActorStamp'
+        schema_version:
+          type: integer
+        spec:
+          description: >-
+            The caller's own document, echoed as the next step describes it. This module reads no field of
+            it beyond the record id.
+          type: object
+        written:
+          description: >-
+            Always false here: no artifact was written by this call.
+          type: boolean
+      required: [deploy_authorized, id, next_step, observed_sha256, owner, requested_by, schema_version, written]
+      additionalProperties: false
+    DeclarationCheck:
+      description: >-
+        The verdict of the same validator `lo-inventory build` runs before it writes an index —
+        including the secret-bearing-attribute and credential-reference refusals. It validates bytes the
+        caller owns and records nothing: `recorded: false` is the shape of the door, not a mode.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        declaration_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        kinds:
+          type: array
+          items:
+              type: string
+        recorded:
+          type: boolean
+        resources:
+          type: integer
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+      required: [complete, declaration_sha256, kinds, recorded, resources, schema_version, status]
+      additionalProperties: false
+    DeclaredResourceMatch:
+      description: >-
+        The answer to "which resource is this name?" — `resolved` with one candidate, `conflict` with
+        every candidate and no winner chosen for the caller, `unresolved` with none. A collision is
+        never broken by picking the first row.
+      type: object
+      properties:
+        candidates:
+          type: array
+          items:
+              type: string
+              format: uuid
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        limit:
+          type: "null"
+        plane:
+          description: >-
+            Which plane the answer describes: `declared`, `observed`, or `declared+observed` for a join.
+          type: string
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        resource:
+          type: object
+          properties:
+            id:
+              type: string
+            kind:
+              type: string
+            name:
+              type: string
+            owner:
+              type: "null"
+          required: [id, kind, name, owner]
+          additionalProperties: false
+        resource_id:
+          anyOf:
+          -
+            type: string
+            format: uuid
+          -
+            type: "null"
+        returned:
+          type: integer
+        rows:
+          type: array
+          items:
+              type: object
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+          enum: ["resolved", "unknown", "unknown_uuid"]
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [complete, provenance, resource_id, schema_version, truncated]
+      additionalProperties: false
+    DeclaredResourcePage:
+      description: >-
+        One page of the **declared** plane: what the built index says is wanted, never what a probe saw.
+        An installation with no index mounted still answers `200` here and says so (`status:
+        unavailable`, `complete: false`, `reason` naming `LO_INDEX_PATH`), because "this build cannot
+        see the declarations" is an answer to the question, not a failure to answer it.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        filtered:
+          type: boolean
+        filters:
+          description: >-
+            The filters actually applied, echoed so a page can be interpreted without its request.
+          type: object
+          additionalProperties: {"type": "string"}
+          propertyNames: {"enum": ["kind", "name"]}
+        limit:
+          type: integer
+        next_cursor:
+          type: string
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        returned:
+          type: integer
+        rows:
+          type: array
+          items:
+              $ref: '#/components/schemas/DeclaredResourceRow'
+        rows_total:
+          type: integer
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [complete, limit, provenance, returned, rows, schema_version, status, truncated]
+      additionalProperties: false
+    DeclaredResourceRow:
+      description: >-
+        One declaration as the index stored it: identity, kind, name, its aliases, how many relations it
+        names, and an `owner` that is `null` unless the declaration carried one.
+      type: object
+      properties:
+        aliases:
+          type: array
+          items:
+              type: object
+              properties:
+                scope:
+                  description: >-
+                    What the answer does and does not authorise.
+                  type: string
+                type:
+                  type: string
+                value:
+                  type: string
+              required: [scope, type, value]
+              additionalProperties: false
+        id:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        owner:
+          type: "null"
+        relation_count:
+          type: integer
+      required: [aliases, id, kind, name, owner, relation_count]
+      additionalProperties: false
+    DependentPage:
+      description: >-
+        What would be affected if this declared resource went away — the index's own reverse walk, so
+        the answer is the declarations and not a runtime guess.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        limit:
+          type: integer
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        relation_types:
+          type: array
+          items:
+              type: string
+        resource_id:
+          type: string
+          format: uuid
+        returned:
+          type: integer
+        rows:
+          type: array
+          items:
+              $ref: '#/components/schemas/DependentRow'
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [complete, limit, provenance, relation_types, resource_id, returned, rows, schema_version, status, truncated]
+      additionalProperties: false
+    DependentRow:
+      description: >-
+        One declared resource that names the requested one in a relation.
+      type: object
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+      required: [id, kind, name]
+      additionalProperties: false
+    DeploymentLock:
+      description: >-
+        A draft content lock: one pin per package, each pin the digest of the package's own content.
+        Drafted from documents the caller sent, with no fetch and no trust verification, and `written:
+        false` because nothing was placed on disk.
+      type: object
+      properties:
+        deploy_authorized:
+          description: >-
+            Always false here: nothing on this route authorises a deployment.
+          type: boolean
+        packages:
+          type: array
+          items:
+              $ref: '#/components/schemas/PackagePin'
+        requested_by:
+          $ref: '#/components/schemas/ActorStamp'
+        schema_version:
+          type: integer
+        written:
+          description: >-
+            Always false here: no artifact was written by this call.
+          type: boolean
+      required: [deploy_authorized, packages, requested_by, schema_version, written]
+      additionalProperties: false
+    DeploymentPlan:
+      description: >-
+        What would change between three states the caller supplied. `status` is a verdict
+        (`review-required`, `blocked`) and `deploy_authorized: false` is unconditional: no answer on
+        this route authorises a deployment.
+      type: object
+      properties:
+        add:
+          type: array
+          items:
+              type: object
+        candidate_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        change:
+          type: array
+          items:
+              type: object
+        deploy_authorized:
+          description: >-
+            Always false here: nothing on this route authorises a deployment.
+          type: boolean
+        homepage_settings_change:
+          type: boolean
+        homepage_settings_drift:
+          type: boolean
+        observed_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        previous_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        remove:
+          type: array
+          items:
+              type: object
+        requested_by:
+          $ref: '#/components/schemas/ActorStamp'
+        requires_removal_review:
+          type: boolean
+        retain_unmanaged:
+          type: array
+          items:
+              type: object
+        runtime_drift:
+          type: array
+          items:
+              type: object
+        schema_version:
+          type: integer
+        scope:
+          description: >-
+            What the answer does and does not authorise.
+          type: string
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        unmanaged_collisions:
+          type: array
+          items:
+              type: object
+        written:
+          description: >-
+            Always false here: no artifact was written by this call.
+          type: boolean
+      required: [add, candidate_sha256, change, deploy_authorized, homepage_settings_change, homepage_settings_drift, observed_sha256, previous_sha256, remove, requested_by, requires_removal_review, retain_unmanaged, runtime_drift, schema_version, scope, status, unmanaged_collisions, written]
+      additionalProperties: false
+    DeploymentRendering:
+      description: >-
+        The file map a render would write, with the resolved state's digests. Nothing was written:
+        `written: false` and `deploy_authorized: false`.
+      type: object
+      properties:
+        deploy_authorized:
+          description: >-
+            Always false here: nothing on this route authorises a deployment.
+          type: boolean
+        deployment_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        file_count:
+          type: integer
+        files:
+          description: >-
+            The file map a render would write: each path to the exact text it would contain. Bounded by the
+            documents the caller sent — nothing is fetched to widen it.
+          type: object
+          additionalProperties: {"type": "string"}
+        lock:
+          type: object
+          properties:
+            packages:
+              type: array
+              items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    sha256:
+                      type: string
+                      pattern: ^[a-f0-9]{64}$
+                    version:
+                      type: string
+                  required: [name, sha256, version]
+                  additionalProperties: false
+            schema_version:
+              type: integer
+          required: [packages, schema_version]
+          additionalProperties: false
+        requested_by:
+          $ref: '#/components/schemas/ActorStamp'
+        schema_version:
+          type: integer
+        scope:
+          description: >-
+            What the answer does and does not authorise.
+          type: string
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        written:
+          description: >-
+            Always false here: no artifact was written by this call.
+          type: boolean
+      required: [deploy_authorized, deployment_sha256, file_count, lock, requested_by, schema_version, scope, status, written]
+      additionalProperties: false
+    DetectionAnswer:
+      description: >-
+        A detection dry run over a sample the caller supplied. `window_seconds` is the window the
+        judgement was made in; the rule's own `for_seconds` stays inside its document.
+      type: object
+      properties:
+        actor:
+          $ref: '#/components/schemas/ActorStamp'
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        count:
+          type: integer
+        durable:
+          description: >-
+            Always false here: a preview files nothing.
+          type: boolean
+        events:
+          type: array
+          items:
+              $ref: '#/components/schemas/EventPreview'
+        family:
+          type: string
+        judged:
+          description: >-
+            True when the rule reached a verdict on the input, false when it declined to judge.
+          type: boolean
+        not_performed:
+          description: >-
+            What a real producer round would have done and this call deliberately did not.
+          type: array
+          items:
+              type: string
+        rule:
+          type: object
+          properties:
+            id:
+              type: string
+            kind:
+              type: string
+            mode:
+              type: string
+            resource_id:
+              type: string
+              format: uuid
+            source:
+              type: string
+            version:
+              type: string
+          required: [id, kind, resource_id, source, version]
+          additionalProperties: false
+        schema_version:
+          type: integer
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+        window_seconds:
+          type: integer
+      required: [actor, complete, count, durable, events, family, judged, not_performed, rule, schema_version, truncated]
+      additionalProperties: false
+    DriftFinding:
+      description: >-
+        One difference between what is declared and what a source observed, carrying **both** values.
+        `resource_id` is `null` when the observation resolved to nothing or to several candidates, and
+        the `resolution.status` says which of the two it was.
+      type: object
+      properties:
+        differences:
+          type: object
+          additionalProperties: {"type": "object", "properties": {"declared": {}, "observed": {}}, "required": ["declared", "observed"], "additionalProperties": false}
+        evidence:
+          type: array
+          items:
+              type: string
+        finding_id:
+          type: string
+        kind:
+          type: string
+          enum: ["changed", "missing", "undeclared", "identity_unresolved", "scope_unresolved", "coverage_incomplete", "source_stale", "source_unavailable"]
+        observation_id:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        resolution:
+          type: object
+          properties:
+            candidates:
+              type: array
+              items:
+                  type: string
+                  format: uuid
+            resource_id:
+              anyOf:
+              -
+                type: string
+                format: uuid
+              -
+                type: "null"
+            status:
+              description: >-
+                Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+              type: string
+              enum: ["resolved", "conflict", "unknown", "unknown_uuid"]
+          required: [status, resource_id, candidates]
+          additionalProperties: false
+        resource_id:
+          anyOf:
+          -
+            type: string
+            format: uuid
+          -
+            type: "null"
+        snapshot_id:
+          type: string
+        source:
+          type: string
+      required: [finding_id, observed_at, resource_id, snapshot_id, source]
+      additionalProperties: false
+    DriftReport:
+      description: >-
+        Declared-versus-observed differences over a bounded freshness window. `sources` grades each named
+        source `whole`, `source_stale`, `source_unavailable` or `coverage_incomplete` — the last of which is
+        what a source that claimed no completeness earns, so an empty `rows` list from a source that never
+        reported is never printable as "no drift". Findings that name a resource but cannot resolve it
+        (`undeclared`, `identity_unresolved`, `scope_unresolved`) are in `rows`, and their presence is what
+        makes the grade `coverage_incomplete`.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        declaration_sha256:
+          anyOf:
+          -
+            type: string
+            pattern: ^[a-f0-9]{64}$
+          -
+            type: "null"
+        evaluated_at:
+          type: string
+          format: date-time
+        findings:
+          type: array
+          items:
+              type: object
+        limit:
+          type: "null"
+        max_age_seconds:
+          type: integer
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        returned:
+          type: integer
+        rows:
+          type: array
+          items:
+              $ref: '#/components/schemas/DriftFinding'
+        schema_version:
+          type: integer
+        sources:
+          type: object
+          additionalProperties: {"type": "string", "enum": ["whole", "coverage_incomplete", "source_stale", "source_unavailable"]}
+          propertyNames: {"pattern": "^[a-z][a-z0-9._-]{0,127}$"}
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+          enum: ["ok", "unavailable"]
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [complete, declaration_sha256, evaluated_at, limit, max_age_seconds, provenance, returned, rows, schema_version, truncated]
+      additionalProperties: false
+    EventPreview:
+      description: >-
+        A canonical event: the same object the producer would file, validated by the same
+        `state.validate_event` rules, differing only in that nothing stored it.
+      type: object
+      properties:
+        condition:
+          type: string
+        data_class:
+          type: string
+        evidence:
+          type: array
+          items:
+              $ref: '#/components/schemas/Evidence'
+        kind:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        resource_id:
+          type: string
+          format: uuid
+        rule_id:
+          type: string
+        rule_version:
+          type: string
+        schema_version:
+          type: integer
+        severity:
+          type: string
+        source:
+          type: string
+        source_event_id:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        window:
+          $ref: '#/components/schemas/Window'
+      required: [condition, data_class, evidence, kind, observed_at, resource_id, rule_id, rule_version, schema_version, severity, source, source_event_id, status, window]
+      additionalProperties: false
+    Evidence:
+      description: >-
+        The provenance an event cites: query type, bounded parameters, window and expiry.
+      type: object
+      properties:
+        expires_at:
+          type: string
+          format: date-time
+        parameters:
+          type: object
+          properties:
+            artifact_sha256:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            rule_id:
+              type: string
+            sample_id:
+              type: string
+          required: []
+          additionalProperties: false
+        query_type:
+          type: string
+        schema_version:
+          type: integer
+        source:
+          type: string
+        window:
+          type: object
+          properties:
+            end:
+              type: string
+              format: date-time
+            start:
+              type: string
+              format: date-time
+          required: [end, start]
+          additionalProperties: false
+      required: [expires_at, parameters, query_type, schema_version, source, window]
+      additionalProperties: false
+    ObservedSnapshotPage:
+      description: >-
+        The **observed** plane: snapshots a source filed about what it found, newest first. Never merged
+        with the declarations — a name that changed is a drift finding, not an edit.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        limit:
+          anyOf:
+          -
+            type: integer
+          -
+            type: "null"
+        max_rows:
+          description: >-
+            The bound this answer was taken under.
+          type: integer
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        returned:
+          type: integer
+        rows:
+          type: array
+          items:
+              $ref: '#/components/schemas/SnapshotSummary'
+        schema_version:
+          type: integer
+        source:
+          type: string
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [complete, limit, provenance, returned, rows, schema_version, source, status, truncated]
+      additionalProperties: false
+    ObservedSnapshotRecord:
+      description: >-
+        What one filed snapshot did. `inserted` or `duplicate` are the store's own words; a replay of
+        identical bytes is `duplicate`, and a replay that changed its contents is a `409`.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        declarations_touched:
+          type: integer
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+          required: [code, message, request_id]
+          additionalProperties: false
+        observations:
+          type: integer
+        plane:
+          description: >-
+            Which plane the answer describes: `declared`, `observed`, or `declared+observed` for a join.
+          type: string
+        provenance:
+          type: object
+          properties:
+            mounted:
+              description: >-
+                Whether the artifact this read needs is present in this process.
+              type: boolean
+            plane:
+              description: >-
+                Which plane the answer describes: `declared`, `observed`, or `declared+observed` for a join.
+              type: string
+            source:
+              type: string
+            unavailable:
+              description: >-
+                The sentence naming the missing mount, or null when the artifact is there.
+              anyOf:
+              -
+                type: string
+              -
+                type: "null"
+          required: [mounted, plane, source, unavailable]
+          additionalProperties: false
+        recorded:
+          type: boolean
+        schema_version:
+          type: integer
+        snapshot_id:
+          type: string
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+          enum: ["inserted", "duplicate"]
+      required: []
+      additionalProperties: false
+    PackagePin:
+      description: >-
+        One package pin: name, version and the digest of its content.
+      type: object
+      properties:
+        name:
+          type: string
+        sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        version:
+          type: string
+      required: [name, sha256, version]
+      additionalProperties: false
+    PathCheckAnswer:
+      description: >-
+        A reachability dry run: the classification, the vantage the observations were read from, which
+        resources would be affected, and the coverage gaps that made the verdict weaker.
+      type: object
+      properties:
+        actor:
+          $ref: '#/components/schemas/ActorStamp'
+        affected:
+          type: array
+          items:
+              type: string
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        count:
+          type: integer
+        coverage_gaps:
+          type: array
+          items:
+              type: object
+        durable:
+          description: >-
+            Always false here: a preview files nothing.
+          type: boolean
+        events:
+          type: array
+          items:
+              $ref: '#/components/schemas/EventPreview'
+        failing:
+          type: array
+          items:
+              type: array
+              items:
+                  type: string
+        family:
+          type: string
+        judged:
+          description: >-
+            True when the rule reached a verdict on the input, false when it declined to judge.
+          type: boolean
+        not_performed:
+          description: >-
+            What a real producer round would have done and this call deliberately did not.
+          type: array
+          items:
+              type: string
+        notes:
+          type: array
+          items:
+              type: string
+        open_after:
+          anyOf:
+          -
+            type: object
+            properties:
+              kind:
+                type: string
+              rule_id:
+                type: string
+            required: [kind, rule_id]
+            additionalProperties: false
+          -
+            type: "null"
+        rule:
+          type: object
+          properties:
+            id:
+              type: string
+            kind:
+              type: string
+            mode:
+              type: string
+            source:
+              type: string
+            version:
+              type: "null"
+          required: [id, kind, mode, source, version]
+          additionalProperties: false
+        schema_version:
+          type: integer
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+        verdict:
+          type: string
+        window:
+          type: object
+          properties:
+            end:
+              type: string
+              format: date-time
+            start:
+              type: string
+              format: date-time
+          required: [end, start]
+          additionalProperties: false
+      required: [actor, affected, complete, count, coverage_gaps, durable, events, failing, family, judged, not_performed, notes, open_after, rule, schema_version, truncated, verdict, window]
+      additionalProperties: false
+    ProposalDocument:
+      description: >-
+        The proposed resource in the same shape the declaration file uses, so a reviewer approves text
+        they will recognise, plus the observation and snapshot it came from.
+      type: object
+      properties:
+        observation_sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        proposal_id:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        resource:
+          type: object
+          properties:
+            aliases:
+              type: array
+              items:
+                  type: object
+                  properties:
+                    scope:
+                      description: >-
+                        What the answer does and does not authorise.
+                      type: string
+                    type:
+                      type: string
+                    value:
+                      type: string
+                  required: [scope, type, value]
+                  additionalProperties: false
+            attributes:
+              type: object
+              properties:
+                environment:
+                  type: string
+              required: [environment]
+              additionalProperties: false
+            id:
+              type: string
+            kind:
+              type: string
+            name:
+              type: string
+            relations:
+              type: array
+              items:
+                  type: object
+          required: [aliases, attributes, id, kind, name, relations]
+          additionalProperties: false
+        schema_version:
+          type: integer
+        snapshot_id:
+          type: string
+        source:
+          type: string
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+      required: [observation_sha256, proposal_id, resource, schema_version, snapshot_id, source, status]
+      additionalProperties: false
+    ProposalDraft:
+      description: >-
+        A drafted declaration proposal, written under the mounted proposals directory at a name this
+        module derived from `(source, observation_id)` — never one the body chose. Nothing is published,
+        merged or declared: the document says `needs_review` because it is an offer to a human.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        declared:
+          description: >-
+            Always false here: this route cannot make anything a declared resource.
+          type: boolean
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+          required: [code, message, request_id]
+          additionalProperties: false
+        proposal:
+          $ref: '#/components/schemas/ProposalDocument'
+        proposal_id:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        published:
+          description: >-
+            Always false here: a draft is an offer to a human, not a declaration.
+          type: boolean
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        written_to:
+          type: string
+      required: []
+      additionalProperties: false
+    ProposalRead:
+      description: >-
+        One drafted proposal read back by its identifier, with `published: false` restated — reading a
+        draft cannot make it a declaration.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        proposal:
+          $ref: '#/components/schemas/ProposalDocument'
+        proposal_id:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        published:
+          description: >-
+            Always false here: a draft is an offer to a human, not a declaration.
+          type: boolean
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+      required: [complete, proposal, proposal_id, published, schema_version, status]
+      additionalProperties: false
+    ReadProvenance:
+      description: >-
+        What was read to produce this answer, on the artifact plane. The block is the same object on
+        every read in this family so a caller can print it once; a `null` inside it is a fact about the
+        mounted file (an index built by an older schema records no `declaration_revision`), never a gap
+        in this projection.
+      type: object
+      properties:
+        built_at:
+          anyOf:
+          -
+            type: string
+            format: date-time
+          -
+            type: "null"
+        declaration_revision:
+          anyOf:
+          -
+            type: string
+          -
+            type: "null"
+        declaration_sha256:
+          anyOf:
+          -
+            type: string
+            pattern: ^[a-f0-9]{64}$
+          -
+            type: "null"
+        index_schema:
+          anyOf:
+          -
+            type: integer
+          -
+            type: "null"
+        mounted:
+          description: >-
+            Whether the artifact this read needs is present in this process.
+          type: boolean
+        plane:
+          description: >-
+            Which plane the answer describes: `declared`, `observed`, or `declared+observed` for a join.
+          type: string
+        source:
+          type: string
+        unavailable:
+          description: >-
+            The sentence naming the missing mount, or null when the artifact is there.
+          anyOf:
+          -
+            type: string
+          -
+            type: "null"
+      required: [mounted, plane, source, unavailable]
+      additionalProperties: false
+    RuleAnswer:
+      description: >-
+        A **dry run**: the rule's own identity, the events it *would* have filed, and no side effect.
+        `durable: false`, no event was filed, no cursor moved, and `not_performed` says what a real
+        producer round would have done. The identity's `version` is the digest the events carry, which
+        is what "the rule I reviewed" means here.
+      type: object
+      properties:
+        actor:
+          $ref: '#/components/schemas/ActorStamp'
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        count:
+          type: integer
+        durable:
+          description: >-
+            Always false here: a preview files nothing.
+          type: boolean
+        events:
+          type: array
+          items:
+              $ref: '#/components/schemas/EventPreview'
+        family:
+          type: string
+        judged:
+          description: >-
+            True when the rule reached a verdict on the input, false when it declined to judge.
+          type: boolean
+        not_performed:
+          description: >-
+            What a real producer round would have done and this call deliberately did not.
+          type: array
+          items:
+              type: string
+        note:
+          type: string
+        rule:
+          type: object
+          properties:
+            horizon_seconds:
+              type: integer
+            id:
+              type: string
+            kind:
+              type: string
+            mode:
+              type: string
+            model:
+              type: string
+            resource_id:
+              type: string
+              format: uuid
+            severity:
+              type: string
+            source:
+              type: string
+            version:
+              anyOf:
+              -
+                type: string
+              -
+                type: "null"
+            watch_rule:
+              type: string
+          required: [id, kind, mode, resource_id, version]
+          additionalProperties: false
+        schema_version:
+          type: integer
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [actor, complete, count, durable, events, family, judged, not_performed, rule, schema_version, truncated]
+      additionalProperties: false
+    SignalEnvelope:
+      description: >-
+        The store's answer verbatim: query type, parameters, window, rows, the row cap that applied,
+        whether the cap bit, and `error` when the store refused. This module adds no rows and drops
+        none.
+      type: object
+      properties:
+        error:
+          anyOf:
+          -
+            type: string
+          -
+            type: "null"
+        parameters:
+          type: object
+          properties:
+            resource_id:
+              type: string
+              format: uuid
+            rule_id:
+              type: string
+          required: [resource_id, rule_id]
+          additionalProperties: false
+        query_type:
+          type: string
+        row_limit:
+          type: integer
+        rows:
+          type: array
+          items:
+              $ref: '#/components/schemas/SignalRow'
+        source:
+          type: string
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+        window:
+          type: object
+          properties:
+            end:
+              type: string
+              format: date-time
+            start:
+              type: string
+              format: date-time
+          required: [end, start]
+          additionalProperties: false
+      required: [parameters, query_type, row_limit, rows, source, truncated, window]
+      additionalProperties: false
+    SignalRead:
+      description: >-
+        One bounded read of the telemetry store, in the store's own envelope. `complete: false` means
+        the store answered with an error, not that nothing was found: an empty window is a whole answer.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        provenance:
+          $ref: '#/components/schemas/StoreProvenance'
+        result:
+          $ref: '#/components/schemas/SignalEnvelope'
+        schema_version:
+          type: integer
+        signal:
+          type: string
+        window_source:
+          type: string
+      required: [complete, provenance, result, schema_version, signal, window_source]
+      additionalProperties: false
+    SignalRow:
+      description: >-
+        One sample. The keys depend on the signal kind — a metric sample carries `observed_at` and
+        `value`, a log line carries its fields, a span carries its service and duration.
+      type: object
+      properties:
+        observed_at:
+          type: string
+          format: date-time
+        value:
+          type: number
+      required: [observed_at, value]
+      additionalProperties: false
+    SnapshotSummary:
+      description: >-
+        One stored snapshot as a count and a verdict, never its payload: a page of history that shipped
+        every observation would be unbounded and would re-transmit secrets-adjacent attributes.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        error_code:
+          type: "null"
+        observations:
+          type: integer
+        observed_at:
+          type: string
+          format: date-time
+        scope:
+          description: >-
+            What the answer does and does not authorise.
+          type: integer
+        snapshot_id:
+          type: string
+        source:
+          type: string
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+      required: [complete, error_code, observations, observed_at, scope, snapshot_id, source, status]
+      additionalProperties: false
+    StoreProvenance:
+      description: >-
+        What was asked of the telemetry store: the query type, the bounded parameters, the window
+        actually read, and the credential-derived source. Nothing here is a SQL statement — the query
+        types are this platform's own closed list.
+      type: object
+      properties:
+        parameters:
+          type: object
+          properties:
+            resource_id:
+              type: string
+              format: uuid
+            rule_id:
+              type: string
+          required: [resource_id, rule_id]
+          additionalProperties: false
+        query_type:
+          type: string
+        read_at:
+          type: string
+          format: date-time
+        source:
+          type: string
+        window:
+          type: object
+          properties:
+            end:
+              type: string
+              format: date-time
+            start:
+              type: string
+              format: date-time
+          required: [end, start]
+          additionalProperties: false
+      required: [parameters, query_type, read_at, source, window]
+      additionalProperties: false
+    TopologyNode:
+      description: >-
+        One resource in the walk, with the relation that reached it and the depth at which it sat.
+      type: object
+      properties:
+        declaration_revision:
+          type: string
+        depth:
+          type: integer
+        kind:
+          type: string
+        name:
+          type: string
+        relation:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        via:
+          type: string
+      required: [declaration_revision, depth, kind, name, relation, resource_id, via]
+      additionalProperties: false
+    TopologyRead:
+      description: >-
+        The declared dependency graph around one resource. The observed plane is stated as absent rather
+        than silently mixed into the walk.
+      type: object
+      properties:
+        complete:
+          description: >-
+            False whenever anything was withheld — an unmounted artifact, a store error, a bound hit.
+          type: boolean
+        direction:
+          type: string
+        limit:
+          type: "null"
+        observed_plane:
+          type: string
+        plane:
+          description: >-
+            Which plane the answer describes: `declared`, `observed`, or `declared+observed` for a join.
+          type: string
+        provenance:
+          $ref: '#/components/schemas/ReadProvenance'
+        reason:
+          description: >-
+            Present with `status: unavailable`: what is missing and which mount variable names it.
+          type: string
+        requested_by:
+          type: object
+          properties:
+            identity:
+              type: string
+            role:
+              type: string
+          required: [identity, role]
+          additionalProperties: false
+        result:
+          $ref: '#/components/schemas/TopologyWalk'
+        returned:
+          type: integer
+        rows:
+          type: array
+          items:
+              type: object
+        schema_version:
+          type: integer
+        status:
+          description: >-
+            Reads: `ok` or `unavailable`. Writes/previews: the domain function's own verdict.
+          type: string
+        truncated:
+          description: >-
+            True only when a stated bound cut rows off this answer.
+          type: boolean
+      required: [complete, direction, plane, provenance, result, schema_version]
+      additionalProperties: false
+    TopologyWalk:
+      description: >-
+        One graph walk: where it started, how deep it went, the bound it was given, and what — if
+        anything — hit that bound. `truncated_by` is the empty list when the walk finished whole.
+      anyOf:
+      -
+        type: object
+        properties:
+          depth_limit:
+            type: integer
+          depth_reached:
+            type: integer
+          direction:
+            type: string
+          nodes:
+            type: array
+            items:
+                $ref: '#/components/schemas/TopologyNode'
+          origin_name:
+            type: string
+          plane:
+            description: >-
+              Which plane the answer describes: `declared`, `observed`, or `declared+observed` for a join.
+            type: string
+          resource_id:
+            type: string
+            format: uuid
+          revision:
+            type: object
+            properties:
+              built_at:
+                type: string
+                format: date-time
+              declaration_revision:
+                type: string
+              declaration_sha256:
+                type: string
+                pattern: ^[a-f0-9]{64}$
+              schema_version:
+                type: string
+            required: [built_at, declaration_revision, declaration_sha256, schema_version]
+            additionalProperties: false
+          truncated:
+            description: >-
+              True only when a stated bound cut rows off this answer.
+            type: boolean
+          truncated_by:
+            type: array
+            items:
+                type: object
+        required: [depth_limit, depth_reached, direction, nodes, origin_name, plane, resource_id, revision, truncated, truncated_by]
+        additionalProperties: false
+      -
+        type: "null"
+    Window:
+      description: >-
+        The evidence window a judgement was made over, in UTC.
+      type: object
+      properties:
+        end:
+          type: string
+          format: date-time
+        start:
+          type: string
+          format: date-time
+      required: [end, start]
+      additionalProperties: false
+    DeclarationCheckRequest:
+      type: object
+      description: |
+        One draft declaration, sent whole. `declaration` is the only key a check accepts: a body that names a
+        path, a directory, an output file or an actor is refused rather than ignored, because a silently
+        dropped field is how a contract dies quietly. `source`/`requested_by` are refused further upstream by
+        the transport's own actor-claim check.
+      properties:
+        declaration:
+          type: object
+          description: A draft resource declaration, judged by the inventory validator the builder runs.
+      required: [declaration]
+      additionalProperties: false
+    ObservedSnapshotIngest:
+      type: object
+      description: |
+        A `local-observe.observed/v1` snapshot document in the shape `inventory.observed` defines — an open
+        object here rather than a second copy of that key list, so this document cannot drift from the schema
+        `validation.observed` actually applies. `source` must equal the authenticated identity exactly: a body
+        naming another prober is refused with `not_authorised`, and the reason is that an observed row is the
+        evidence half of a later drift finding.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        source:
+          type: string
+        snapshot_id:
+          type: string
+          format: uuid
+        observed_at:
+          type: string
+        status:
+          type: string
+          enum: [ok, failed]
+        complete:
+          type: boolean
+        observations:
+          type: array
+          items:
+            type: object
+      required: [schema_version, source, snapshot_id, observed_at, status, complete]
+    ProposalDraftRequest:
+      type: object
+      description: |
+        The observation to propose and, optionally, how stale its snapshot may be. There is no `path`,
+        `directory`, `repository` or `kind` key: the kind comes from the stored observation, the location is
+        derived from the mounted proposal directory and the digest of `(source, observation_id)`, so retries
+        land on one file and a body cannot name a destination.
+      properties:
+        source:
+          type: string
+          description: The discovery source whose newest snapshot is being proposed from.
+        observation_id:
+          type: string
+          description: The observation the declarations do not claim.
+        max_age_seconds:
+          type: integer
+          minimum: 1
+          maximum: 604800
+          default: 3600
+      required: [source, observation_id]
+      additionalProperties: false
+    RuleValidationRequest:
+      type: object
+      description: |
+        One draft rule and the family that owns it. `family` selects the builder that judges the document, so
+        a rule is validated by the code that will run it and not by a second schema free to disagree.
+        `pathcheck` and Sigma are deliberately absent from the enumeration: the first's configuration is a
+        file its own worker reads, the second belongs to the pinned compiler tier, and half-parsing either
+        here would be a laxer validator than the one that matters.
+      properties:
+        family:
+          type: string
+          enum: [detection, sustained, slo, forecast, config_drift]
+        document:
+          type: object
+          description: The draft rule document, built by that family's own builder.
+      required: [family, document]
+      additionalProperties: false
+    DetectionEvaluationRequest:
+      type: object
+      description: |
+        The rule, the one sample to judge, and the window the verdict would carry. `sample` is the observation
+        record a prober reported (`observed_value`, `observed_at`, optional `unit`); **absent is not an
+        error**, it is the coverage case — a rule with no input reports that its input is absent rather than
+        going quiet.
+      properties:
+        rule:
+          type: object
+        sample:
+          type: [object, 'null']
+        window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          default: 60
+      required: [rule]
+      additionalProperties: false
+    SustainedEvaluationRequest:
+      type: object
+      description: |
+        The rule document and the series to judge it against. `points` are `[epoch_seconds, value]` pairs in
+        any order — the module sorts and bounds them through `conditions.ordered_points`, the same function a
+        real tick judges by, so the ceiling is one rule and not two.
+      properties:
+        document:
+          type: object
+        points:
+          type: array
+          minItems: 1
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+      required: [document, points]
+      additionalProperties: false
+    SloEvaluationRequest:
+      type: object
+      description: |
+        One objective and the good/bad samples inside its window. `objective` is the entry as the objectives
+        document carries it; the producer identity the events would carry is **this credential's**, not a body
+        field, which is why this door answers a `producer` and no other role.
+      properties:
+        objective:
+          type: object
+        points:
+          type: array
+          minItems: 1
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+      required: [objective, points]
+      additionalProperties: false
+    ForecastEvaluationRequest:
+      type: object
+      description: |
+        One predictive rule and the series to fit. The inner threshold rule is `conditions.rule`'s, so every
+        bound, the identity and the loudness are checked the way a breach rule checks them; the `predict`
+        block adds the fit and its horizon, and both are echoed back in `rule`.
+      properties:
+        document:
+          type: object
+        points:
+          type: array
+          minItems: 1
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+      required: [document, points]
+      additionalProperties: false
+    ConfigDriftComparisonRequest:
+      type: object
+      description: |
+        The artifact's identity (`entry`: its resource, name, rule and labels — the same key the producer
+        derives) and both texts, each as `{text}` or `{sha256, text}`. **A supplied `sha256` is ignored and
+        the digest is derived from the bytes**: a caller able to name both could assert a digest the text does
+        not have, and the whole value of a drift finding is that its digest is what the bytes are.
+      properties:
+        entry:
+          type: object
+        previous:
+          type: object
+          properties:
+            text:
+              type: string
+          required: [text]
+        current:
+          type: object
+          properties:
+            text:
+              type: string
+          required: [text]
+        window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+      required: [entry, current]
+      additionalProperties: false
+    PathCheckEvaluationRequest:
+      type: object
+      description: |
+        `observations` are probe records the caller already holds (`target`, `ok`, optional
+        `vantage_resource_id`, `asn`, `protocol`), `expected_vantage_points` and `expected_targets` are the
+        grid the configuration is supposed to probe, and `open_finding` is the caller's own statement of what
+        it believes is already open. All of it is a supplied fixture: this route takes no probe, reads no
+        `LO_PATHCHECK_CONFIG` and moves no cursor — which is why an answer says "given these probes" and never
+        "here is what the grid saw".
+      properties:
+        observations:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              target:
+                type: string
+              ok:
+                type: boolean
+              vantage_resource_id:
+                type: string
+                format: uuid
+              asn:
+                type: [string, 'null']
+              protocol:
+                type: string
+            required: [target, ok]
+        vantage_resource_id:
+          type: string
+          format: uuid
+          description: The vantage the round speaks from, and the resource the event would name.
+        expected_vantage_points:
+          type: array
+          items:
+            type: string
+            format: uuid
+        expected_targets:
+          type: array
+          items:
+            type: string
+        open_finding:
+          type: [object, 'null']
+        window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+      required: [observations, vantage_resource_id]
+      additionalProperties: false
+    DeploymentLockRequest:
+      type: object
+      description: |
+        The packages to lock, sent whole: this route fetches nothing, so `content_ref`s must arrive as the
+        caller's own records — an identifier inside one reserved namespace, never a URL to fetch. A package set
+        wider than the transport's 64 KiB body bound is locked by `lo-deployment lock`, which can read a
+        checkout.
+      properties:
+        packages:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+      required: [packages]
+      additionalProperties: false
+    DeploymentPlanRequest:
+      type: object
+      description: |
+        Three documents the caller owns — what was deployed before, what is there now, what is proposed. The
+        module compares them and never discovers them, which is why this body carries documents rather than
+        hosts, identifiers or connection strings.
+      properties:
+        previous:
+          type: object
+        observed:
+          type: object
+        candidate:
+          type: object
+      required: [previous, observed, candidate]
+      additionalProperties: false
+    DeploymentRenderingRequest:
+      type: object
+      description: |
+        The desired packages, the reviewed lock they must match pin for pin, and the deployment document that
+        says what they are for. Overrides and runtime values are the caller's own files in the caller's own
+        tree: this route reads nothing from disk and writes nothing to it, so it cannot resolve one
+        installation's secrets while answering for another.
+      properties:
+        packages:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+        lock:
+          type: object
+        deployment:
+          type: object
+      required: [packages, lock, deployment]
+      additionalProperties: false
+    DashboardExportRequest:
+      type: object
+      description: |
+        A resolved state (the output of a rendering), the content identifier to project, and the caller's own
+        document for it. No endpoint, token or container name appears anywhere in this body: the verbs that
+        would need one are the three declined siblings, and `GET /v1/capabilities` says which and why.
+      properties:
+        state:
+          type: object
+        id:
+          type: string
+          description: The content identifier inside the resolved state, in its package's own namespace.
+        document:
+          type: object
+      required: [state, id, document]
+      additionalProperties: false

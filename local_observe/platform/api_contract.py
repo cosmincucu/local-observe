@@ -124,6 +124,11 @@ ERROR_CATALOGUE: dict[str, tuple[int, ...]] = {
     'actor_claim_refused': (400,),
     'invalid_pagination': (400,),
     'invalid_revision': (400,),
+    #: One refusal for "this route exists and this build would answer it, but the artifact it reads is not
+    #: mounted in this installation". Distinct from `not_found` (no such route) and from `not_authorised`
+    #: (a credential problem): the operator's fix is a mount, not a different URL or a different token.
+    #: `GET /v1/capabilities` lists which operations are in this state before anyone calls them.
+    'operation_unavailable': (503,),
     'body_too_large': (413,),
     'not_found': (404,),
     'method_not_allowed': (405,),

@@ -186,9 +186,10 @@ def idempotency_enabled(path: str) -> bool:
     cannot name. A GET under those prefixes also reads as guarded, and never claims a key, because the
     claim lives in the write branch.
     """
-    from . import maintenance_api  # the seam owns its prefixes; see the import note in `create_app`
+    from . import maintenance_api, resources_api  # the seams own their prefixes; see `create_app`
     return (path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
-            or occurrence_write(path) is not None or maintenance_api.writes(path))
+            or occurrence_write(path) is not None or maintenance_api.writes(path)
+            or resources_api.writes(path))
 
 
 def _retrieve_execution(future: Any) -> None:
@@ -352,7 +353,10 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                intake_rules: Mapping[str, Any] | None = None, *,
                runner_handoff: Any | None = None,
                guided_setup: Any | None = None,
-               observer_review: Path | str | None = None) -> Callable[..., Awaitable[None]]:
+               observer_review: Path | str | None = None,
+               observed_path: Path | str | None = None,
+               proposals_path: Path | str | None = None,
+               store_reader: Any | None = None) -> Callable[..., Awaitable[None]]:
     validate_credentials(credentials)
     runner_ids = set(runner_handoff.runners) if runner_handoff is not None else set()
     if guided_setup is not None:
@@ -407,6 +411,16 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     # this app's index path, and the actor the credential named, handed over after the body was read and
     # claimed, so a replayed declaration never reaches the state layer twice.
     from . import maintenance_api as maintenance_routes
+    # The resources/queries/rules/configuration family: declarations, the built index, the observed
+    # plane, proposals, the two bounded query reads, the rule previews and the pure deployment
+    # functions. Same reasoning as `maintenance_api`: built here, over this app's mounted artifacts, and
+    # imported here so a sibling transport cannot fail an `api` import on its own account. It opens no
+    # operational table — every durable trace it can leave (a proposal document, an observed snapshot)
+    # is written by `local_observe.inventory` functions the CLI uses — so `index_path` is the only
+    # artifact it shares with the routes above, and the two never write the same thing.
+    from . import resources_api as resources_routes
+    resources = resources_routes.ResourcesAPI(index_path=index_path, observed_path=observed_path,
+                                             proposals_path=proposals_path, reader=store_reader)
 
     # The optional observer review seam: three routes over the observer's own private journal, built only
     # when this installation names one (`observer_review.py` owns the rules, the bounds and the refusals).
@@ -933,6 +947,13 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                         return await respond(400, {'error': 'invalid_request',
                                                    'detail': 'source and sample_id query parameters are required'})
                     return await respond(200, store.get_evidence(params['source'][0], params['sample_id'][0]))
+                if resources_routes.owns(path):
+                    # The reads of the resources/queries/rules family, after the `summary` refusal above
+                    # (which is why a `summary` credential never reaches this module's own role test) and
+                    # after every pre-existing literal path: no path is claimed twice in either direction.
+                    # Raw query bytes go over whole — `resources_api._query` is what refuses an unknown or
+                    # repeated parameter, and re-encoding a parsed dict would decide its rules twice.
+                    return await respond(*resources.read(path, scope.get('query_string', b''), actor))
                 if maintenance_routes.owns(path):
                     # Inside the branch, after the `summary` refusal above and after `/v1/me`: the family
                     # answers `summary` with 403 like every other read. The family's own read gate names
@@ -1097,6 +1118,14 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(401, {'error': 'callback_unauthorised'})
             elif path == '/v1/executions/outcome' and set(body) <= {'execution_id', 'outcome', 'runner_token'}:
                 result = store.execution_outcome(body['execution_id'], body['outcome'], actor, body.get('runner_token'))
+            elif resources_routes.owns(path):
+                # After the idempotency claim and after `assert_no_actor_claim`, so a dry run that was
+                # retried returns its first answer rather than judging the fixture twice, and so every
+                # `source`/`requested_by` in an answer is the credential and not a body field. A verb a
+                # read-only path does not carry is answered by this module with the transport's own
+                # `method_not_allowed` body, which is why it is reached here and not by the verb gate above:
+                # that gate admits `POST` for every write route, and this family's reads share its prefixes.
+                return await respond(*resources.write(path, body, actor))
             elif maintenance_routes.owns(path):
                 # After the idempotency claim, so a replayed write returns its first answer with
                 # `Idempotency-Replayed: true` and never reaches this line a second time; after
@@ -1254,8 +1283,19 @@ def app_factory() -> Callable[..., Awaitable[None]]:
     policy = action_policy(os.environ['LO_INDEX_PATH'], definitions)
     from local_observe.deployment.setup_service import configured_services
     handoff, setup = configured_services(store, policy, os.environ)
+    # The three artifacts the resources/queries/rules family reads, and nothing else. Both paths are
+    # optional — unset is the documented off switch and the route answers `status: unavailable` naming the
+    # variable (`GET /v1/capabilities` lists every route in that state ahead of a caller hitting one). The
+    # store reader is built last: `query.open_reader` never raises, and returns `None` after one log line
+    # when the three read-only variables do not name a credential, which is the same posture the MCP
+    # surface takes — a read that cannot happen says so in its envelope instead of falling back wider.
+    from . import resources_api
+    from .query import open_reader
     return create_app(store, credentials,
                       policy, clients or None,
                       os.environ['LO_INDEX_PATH'], display, os.environ.get('LO_OVERVIEW_PATH'),
                       intake_rules, runner_handoff=handoff, guided_setup=setup,
-                      observer_review=observer_state)
+                      observer_review=observer_state,
+                      observed_path=resources_api.path_from_environment('LO_OBSERVED_PATH'),
+                      proposals_path=resources_api.path_from_environment('LO_PROPOSALS_PATH'),
+                      store_reader=open_reader())
