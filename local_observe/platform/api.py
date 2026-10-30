@@ -26,7 +26,8 @@ from . import api_contract, dispositions, intake
 from .policy import action_policy
 from .refusal_dispatch import RefusalAuditDispatcher
 from .refusals import SUMMARY_ONLY
-from .state import Actor, StateError, Store, clock, identifier, require, validate_event
+from .state import (CREDENTIAL_ROLES, Actor, StateError, Store, clock, identifier, require,
+                    validate_event)
 from .notifications import deliver_one
 from .owner import exclusive_owner
 
@@ -333,7 +334,7 @@ def validate_credentials(credentials: list[dict[str, str]]) -> None:
     """Refuse a role list this process must not serve, in the words `create_app` has always used.
 
     Moved out of `create_app`'s first lines verbatim, not rewritten: the same two sentences, the same
-    uniqueness/length/role tests and the same six roles. Token values are used for uniqueness and
+    uniqueness/length/role tests and the same seven roles. Token values are used for uniqueness and
     length checks, never logged. The reason it is a function is one ordering fact: `app_factory` must
     reject unusable credentials *before* it opens (or creates) the state file, so a
     deployment whose role list is short, duplicated or role-sick no longer leaves a half-booted database
@@ -346,13 +347,11 @@ def validate_credentials(credentials: list[dict[str, str]]) -> None:
 
     Raises:
         ValueError: The list is empty or repeats a token, or a token is shorter than 24 characters or
-            names a role outside the six this transport authenticates. Never a message carrying a value.
+            names a role outside the seven this transport authenticates. Never a message carrying a value.
     """
     if not credentials or len({item['token'] for item in credentials}) != len(credentials):
         raise ValueError('Missing or duplicate platform credentials')
-    if any(len(item['token']) < 24 or
-           item['role'] not in ('reader', 'producer', 'proposer', 'human', 'executor', 'summary')
-           for item in credentials):
+    if any(len(item['token']) < 24 or item['role'] not in CREDENTIAL_ROLES for item in credentials):
         raise ValueError('Invalid platform credential configuration')
 
 
@@ -924,7 +923,11 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 status, payload = handled
                 return await respond(status, payload)
             if method == 'GET':
-                require(actor, 'reader', 'human', 'proposer', 'executor', 'summary')
+                # The whole-`GET` gate: every role that may read anything. `operator-agent` is in it because
+                # an automated operator reads what a `reader` reads — and `producer` is not, because a
+                # detector files verdicts and reads nothing. `summary` reaches only its two routes, refused
+                # by name on the line below this one.
+                require(actor, 'reader', 'human', 'proposer', 'executor', 'summary', 'operator-agent')
                 if actor.role == 'summary' and path not in ('/v1/me', '/v1/overview'):
                     return await respond(403, {'error': 'summary_only'})
                 if path == '/v1/runner/requests' and runner_handoff is not None:

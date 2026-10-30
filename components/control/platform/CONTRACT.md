@@ -67,9 +67,13 @@ operational metadata retention remain work, not claimed TTL enforcement.
 ## Authority
 
 Static bearer credentials map to server-configured identity and role: reader,
-producer, proposer, human or executor. A producer is bound to its exact source.
-Payload actor/role fields confer no authority. Never give real human-role tokens
-to agents. All tokens in the staged rehearsal identify synthetic test actors only.
+producer, proposer, human, executor, summary or operator-agent. A producer is
+bound to its exact source. Payload actor/role fields confer no authority.
+Never give a human-role token to an agent: an automated operator that must acknowledge an occurrence or sign
+a maintenance window uses an `operator-agent` credential, which carries those two powers and nothing else,
+and every act it records stores the role that performed it. What a credential may not do is answered by role,
+the same way it is answered for any other bearer. All tokens in the staged rehearsal identify synthetic test
+actors only.
 
 The credential list is supplied as a **file**, `LO_PLATFORM_CREDENTIALS`, mounted by
 Compose from `LO_PLATFORM_CREDENTIALS_FILE` at `/run/secrets/platform-credentials`.

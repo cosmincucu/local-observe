@@ -1,4 +1,4 @@
-"""What a named human decided about one alert occurrence, and what that stops.
+"""What a named operator decided about one alert occurrence, and what that stops.
 
 An **occurrence** is one episode of one alert condition, and its id is the incident id: `Store.intake`
 opens an incident on a firing verdict that found no open incident for its condition and closes it when the
@@ -41,6 +41,8 @@ Four rules hold both of those honest, and each is a decision rather than a conve
    cannot claim that an agent is a human, and `api_contract.assert_no_actor_claim` refuses one before this
    module is reached. An empty reason is refused for the reason the durable history exists at all: a
    disposition nobody can explain next month is the artifact this feature replaces, not an improvement on it.
+   The two roles this module hears are `state.OPERATOR_ROLES`, and which of them spoke is stored with the
+   decision rather than inferred from the name that spoke.
 
 Two durable facts ride the same transaction and one more does not. The audit row (`occurrence.disposed`) and
 the append-only history are inside it, so an operator can always reconstruct who said what in which order.
@@ -67,7 +69,8 @@ from .state import (OCCURRENCE_DISMISSAL_ACK_CAUSE, OCCURRENCE_DISMISSAL_CAUSE, 
                    OCCURRENCE_DISPOSITION_HISTORY_TABLE, OCCURRENCE_DISPOSITION_KINDS,
                    OCCURRENCE_DISPOSITION_OPERATION, OCCURRENCE_DISPOSITION_TABLE, OCCURRENCE_PROJECTION_KINDS,
                    OCCURRENCE_PROJECTION_LIMIT, OCCURRENCE_PROJECTION_TABLE, OCCURRENCE_REASON_LIMIT,
-                   StateError, Store, clock, identifier, label, record_suppression)
+                   OPERATOR_ROLE_DISPOSITIONS, OPERATOR_ROLES, StateError, Store, clock, identifier, label,
+                   record_suppression, stored_role)
 from .suppression import condition_key as event_condition_key
 
 log = get_logger(__name__)
@@ -122,7 +125,11 @@ DISMISSAL_ALREADY_RECORDED = ('This episode is already dismissed; a dismissal is
                               'not widen to a condition that joined since')
 REASON_REQUIRED = 'A disposition must carry a reason a later reader can act on'
 REASON_SHAPE = f'A disposition reason must be one printable line of at most {MAX_REASON_CHARS} characters'
-ROLE_REFUSAL = 'Only a human credential may record a disposition'
+#: The two roles this module hears, in one sentence that names why the other five are turned away: the
+#: operator on call, and the automated operator that acts under its own credential. Neither may name the
+#: other in a body — `api_contract.assert_no_actor_claim` refuses a `role` field before this module is
+#: reached — so the role in an answer is always the one the server authenticated.
+ROLE_REFUSAL = 'Only a ' + ' or '.join(OPERATOR_ROLES) + ' credential may record a disposition'
 KIND_REFUSAL = 'Unknown disposition kind'
 
 # ------------------------------------------------------------------------------------------- reads
@@ -195,10 +202,12 @@ def history(store: Store, occurrence_id: str, *, limit: int = api_contract.PAGE_
         if _incident(connection, occurrence_id) is None:
             raise api_contract.ContractError(404, 'not_found', UNKNOWN_OCCURRENCE)
         rows = connection.execute(
-            f'SELECT sequence, kind, actor, reason, at, revision FROM {OCCURRENCE_DISPOSITION_HISTORY_TABLE}'
+            f'SELECT sequence, kind, actor, {OPERATOR_ROLE_DISPOSITIONS}, reason, at, revision'
+            f' FROM {OCCURRENCE_DISPOSITION_HISTORY_TABLE}'
             ' WHERE occurrence_id=? AND sequence>? ORDER BY sequence LIMIT ?',
             (occurrence_id, position, limit)).fetchall()
-        return api_contract.page_payload([dict(row) for row in rows], limit=limit,
+        return api_contract.page_payload([dict(row, actor_role=stored_role(row, OPERATOR_ROLE_DISPOSITIONS))
+                                          for row in rows], limit=limit,
                                          cursor_for=lambda row: row['sequence'])
 
 
@@ -280,7 +289,8 @@ def record(store: Store, occurrence_id: str, kind: str, reason: str, context: ap
 
     Raises:
         api_contract.ContractError: 400 `invalid_request` for a kind outside the two or a reason that is
-            missing, unprintable or over-long; 403 `not_authorised` for any role other than `human`; 404
+            missing, unprintable or over-long; 403 `not_authorised` for any role other than the two named by
+            `state.OPERATOR_ROLES`; 404
             `not_found` for an unknown occurrence; 409 `conflict` for an acknowledgement offered to a dismissed
             episode; 412 `stale_revision` when `expected_revision` no longer describes this occurrence. Nothing
             is written for any of them, and no idempotency key is completed by a refusal (the gate releases it).
@@ -288,7 +298,7 @@ def record(store: Store, occurrence_id: str, kind: str, reason: str, context: ap
     if kind not in OCCURRENCE_DISPOSITION_KINDS:
         raise api_contract.ContractError(400, 'invalid_request', KIND_REFUSAL)
     reason = _reason(reason)
-    actor = _human(context)
+    actor, actor_role = _operator(context)
     _occurrence_id(occurrence_id)
     moment = clock(now)
     with store.transaction() as connection:
@@ -298,11 +308,14 @@ def record(store: Store, occurrence_id: str, kind: str, reason: str, context: ap
         current = _disposition(connection, occurrence_id)
         api_contract.check_revision(_revision(incident, current), expected_revision)
         if current is not None and current['kind'] == kind and current['actor'] == actor \
+                and stored_role(current, OPERATOR_ROLE_DISPOSITIONS) == actor_role \
                 and current['reason'] == reason:
-            # The identical statement, restated. The stored row keeps the *first* actor, reason and instant —
-            # durable who/when/why means one of each — and no revision moves, so a caller that retried without
-            # an `Idempotency-Key` gets the same outcome a replay would have given rather than a second
-            # decision on one question and a history full of one operator's network.
+            # The identical statement, restated. The stored row keeps the *first* actor, role, reason and
+            # instant — durable who/when/why means one of each — and no revision moves, so a caller that
+            # retried without an `Idempotency-Key` gets the same outcome a replay would have given rather
+            # than a second decision on one question and a history full of one operator's network. The role
+            # is part of the statement because a role is part of who spoke: the same identity mounted twice
+            # (a human token and an agent token) has said two different things.
             return {**_document(connection, incident), 'created': False, 'folded': 0}
         if current is not None and current['kind'] == DISMISSED:
             # Forward only. An acknowledgement after a dismissal would claim a human owns an episode a human
@@ -316,18 +329,22 @@ def record(store: Store, occurrence_id: str, kind: str, reason: str, context: ap
         members = _keys(connection, occurrence_id, incident['condition_key'])
         folded, in_flight = _fold(connection, store, incident, members, moment, kind)
         connection.execute(
-            f'INSERT INTO {OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,actor,reason,at,revision)'
-            ' VALUES (?,?,?,?,?,?) ON CONFLICT(occurrence_id) DO UPDATE SET kind=excluded.kind,'
-            ' actor=excluded.actor, reason=excluded.reason, at=excluded.at, revision=excluded.revision',
-            (occurrence_id, kind, actor, reason, utc_text(moment), revision + 1))
+            f'INSERT INTO {OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,actor,{OPERATOR_ROLE_DISPOSITIONS},'
+            'reason,at,revision)'
+            f' VALUES (?,?,?,?,?,?,?) ON CONFLICT(occurrence_id) DO UPDATE SET kind=excluded.kind,'
+            f' actor=excluded.actor, {OPERATOR_ROLE_DISPOSITIONS}=excluded.{OPERATOR_ROLE_DISPOSITIONS},'
+            ' reason=excluded.reason, at=excluded.at, revision=excluded.revision',
+            (occurrence_id, kind, actor, actor_role, reason, utc_text(moment), revision + 1))
         connection.execute(
-            f'INSERT INTO {OCCURRENCE_DISPOSITION_HISTORY_TABLE}(occurrence_id,kind,actor,reason,at,revision)'
-            ' VALUES (?,?,?,?,?,?)', (occurrence_id, kind, actor, reason, utc_text(moment), revision + 1))
+            f'INSERT INTO {OCCURRENCE_DISPOSITION_HISTORY_TABLE}(occurrence_id,kind,actor,'
+            f'{OPERATOR_ROLE_DISPOSITIONS},reason,at,revision)'
+            ' VALUES (?,?,?,?,?,?,?)',
+            (occurrence_id, kind, actor, actor_role, reason, utc_text(moment), revision + 1))
         tombstoned = _tombstone(connection, occurrence_id, members, actor, moment) if kind == DISMISSED else 0
         store.audit(connection, moment, actor, OCCURRENCE_DISPOSITION_OPERATION, occurrence_id,
-                    {'kind': kind, 'revision': revision + 1, 'folded': folded, 'in_flight': in_flight,
-                     'tombstoned': tombstoned, 'members': len(members)})
-        _project(connection, incident, kind, actor, reason, moment)
+                    {'kind': kind, 'actor_role': actor_role, 'revision': revision + 1, 'folded': folded,
+                     'in_flight': in_flight, 'tombstoned': tombstoned, 'members': len(members)})
+        _project(connection, incident, kind, actor, actor_role, reason, moment)
         updated = _incident(connection, occurrence_id)
         if updated is None:                                 # unreachable: this transaction wrote the row
             raise api_contract.ContractError(500, 'internal_error', 'The committed occurrence vanished')
@@ -396,19 +413,24 @@ def drain(store: Store, sinks: Mapping[str, Callable[[dict[str, Any]], Any]] | N
 # --------------------------------------------------------------------------------------- internals
 
 
-def _human(context: Any) -> str:
-    """Return the identity behind an authenticated context, refusing every other role.
+def _operator(context: Any) -> tuple[str, str]:
+    """Return the ``(identity, role)`` behind an authenticated context, refusing every other role.
 
     The role test sits here rather than in the transport on purpose: `docs/CONTRACTS.md` §5's claim is about
     *who may acknowledge*, and a rule that lives in one handler is a rule the next handler can forget. The
     refusal is a 403 in the machine envelope because this route family has spoken the envelope since its first
     answer; `Store`'s flat `not_authorised` body belongs to the routes that have always given it.
+
+    The role travels with the identity because a decision is only evidence if it says who made it, and "a
+    named human took this episode" and "an automated operator took this episode" are two different sentences
+    about the same effect. Both roles are admitted — an `operator-agent` dismissal silences exactly the
+    deliveries a `human` dismissal silences — and which one spoke is what gets stored.
     """
-    if not isinstance(context, api_contract.ActorContext) or context.role != 'human':
+    if not isinstance(context, api_contract.ActorContext) or context.role not in OPERATOR_ROLES:
         raise api_contract.ContractError(403, 'not_authorised', ROLE_REFUSAL)
     if not context.identity:
         raise api_contract.ContractError(401, 'authentication_required', ROLE_REFUSAL)
-    return context.identity
+    return context.identity, context.role
 
 
 def _reason(value: Any) -> str:
@@ -461,9 +483,16 @@ def _incident(connection: sqlite3.Connection, occurrence_id: str) -> sqlite3.Row
 
 
 def _disposition(connection: sqlite3.Connection, occurrence_id: str) -> sqlite3.Row | None:
-    """Return the effective disposition row, or None when no operator has spoken for this episode."""
+    """Return the effective disposition row, or None when no operator has spoken for this episode.
+
+    `actor_role` is named in the select because it is part of the answer, and read through
+    `state.stored_role` because a row this build did not write may predate the column (schema v15): a
+    disposition recorded before an automated operator could exist was necessarily a human's, and that is
+    the value a read reports for it rather than an absence a caller has to interpret.
+    """
     return connection.execute(
-        f'SELECT kind, actor, reason, at, revision FROM {OCCURRENCE_DISPOSITION_TABLE}'
+        f'SELECT kind, actor, reason, at, revision, {OPERATOR_ROLE_DISPOSITIONS}'
+        f' FROM {OCCURRENCE_DISPOSITION_TABLE}'
         ' WHERE occurrence_id=?',
         (occurrence_id,)).fetchone()
 
@@ -504,6 +533,7 @@ def _document(connection: sqlite3.Connection, incident: sqlite3.Row) -> dict[str
                          'opened_at': incident['opened_at'], 'updated_at': incident['updated_at']},
             'disposition': None if disposition is None else {
                 'kind': disposition['kind'], 'actor': disposition['actor'], 'reason': disposition['reason'],
+                'actor_role': stored_role(disposition, OPERATOR_ROLE_DISPOSITIONS),
                 'at': disposition['at'], 'revision': disposition['revision']},
             'state': SOURCE_RESOLVED if incident['status'] == 'resolved' else (
                 disposition['kind'] if disposition is not None else UNACKNOWLEDGED),
@@ -691,20 +721,24 @@ def _tombstone(connection: sqlite3.Connection, occurrence_id: str, members: set[
     return len(members)
 
 
-def _project(connection: sqlite3.Connection, incident: sqlite3.Row, kind: str, actor: str, reason: str,
+def _project(connection: sqlite3.Connection, incident: sqlite3.Row, kind: str, actor: str, actor_role: str,
+             reason: str,
              now: dt.datetime) -> None:
     """Book the two downstream statements as `pending` rows, in the disposition's own transaction.
 
     The document is the decision and the identifiers that locate it — never an event payload, an evidence
     parameter or a value copied out of a verdict — and its width is `OCCURRENCE_PROJECTION_LIMIT`, the bound the
-    column's CHECK carries. Re-dispositioning an occurrence replaces the stored statement and resets its
+    column's CHECK carries. `actor_role` travels with `actor` because a downstream told only "an operator named
+    X dismissed this" would print a human's sentence about an automated operator's act: the effect it should
+    act on is identical, the words it should say are not. Re-dispositioning an occurrence replaces the stored
+    statement and resets its
     attempt count: `attempts` counts failures of *what is pending now*, so an operator reading `attempts: 3`
     knows a downstream refused this statement three times and not some older one it no longer holds.
     """
     moment = utc_text(now)
     for target in OCCURRENCE_PROJECTION_KINDS:
         statement = canonical({'occurrence_id': incident['id'], 'projection': target, 'kind': kind,
-                               'actor': actor, 'reason': reason, 'at': moment,
+                               'actor': actor, 'actor_role': actor_role, 'reason': reason, 'at': moment,
                                'condition_key': incident['condition_key'],
                                'resource_id': incident['resource_id']})
         if len(statement.encode()) > OCCURRENCE_PROJECTION_LIMIT:      # the reason bound is the width bound

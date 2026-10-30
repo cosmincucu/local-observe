@@ -73,7 +73,7 @@ that a reviewer must keep honest — a route added to it silently gains a stored
 
 `x-required-role` lists the server-assigned roles that may call an operation. The standard field for
 authorisation in OpenAPI is `securitySchemes.oauth2.scopes` (or an `oidc`/`jwt` bearer format), and this
-product has no scope grant to describe: a bearer token *is* one of six identities with one role, decided by
+product has no scope grant to describe: a bearer token *is* one of seven identities with one role, decided by
 the mounted credential file, and the body may not choose it (`docs/CONTRACTS.md` §5). Modelling roles as
 scopes would imply a token that could hold a subset of them, which is not the system this is.
 
@@ -350,3 +350,88 @@ now hold facts about the same rows, and the rules below exist because of it.
   a second investigation cycle is an external effect nobody authorised.
 - **A running job cannot be withdrawn.** The `409` names the only thing that ends it — the cycle's own
   deadline — because a platform-side kill would leave a half-written journal and a claim nobody released.
+
+## D16 — An automated operator is its own credential, not a human one with a note in the body
+
+**Status:** accepted, 2026-10-30.
+
+Until this step the credential ladder had six roles and exactly one of them — `human` — could answer an
+episode or sign a silence. An agent doing that work had two bad options. It could hold a person's bearer:
+which puts a machine's decisions into a named human's log, hands the machine every other power that bearer
+carries, and leaves the log unable to say which of the two acted. Or it could type `"actor": "night-bot"`
+into the body, which §5 of `docs/CONTRACTS.md` refuses before the state layer is reached, and rightly: a claim
+about *who is asking* cannot arrive as *what is being asked* (D9 and D14 both rest on that).
+
+So the vocabulary gained a seventh role, `operator-agent`: an automated operator acting under its own identity,
+mounted as its own bearer like every other role. It may acknowledge and dismiss an occurrence, and declare,
+revise, cancel and roll forward a maintenance window or schedule. It reads everything a `reader` may read,
+which is now asserted as a rule rather than a list — `tests/test_operator_agent.py` walks the census and serves
+every `reader`-visible HTTP read to both credentials, and requires one answer. It may not approve or deny an
+action, claim or execute one, revoke a credential, book a state job, grade an investigation, run guided setup,
+or use the MCP tool surface. Those refusals are role refusals and are answered the way the platform already
+answered them: `not_authorised`, at `400` where the state layer's own sentence is what failed and `403` where a
+boundary module raised the refusal itself.
+
+What the role does **not** change is the half a reviewer should push on: an `operator-agent` disposition has a
+person's *effect*, field for field. It folds the same pending deliveries, writes the same tombstone, moves the
+same episode to the same state. Only the attribution differs, and it is stored rather than inferred — from the
+bearer the transport authenticated, never from whether the name looks like a bot.
+
+- **Three columns, one migration.** `occurrence_dispositions.actor_role`,
+  `occurrence_disposition_history.actor_role` and `maintenance_schedules.declared_by_role` (schema v15, §7's
+  snapshot rule applies), each `NOT NULL DEFAULT 'human'` and each CHECK-bound to the two roles that may sign
+  an operator act. No other table gained one: a revocation, a tombstone, a projection job and a credential
+  revocation name an actor in a column that already exists, and the role would have been a second answer to a
+  question nobody asked.
+- **A window stores its role in its document, at envelope v3.** A window is a JSON control document in
+  `notification_control`, so `author_role` joins the `declared` block and `revoked_by_role` the revocation, and
+  a declared block must carry exactly the fields its own envelope version names — which is why this is a new
+  version and not an optional key. v1 and v2 rows read `author_role` as `human`, and a revocation that names a
+  `revoked_by` but no role reads as a human's: both were written when nothing else could sign one.
+- **A schedule does not put the role inside its signature.** The tempting place was the signed document, and it
+  is wrong: the document's canonical digest is what "already declared and says something else" is computed
+  against, so widening it would make a person's plan and an agent's re-declaration of the same plan two
+  documents with one identity, and the first revision after an upgrade would refuse as a conflict. The role
+  therefore sits in the version row beside the signature, and the audit detail stays the signed text byte for
+  byte — which is what keeps an existing attestation check matching.
+- **A row without a stored role reads as `human`, by one helper.** `state.stored_role()` answers the stored
+  value, and `human` when the column is absent or null. It exists so a v14 file that arrives mid-upgrade, a row
+  written before an automated operator could exist, and a test that rewinds `user_version` all read the same
+  way, and so no read path has to remember which of the three it is looking at.
+- **The role is part of the statement it belongs to.** The identical-restatement rule in `dispositions.record`
+  now compares role with identity, kind and reason. One operator mounted twice — a person's bearer and an
+  agent's bearer, same label — has said two different things, and the second one earns a history row. Before
+  this step that pair collapsed into one decision.
+- **The refusal audit had to grow with the credential.** `Store.refusal` writes a denial only for an actor
+  whose role it can name (`refusals.attribution` answers `None` otherwise, and the refusal counts
+  `unauditable`). So `operator-agent` joined `refusals.ROLES` and `verification_policy.ROLES` as part of
+  adding the role, not afterwards: a denied automated operator is a denial an operator reads about, and a
+  policy file that configures one must not refuse to boot over a word it recognises.
+- **The MCP surface says no in words.** `tools.py` refuses the credential by name rather than treating it as
+  an unknown role. Its three capabilities are read, propose and execute, and none of them is what this role is
+  for — an automated operator acts through its own bearer on the HTTP routes, where the role that acted is
+  recorded.
+
+**Cost:** four things, all paid now rather than at first use.
+
+`state.VERSION` is 15, which means one more migration step, one more pinned table shape in
+`tests/test_state_migration.py`, and the rollback copy rule from §7 ("a digest rollback is not a data
+rollback") applying to a file that now holds three columns an older build would not recognise. The columns and
+their defaults are the conservative half of that: an older build reads a v15 file's dispositions and schedules
+exactly as it read them before, because it selects the columns it knows.
+
+Window envelopes are the opposite case, and this is the one an operator has to be told: this build writes v3
+for **every** new window, a person's as much as an agent's, and a build that predates the change counts a v3
+document `unusable` — which suppresses nothing and needs a human. So a downgrade does not merely lose the role
+attribution on silences declared since the upgrade; those windows stop covering. Nothing here prevents that,
+and `windows` on the downgraded host will say why.
+
+The dedup change means one identity mounted twice now writes two history rows where it wrote one. That is the
+point of it, and it is also the way this decision could be wrong: if a deployment ever comes to treat "same
+identity, different bearer" as one operator's retry, the comparison is the place that would have to change,
+and it should change with a reason written down.
+
+And a role file that enumerates roles must now mount the new one. `validate_credentials` refuses a credential
+whose role is anything outside the seven, in either direction, so an `operator-agent` row is accepted by the
+loader and a typo — `operator_agent`, `Operator-Agent`, `operators` — is a start-up failure naming the file,
+not a silent 401 at the first disposition.

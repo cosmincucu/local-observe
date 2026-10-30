@@ -80,7 +80,11 @@ WRITE_PREFIXES = (CREDENTIAL_PREFIX, JOB_PREFIX)
 #: here for the reason `maintenance_api` gives: under `api.py` a producer credential is refused by the GET
 #: branch's own role test before this gate runs, and the gate is the second line for a caller that uses the
 #: module directly.
-READ_ROLES = ('reader', 'proposer', 'human', 'executor')
+#: The reads any credentialed role may make; every write in the family stays `human` (or `human` plus
+#: `operator-agent`, in the maintenance sense of that pair: see `docs/api/DECISIONS.md` D16). The state
+#: route and the credential revocations are `human` alone — an automated operator that could revoke a
+#: credential could revoke the one that stops it.
+READ_ROLES = ('reader', 'proposer', 'human', 'executor', 'operator-agent')
 WRITE_ROLES = ('human',)
 STATE_ROLES = ('human',)
 

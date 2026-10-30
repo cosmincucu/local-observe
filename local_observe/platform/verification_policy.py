@@ -25,8 +25,12 @@ from .verification_records import MAX_POLICY_BYTES, VerificationPolicy
 #: The variable naming the policy file. ``LO_VERIFY_CONFIG`` is unrelated (the evidence-only worker).
 CONFIG_ENVIRONMENT = 'LO_VERIFICATION_POLICY'
 #: ``api.create_app``'s credential-role vocabulary, as the closed set a *row* may name. The app stays
-#: the authority that turns a token into an ``Actor``; this loader reads row shape only.
-ROLES = frozenset({'reader', 'producer', 'proposer', 'human', 'executor', 'summary'})
+#: the authority that turns a token into an ``Actor``; this loader reads row shape only. It carries
+#: ``operator-agent`` for the same reason it carries ``summary``: an operator who configures an automated
+#: operator must not be refused a boot by the file that has nothing to do with that role. Refusing an
+#: ``operator-agent`` row here would be a policy document holding a veto over which roles an estate may
+#: authenticate at all, and a file describing remote evidence is not that document.
+ROLES = frozenset({'reader', 'producer', 'proposer', 'human', 'executor', 'summary', 'operator-agent'})
 CREDENTIAL_ROW_KEYS = frozenset({'identity', 'role', 'token'})
 PRODUCER = 'producer'
 CREDENTIAL_LIMIT = 256

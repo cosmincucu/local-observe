@@ -54,8 +54,9 @@ reload, no cache, no network, no database, and no log line carrying a path, a va
 
 Parsing comes first and `credentials` is touched only afterwards, so a broken policy reports as a broken
 policy. `credentials` must be a list/tuple of 1–256 plain dict rows with exactly `identity`, `role`,
-`token`; the identity is checked with `state.label` and the role against the six `api.create_app` knows
-(`reader, producer, proposer, human, executor, summary`). Then, for every identity the policy names as a
+`token`; the identity is checked with `state.label` and the role against the seven `api.create_app` knows
+(`reader, producer, proposer, human, executor, summary, operator-agent`) — the same list, deliberately, so a
+deployment that configures an automated operator does not fail to boot over a role the platform recognises. Then, for every identity the policy names as a
 verifier: **at least one `producer` row must carry it and no row of any other role may.** Two producer
 rows for one verifier (a pair across a token rotation) are fine, and valid rows for roles that never
 verify are nobody's business here.

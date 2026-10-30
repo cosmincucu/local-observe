@@ -115,7 +115,8 @@ import uuid
 from local_observe import topology
 from local_observe.inventory.validation import InvalidInventory, canonical, digest, timestamp, utc_text
 from local_observe.log import get_logger
-from .state import (Actor, GROUPING_TABLE, MAINTENANCE_SCHEDULE_VERSION_LIMIT, MAINTENANCE_WINDOW_END,
+from .state import (HUMAN, OPERATOR_AGENT, OPERATOR_ROLES, Actor, GROUPING_TABLE,
+                    MAINTENANCE_SCHEDULE_VERSION_LIMIT, MAINTENANCE_WINDOW_END,
                     MAINTENANCE_WINDOW_INDEX, MAINTENANCE_WINDOW_KEYS, MAINTENANCE_WINDOW_LIVE,
                     StateError, Store, clock, control_declare, control_write, identifier, label,
                     maintenance_key, notification_id, record_suppression, require, validate_event)
@@ -204,14 +205,14 @@ WINDOW_ID_KEYS = WINDOW_KEYS + WINDOW_ORIGIN_KEYS
 #: that no append-only audit row names is never applied, whatever else it claims, so "a window exists"
 #: means "a human's declaration of it survives in the one table that cannot be rewritten". Checking it
 #: costs one primary-key lookup per candidate window, on the read path, and nothing at all on the write.
-WINDOW_DOCUMENT_VERSION = 2
+WINDOW_DOCUMENT_VERSION = 3
 #: Both envelope versions this build reads. Version 1 stays on the list because a window is durable state
 #: that outlives the build that wrote it, and because the alternative — refusing a v1 row — is a change
 #: that stops suppressing work somebody is still doing. A v1 declared block carries no `explains`, and `explains`
 #: reads that silence as *class-blind*: every finding inside the selector is covered, which is exactly the
 #: behaviour that row was approved under. Narrowing a silence an operator is relying on is a human act,
 #: and the way to do it is to revoke that window and declare a v2 one with the classes named.
-WINDOW_DOCUMENT_VERSIONS = (1, 2)
+WINDOW_DOCUMENT_VERSIONS = (1, 2, 3)
 WINDOW_DOCUMENT_KEYS = ('schema_version', 'declared', 'revoked', 'attest')
 #: The declared block's whole field set, in the shape the audit detail stores it. A stored window with an
 #: extra or a missing field is not a window this build declared, and is not applied — so the set is keyed
@@ -224,9 +225,20 @@ DECLARED_KEYS = ('id', 'resource_id', 'rule_id', 'starts_at', 'ends_at', 'reason
 #: module-level map, because `tests/test_flap_folding.py` refuses a container that survives a call in this
 #: module — a read path must ask the file, not a cache.
 DECLARED_KEYS_V2 = DECLARED_KEYS + WINDOW_ORIGIN_KEYS
-#: The two fields a revocation adds. Stored window rows carry them as null until then, so the shape a
-#: reader sees is the shape the typed table had and no caller has to branch on where the state lives.
-REVOKE_KEYS = ('revoked_at', 'revoked_by')
+#: The same block again, plus the role of the author named in it. `operator-agent` joined the roles that
+#: may sign a silence, and a stored window that says only "declared by `night-bot`" is a window a reader
+#: cannot tell apart from one a person declared — while `author` alone is also the field a reader would
+#: otherwise assume names a person. The value is the role the server authenticated, never a body field
+#: (`api_contract.assert_no_actor_claim` refuses one on the way in), and it is validated on read like every
+#: other field of the block: a row naming a role the platform cannot authenticate is not applied.
+AUTHOR_ROLE = 'author_role'
+DECLARED_KEYS_V3 = DECLARED_KEYS_V2 + (AUTHOR_ROLE,)
+#: The fields a revocation adds. A window that was revoked before this role existed carries the first two
+#: only, so `_envelope` accepts both shapes and `_revoked` reports the older one as a `human` act — the only
+#: kind of revocation this build's predecessors could make. The shape a reader sees stays one shape: nulls
+#: until one is revoked, as the typed table's columns were, and no caller branches on where the state lives.
+REVOKE_KEYS = ('revoked_at', 'revoked_by', 'revoked_by_role')
+LEGACY_REVOKE_KEYS = ('revoked_at', 'revoked_by')
 
 # --- what a window explains -----------------------------------------------------------------
 #: The closed vocabulary of condition *classes*. A class is derived from fields the canonical envelope
@@ -469,7 +481,7 @@ def declare_window(store: Store, declaration: dict[str, Any], actor: Actor, *,
             the HTTP door at `platform/maintenance.py` always names the list it was given (defaulting to
             `EXPLAINED_BY_DEFAULT`) rather than leaving it out.
     """
-    require(actor, 'human')
+    require(actor, *OPERATOR_ROLES)
     now = clock(now)
     unknown = set(declaration) - set(WINDOW_KEYS) - set(WINDOW_ORIGIN_KEYS)
     if unknown:
@@ -508,7 +520,8 @@ def declare_window(store: Store, declaration: dict[str, Any], actor: Actor, *,
             raise StateError(f'schedule_version must be 1..{MAINTENANCE_SCHEDULE_VERSION_LIMIT}')
     declared = {'id': window_id(declaration), 'resource_id': resource_id, 'rule_id': rule_id,
                 'starts_at': utc_text(start), 'ends_at': utc_text(end), 'reason': reason,
-                'author': actor.identity, 'declared_at': utc_text(now), 'explains': explains,
+                'author': actor.identity, AUTHOR_ROLE: actor.role, 'declared_at': utc_text(now),
+                'explains': explains,
                 'schedule_id': schedule_id, 'schedule_version': schedule_version,
                 'occurrence_id': occurrence_id}
     key = maintenance_key(declared['id'])
@@ -539,7 +552,7 @@ def declare_window(store: Store, declaration: dict[str, Any], actor: Actor, *,
                     'attest': int(connection.execute('SELECT last_insert_rowid()').fetchone()[0])}
         control_declare(connection, key, canonical(document), now)
     return {'status': 'declared', 'id': declared['id'],
-            'window': dict(declared, revoked_at=None, revoked_by=None)}
+            'window': dict(declared, revoked_at=None, revoked_by=None, revoked_by_role=None)}
 
 
 def revoke_window(store: Store, window: str, actor: Actor, *,
@@ -565,7 +578,7 @@ def revoke_window(store: Store, window: str, actor: Actor, *,
             stored document is not readable enough to be signed for what it is, or that window is already
             revoked.
     """
-    require(actor, 'human')
+    require(actor, *OPERATOR_ROLES)
     now = clock(now)
     identifier(window)
     key = maintenance_key(window)
@@ -579,7 +592,8 @@ def revoke_window(store: Store, window: str, actor: Actor, *,
                              ' needs a human to reconcile it')
         if document['revoked'] is not None:
             raise StateError('Maintenance window is already revoked')
-        document['revoked'] = {'revoked_at': utc_text(now), 'revoked_by': actor.identity}
+        document['revoked'] = {'revoked_at': utc_text(now), 'revoked_by': actor.identity,
+                               'revoked_by_role': actor.role}
         control_write(connection, key, canonical(document), now)
         store.audit(connection, now, actor.identity, 'maintenance.revoked', window,
                     {'ends_at': document['declared']['ends_at'], 'revoked_at': utc_text(now)})
@@ -710,12 +724,10 @@ def windows_spanning(store: Store, *, span_from: dt.datetime, span_to: dt.dateti
             start, end = _instant(declared['starts_at']), _instant(declared['ends_at'])
             if end <= span_from or start >= span_to:
                 continue
-            revoke = document['revoked'] or {}
             attested = _attested(db, declared, document['attest'])
             if not attested:
                 unattested += 1
-            found.append(dict(_view(declared), revoked_at=revoke.get('revoked_at'),
-                              revoked_by=revoke.get('revoked_by'), attested=attested,
+            found.append(dict(_view(declared), **_revoked(document['revoked']), attested=attested,
                               starts_before_span=start < span_from, ends_after_span=end > span_to))
         found.sort(key=lambda window: (window['starts_at'], window['id']))
     return {'windows': found, 'count': len(found), 'scanned': len(rows), 'unusable': unusable,
@@ -751,9 +763,7 @@ def window_by_id(store: Store, window: str) -> dict[str, Any]:
         if declared is None:
             raise StateError('Maintenance window declaration is unreadable; it applies to nothing and'
                              ' needs a human to reconcile it')
-        revoke = document['revoked'] or {}
-        return dict(_view(declared), revoked_at=revoke.get('revoked_at'),
-                    revoked_by=revoke.get('revoked_by'),
+        return dict(_view(declared), **_revoked(document['revoked']),
                     attested=_attested(db, declared, document['attest']),
                     document_version=document['schema_version'])
 
@@ -1365,6 +1375,8 @@ def _declared_keys(version: Any) -> tuple[str, ...] | None:
         return DECLARED_KEYS
     if version == 2:
         return DECLARED_KEYS_V2
+    if version == 3:
+        return DECLARED_KEYS_V3
     return None
 
 
@@ -1396,7 +1408,7 @@ def _envelope(value: Any) -> dict[str, Any] | None:
             or set(document['declared']) != set(keys)
             or not (document['revoked'] is None
                     or (isinstance(document['revoked'], dict)
-                        and set(document['revoked']) == set(REVOKE_KEYS)))
+                        and set(document['revoked']) in (set(REVOKE_KEYS), set(LEGACY_REVOKE_KEYS))))
             or isinstance(document['attest'], bool) or not isinstance(document['attest'], int)
             or document['attest'] <= 0):
         return None
@@ -1430,6 +1442,8 @@ def _declared(block: Any, version: int = WINDOW_DOCUMENT_VERSION) -> dict[str, A
         else:
             identifier(resource_id)
         label(block['author'])
+        if version >= 3 and block[AUTHOR_ROLE] not in OPERATOR_ROLES:
+            return None
         reason = block['reason']
         if (not isinstance(reason, str) or not 1 <= len(reason) <= MAX_REASON_CHARS
                 or reason != ' '.join(reason.split()) or not REASON_PATTERN.match(reason)):
@@ -1468,7 +1482,22 @@ def _view(declared: dict[str, Any]) -> dict[str, Any]:
     view = dict(declared)
     for key in WINDOW_ORIGIN_KEYS:
         view.setdefault(key, None)
+    view.setdefault(AUTHOR_ROLE, HUMAN)
     return view
+
+
+def _revoked(revoke: Any) -> dict[str, Any]:
+    """Return the three revocation fields one window row carries, in the shape every reader sees.
+
+    An unread revocation is three nulls, which is what a live window has always answered with. A revocation
+    that names a `revoked_by` but no role was written by a build where only a human could cancel a silence,
+    so it reads as `human` — the same rule schema v15 applies to a stored disposition or schedule version,
+    and for the same reason: it is a fact about the writer, not a guess about it.
+    """
+    signed = revoke if isinstance(revoke, dict) and revoke.get('revoked_by') else None
+    return {'revoked_at': None if signed is None else signed.get('revoked_at'),
+            'revoked_by': None if signed is None else signed['revoked_by'],
+            'revoked_by_role': None if signed is None else signed.get('revoked_by_role') or HUMAN}
 
 
 def _classes(value: Any, *, stored: bool = False) -> list[str] | None:
@@ -1626,9 +1655,7 @@ def _readable_window(value: Any) -> dict[str, Any]:
                 if document is not None else None)
     if declared is None:
         raise StateError('Maintenance window declaration is unreadable; reconcile it, never re-declare it')
-    revoke = document['revoked'] or {}
-    return dict(_view(declared), revoked_at=revoke.get('revoked_at'),
-                revoked_by=revoke.get('revoked_by'))
+    return dict(_view(declared), **_revoked(document['revoked']))
 
 
 def _delivery_row(connection: sqlite3.Connection, event_id: str) -> str | None:

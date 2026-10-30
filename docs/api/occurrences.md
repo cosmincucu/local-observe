@@ -2,8 +2,8 @@
 
 An **alert occurrence** is one episode of one alert condition, and an operator can do two things to it
 without touching the rule that produced it: **acknowledge** it ("I have seen this, stop repeating it") or
-**dismiss** it ("this episode is not actionable, close it"). Both are durable, both name the human who did
-them and why, and neither edits a rule, a condition or a measurement.
+**dismiss** it ("this episode is not actionable, close it"). Both are durable, both name who did them, what
+kind of credential that was, and why — and neither edits a rule, a condition or a measurement.
 
 The three states below are separate columns of one row, and the whole document exists to keep them
 separate. A reviewer who conflates any two of them will produce a system that either loses a real page or
@@ -12,7 +12,7 @@ re-pages someone who already answered.
 | Axis | Question it answers | Where it lives | Who may move it |
 |---|---|---|---|
 | Measured condition | Is the source still reporting this? | `incidents.status`, `conditions.status` (`state.py`) | Only a producer, by filing a verdict. |
-| Operator disposition | What has a human decided about this episode? | `occurrence_dispositions`, `occurrence_disposition_history`, `occurrence_dismissals` (schema v12, `dispositions.py`) | Only a `human` credential, through `POST …/acknowledgements` or `POST …/dismissals`. |
+| Operator disposition | What has an operator decided about this episode? | `occurrence_dispositions`, `occurrence_disposition_history`, `occurrence_dismissals` (schema v12, `dispositions.py`; the role column arrives at v15) | A `human` credential or an `operator-agent` one, through `POST …/acknowledgements` or `POST …/dismissals`. The two have the same effect and are stored apart (§3, D16). |
 | Delivery state | Has a message about this gone out? | `outbox.status`, `notification_suppressions`, `notification_attempts` | Only the delivery rail, under `notification_safety.reserve`. |
 
 Nothing in this document changes the first axis: a disposition is not a resolution, and a resolution is not
@@ -61,8 +61,8 @@ measurement — which is what keeps a replay from desynchronising it.
 | `state` | Meaning | Derived from |
 |---|---|---|
 | `unacknowledged` | Nobody has spoken for this episode. | No disposition row, episode still open. |
-| `acknowledged` | A human has seen it. Repeats stop; the condition stays open. | `kind = acknowledged`, episode still open. |
-| `dismissed` | A human closed this episode as not actionable. | `kind = dismissed`, episode still open. |
+| `acknowledged` | An operator has seen it — a person or an automated operator. Repeats stop; the condition stays open. | `kind = acknowledged`, episode still open. |
+| `dismissed` | An operator closed this episode as not actionable. | `kind = dismissed`, episode still open. |
 | `source-resolved` | The source cleared it. The episode is over, whatever an operator said before. | `incidents.status = resolved`. |
 
 Transitions an operator may cause, and the one the source causes:
@@ -95,7 +95,7 @@ unacknowledged ──POST acknowledgements──▶ acknowledged ──POST dism
   condition nobody fixed is allowed to look unresolved.
 * **An operator may change their mind forward, not backward.** `acknowledged → dismissed` is accepted.
   `dismissed → acknowledged` is refused with `409 conflict` and one sentence, because an acknowledgement
-  after a dismissal asserts "a human is working on this" and is better served by the new episode the fix
+  after a dismissal asserts that somebody is working on this and is better served by the new episode the fix
   will produce than by quietly re-arming a tombstoned one. A dismissal restated with a **different reason**
   is refused too, with `409 conflict` and its own sentence: the tombstones name the conditions that existed
   when the first dismissal ran, so a second one would cover a member that joined since, which is a wider
@@ -126,13 +126,26 @@ One `Store.transaction()` (`BEGIN IMMEDIATE`), in this order, committing or unwi
    `notification_suppressions` row, one `notification.suppressed` audit row naming the disposition), reusing
    `state.record_suppression` so `presentation.delivery_route` and `Store.retry_notification` see the same
    fact they already see for every other fold;
-5. one `occurrence.disposed` audit row carrying the actor, the kind, the revision and the counts;
+5. one `occurrence.disposed` audit row carrying the actor, the actor's role, the kind, the revision and the
+   counts;
 6. the retryable projection records (§5).
 
 The audit actor is the identity in the bearer credential the transport compared with
-`secrets.compare_digest`. A body field naming an identity, a role or a credential is refused with `400
-actor_claim_refused` before anything is written (`api_contract.assert_no_actor_claim`), so an agent token
-cannot acknowledge on a human's behalf and a human credential cannot act as somebody else.
+`secrets.compare_digest`, and the audit detail names the **role** that credential presented: `human` for a
+person, `operator-agent` for an automated operator acting under its own identity (D16). That role is stored
+beside the identity in the effective row, in every history row (`actor_role`) and in the projection payload,
+so an answer given by a machine is never read back as an answer given by a person — and never read back as a
+weaker answer either, because the fold, the tombstone and the state move are the same code for both.
+
+A body field naming an identity, a role or a credential is refused with `400 actor_claim_refused` before
+anything is written (`api_contract.assert_no_actor_claim`), so an agent token cannot acknowledge on a human's
+behalf, a human credential cannot act as somebody else, and `"role": "human"` typed into an acknowledgement is
+a refused claim rather than a credential.
+
+The identical-restatement rule is role-sensitive for the same reason: a restatement is the same decision only
+when kind, reason, identity **and role** all match. One operator mounted twice — a person's bearer and an
+agent's bearer sharing a name — has said two different things, and the second statement earns its own history
+row instead of being folded into the first.
 
 **A leased or dispatched message is not recalled.** `claim_notification` may be holding a lease on a row of
 this episode, or the channel may already have taken it. Neither is undone — there is no recall verb in the
@@ -214,8 +227,8 @@ because holding is the direction that does not page somebody twice.
 They are **not** acknowledgements on this surface, and cannot be made into one:
 
 * a page-link tap proves that a message reached a human surface and that *someone holding the token*
-  answered it. It names no human, and `docs/CONTRACTS.md` §5 forbids reading a payload field as a claim
-  that an agent is a human. So it yields no `actor`, no `reason`, and no row in
+  answered it. It names nobody — no identity and no role — and `docs/CONTRACTS.md` §5 forbids reading a
+  payload field as a claim about which credential is asking. So it yields no `actor`, no `reason`, and no row in
   `occurrence_disposition_history`;
 * the disposition reads answer `unacknowledged` for an episode whose only evidence is a tap, and
   `legacy_evidence` names what was seen (`action-decided`, `approval-intent`) beside it. An operator can see
@@ -232,11 +245,11 @@ conditional write, and the bounded `limit`/`cursor` page helper. Roles and refus
 
 | Route | Role | Notes |
 |---|---|---|
-| `GET /v1/alert-occurrences` | `reader`, `proposer`, `human`, `executor` | One bounded page of episodes, oldest first, with disposition and delivery roll-ups. No filters: `page_params` accepts only `limit` and `cursor`, and refusing rather than clamping is the rule (`docs/api/COVERAGE.md`). |
-| `GET /v1/alert-occurrences/{id}` | `reader`, `proposer`, `human`, `executor` | One occurrence, with `ETag` = its revision. |
-| `GET /v1/alert-occurrences/{id}/history` | `reader`, `proposer`, `human`, `executor` | Append-only history, oldest first, bounded page. |
-| `POST /v1/alert-occurrences/{id}/acknowledgements` | `human` | Body: `reason` (required), `expected_revision` (optional). Honours `Idempotency-Key`. |
-| `POST /v1/alert-occurrences/{id}/dismissals` | `human` | Body: `reason` (required), `expected_revision` (optional). Honours `Idempotency-Key`. |
+| `GET /v1/alert-occurrences` | `reader`, `proposer`, `human`, `executor`, `operator-agent` | One bounded page of episodes, oldest first, with disposition and delivery roll-ups. No filters: `page_params` accepts only `limit` and `cursor`, and refusing rather than clamping is the rule (`docs/api/COVERAGE.md`). |
+| `GET /v1/alert-occurrences/{id}` | `reader`, `proposer`, `human`, `executor`, `operator-agent` | One occurrence, with `ETag` = its revision. |
+| `GET /v1/alert-occurrences/{id}/history` | `reader`, `proposer`, `human`, `executor`, `operator-agent` | Append-only history, oldest first, bounded page. Every row names its actor and the role that actor presented. |
+| `POST /v1/alert-occurrences/{id}/acknowledgements` | `human`, `operator-agent` | Body: `reason` (required), `expected_revision` (optional). Honours `Idempotency-Key`. |
+| `POST /v1/alert-occurrences/{id}/dismissals` | `human`, `operator-agent` | Body: `reason` (required), `expected_revision` (optional). Honours `Idempotency-Key`. |
 
 Two of the answers on these addresses do not wear the machine envelope, because they are the transport's
 gates and not refusals of this route family:
@@ -284,10 +297,12 @@ not_authorised` in the envelope.
   dismissal is a fold cause.
 * **No disposition over a group as an addressable unit** beyond the incident the operator already sees. A
   grouped incident *is* one occurrence (§1); there is no second id to disposition.
-* **No disposition from a CLI flag that mints a human.** The role comes from a mounted credential. The
-  MCP surface stays excluded for the same reason §6 gives, and says so in the census.
+* **No disposition from a CLI flag that mints a human.** The role comes from a mounted credential — a person's
+  or an automated operator's, never one a command line asserted. The MCP surface stays excluded for the reason
+  §6 gives and `docs/api/DECISIONS.md` D16 states: an automated operator acknowledges with its own bearer on
+  these routes, where the role that acted is recorded.
 * **No automatic dismissal of repeats.** Repetition is `platform/suppression.py`'s subject (flap folding,
-  dependency, declared windows), and it is a measurement judgement. A dismissal is a human judgement about
-  one episode, and the two must not be conflated: a fold says "this platform has decided not to page", a
-  dismissal says "a named human decided this episode is not actionable", and only the second names a
-  person.
+  dependency, declared windows), and it is a measurement judgement. A dismissal is an operator's judgement
+  about one episode, and the two must not be conflated: a fold says "this platform has decided not to page", a
+  dismissal says "a named credential decided this episode is not actionable, in this role", and only the second
+  names who.

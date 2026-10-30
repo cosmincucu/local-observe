@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from local_observe.inventory.validation import canonical, timestamp
-from .state import StateError, identifier, label
+from .state import OPERATOR_AGENT, StateError, identifier, label
 
 #: The one result budget, named so the registry, the transport and the tests agree on it. The refusal
 #: sentence below is the one v0.1's readers already get, kept word for word.
@@ -76,6 +76,14 @@ REFUSED_ROLES = {
     'human': 'a human-role credential may not be handed to an MCP agent (CONTRACTS §5, component contract)',
     'producer': 'an event producer posts to /v1/events with its own credential and needs no MCP tool',
     'summary': 'a summary credential may not write; give a reader role instead',
+    # An automated operator is refused here too, and not because the role is unknown: what its credential
+    # opens is the disposition and maintenance routes, which no tool on this surface carries, and the three
+    # capabilities it does carry (read, propose, execute) are the ones an operator-agent credential must not
+    # reach — an automated operator may not claim or execute (`docs/api/DECISIONS.md` D16). The sentence says
+    # so rather than answering "unknown role", which would send an operator to check the file for a typo.
+    OPERATOR_AGENT: 'an operator-agent credential acknowledges occurrences and maintains windows over'
+                    ' HTTP, uses none of this server\'s three tools, and may not claim or execute; mount a'
+                    ' reader credential for an MCP agent',
 }
 #: Both mounted artifacts are bounded: a file that is a directory, empty, oversized or full of control
 #: characters is a mistake rather than a configuration.
@@ -281,7 +289,8 @@ class ToolHints:
     """What a tool may do, in the words the MCP annotation set uses, plus the roles that may call it.
 
     ``roles`` is the *local* gate, and it is not the authority: the platform refuses the same call again
-    from its own mounted role list. The two agree because both read the same six role names.
+    from its own mounted role list. The two agree because both read the same seven role names — and
+    both refuse the roles that may not act through a tool, each with its own sentence (`REFUSED_ROLES`).
     """
 
     capability: str

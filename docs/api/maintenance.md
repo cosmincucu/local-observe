@@ -1,9 +1,13 @@
 # Planned maintenance: windows, schedules and outcomes
 
-Planned maintenance is a **signed, bounded silence**. A human says which part of the estate is about to be
-worked on, for how long, and what the platform should stop paging during it. Everything else in this
-document is the consequence of that sentence: the silence has an author, an end, a scope that cannot drift,
-and a record of what it cost.
+Planned maintenance is a **signed, bounded silence**. An operator says which part of the estate is about to
+be worked on, for how long, and what the platform should stop paging during it. Everything else in this
+document is the consequence of that sentence: the silence has an author, an author kind, an end, a scope that
+cannot drift, and a record of what it cost.
+
+An **operator** is one of two credentials: a `human` bearer, which is a person, or an `operator-agent` bearer,
+which is an automated operator acting under its own identity. Both may sign a silence and both may end one;
+they differ only in the role stored with the act, so a report can say who did it (`docs/api/DECISIONS.md` D16).
 
 Two objects exist because those two facts are not the same:
 
@@ -36,14 +40,15 @@ The rules themselves are machine-readable in [`openapi.yaml`](openapi.yaml) and
 
 ## Prerequisites
 
-* A platform database at **schema v14** (`GET /v1/health` reports `schema_version`; if it is lower, run
+* A platform database at **schema v15** (`GET /v1/health` reports `schema_version`; if it is lower, run
   `lo-platform --database <path> migrate`, which verifies a copy of the file first and refuses to open a
   database newer than the build). No stored window, incident or audit row is rewritten by that step — the
   steps above v13 add the two administration tables (`platform_jobs`, `credential_revocations`), which this
-  family neither reads nor writes (`docs/api/administration.md`).
-* A credential whose role is **`human`** for every write. `producer` may neither write nor read this route
-  family; `reader`, `proposer`, `human` and `executor` may read it; a `summary` credential is refused on
-  every path, including the reads.
+  family neither reads nor writes (`docs/api/administration.md`). The v15 step adds one column to
+  `maintenance_schedules`, and no stored window, schedule or audit row is rewritten by it.
+* A credential whose role is **`human`** or **`operator-agent`** for every write. `producer` may neither write
+  nor read this route family; `reader`, `proposer`, `human`, `executor` and `operator-agent` may read it; a
+  `summary` credential is refused on every path, including the reads.
 * A built inventory index, passed to the app as `index_path`, **only** for a `service` scope or a
   service-interval query. Without it those two refuse; a `resource` or `rule` scope needs nothing.
 * An HTTP body under the transport's request limit, and `Content-Type: application/json`. Bodies are
@@ -55,19 +60,19 @@ The rules themselves are machine-readable in [`openapi.yaml`](openapi.yaml) and
 
 | Method | Path | Roles | What it does |
 | --- | --- | --- | --- |
-| `POST` | `/v1/maintenance-windows` | `human` | Declare one window over a scope. Expands to one window per service member. |
-| `GET` | `/v1/maintenance-windows` | `reader` `proposer` `human` `executor` | The windows live now, with `count` and the bounds the scan read against (`max_live_windows`, `max_rows`, `scanned`, `expired`, `revoked`, `unattested`, `bound_exceeded`). |
+| `POST` | `/v1/maintenance-windows` | `human` `operator-agent` | Declare one window over a scope. Expands to one window per service member. |
+| `GET` | `/v1/maintenance-windows` | `reader` `proposer` `human` `executor` `operator-agent` | The windows live now, with `count` and the bounds the scan read against (`max_live_windows`, `max_rows`, `scanned`, `expired`, `revoked`, `unattested`, `bound_exceeded`). |
 | `GET` | `/v1/maintenance-windows/{id}` | same | One window as stored, plus its outcome. Unknown id is a `404`. |
 | `GET` | `/v1/maintenance-windows/{id}/history` | same | Declaration, cancellation and every page it folded, with outcome evidence. |
-| `POST` | `/v1/maintenance-windows/{id}/cancellations` | `human` | Cancel one window. Empty body. |
-| `POST` | `/v1/maintenance-schedules` | `human` | Declare a recurring plan and materialize its first bounded slice. |
-| `GET` | `/v1/maintenance-schedules` | `reader` `proposer` `human` `executor` | Active plans, or `?state=all` / `?state=cancelled`. |
+| `POST` | `/v1/maintenance-windows/{id}/cancellations` | `human` `operator-agent` | Cancel one window. Empty body. |
+| `POST` | `/v1/maintenance-schedules` | `human` `operator-agent` | Declare a recurring plan and materialize its first bounded slice. |
+| `GET` | `/v1/maintenance-schedules` | `reader` `proposer` `human` `executor` `operator-agent` | Active plans, or `?state=all` / `?state=cancelled`. |
 | `GET` | `/v1/maintenance-schedules/{id}` | same | The current version, the whole occurrence list, `materialized_through`. |
 | `GET` | `/v1/maintenance-schedules/{id}/history` | same | Every version, oldest first, each with its stored state. |
-| `PATCH` | `/v1/maintenance-schedules/{id}` | `human` | Append a version. Requires `expected_version`. |
-| `POST` | `/v1/maintenance-schedules/{id}/cancellations` | `human` | Stop the plan and its unstarted windows. Empty body. |
-| `POST` | `/v1/maintenance-schedules/{id}/materializations` | `human` | Roll materialization forward one bounded slice. Empty body. |
-| `GET` | `/v1/maintenance-intervals` | `reader` `proposer` `human` `executor` | A span (`from`/`to`) or an instant (`at`) against the windows planned around it. |
+| `PATCH` | `/v1/maintenance-schedules/{id}` | `human` `operator-agent` | Append a version. Requires `expected_version`. |
+| `POST` | `/v1/maintenance-schedules/{id}/cancellations` | `human` `operator-agent` | Stop the plan and its unstarted windows. Empty body. |
+| `POST` | `/v1/maintenance-schedules/{id}/materializations` | `human` `operator-agent` | Roll materialization forward one bounded slice. Empty body. |
+| `GET` | `/v1/maintenance-intervals` | `reader` `proposer` `human` `executor` `operator-agent` | A span (`from`/`to`) or an instant (`at`) against the windows planned around it. |
 
 `PATCH` exists on the schedule path and nowhere else in the API. A plan edit has to be a distinct verb: a
 `POST` to the collection mints a second plan rather than appending a version to the one the operator is
@@ -91,7 +96,7 @@ UUIDs; `rule` is the rule label as a detector files it.
 | `rule` | That rule on **any** resource: one window, no resource selector. Use it when the probe itself is being maintained. | Trivially. |
 | `service` | The service resource and every resource whose `runs-on` / `depends-on` relation points at it, as the built inventory index reports them. | **At declaration.** The answer carries `members` and declares one window per member. |
 
-A service scope is expanded once, when a human signs the plan, because the delivery path cannot match a
+A service scope is expanded once, when an operator signs the plan, because the delivery path cannot match a
 service: a canonical event names a resource and a rule, never a service. A window whose extent changed
 whenever somebody re-ran a discovery job would be a silence nobody declared. A member added tomorrow is not
 covered by a window signed today, and the answer says which members it did cover.
@@ -193,7 +198,7 @@ this build has actually turned into silences. The two differ until a plan is rol
 
 A pass turns at most `MAX_MATERIALIZED_OCCURRENCES` (8) occurrences into windows and reaches at most
 `MAX_HORIZON_SECONDS` (35 days) ahead of the clock. Nothing schedules that pass: it happens on declaration,
-on edit, and when a human `POST`s `…/materializations`. A plan nobody rolls forward simply stops producing
+on edit, and when an operator `POST`s `…/materializations`. A plan nobody rolls forward simply produces
 windows — it does not suppress forever, which is the safe direction.
 
 `GET /v1/maintenance-schedules/{id}` reports `occurrence_bound`, `materialized_through`,
@@ -276,6 +281,21 @@ Every folded page records the window that folded it (`window_id`, `condition_cla
 `notification.suppressed` audit row, so attribution survives a restart, a re-open and a report written
 months later. `GET /v1/maintenance-windows/{id}/history` reads them back through the `maintenance_attribution`
 index and names the incident and notification each page belongs to.
+
+**Every signature names its kind of operator.** A window stores `author_role` in its declared block and
+`revoked_by_role` in a revocation; a schedule stores `declared_by_role` on each version row; the window
+timeline answers `by_role` beside `by`, and a cancellation answer names `cancelled_by_role` beside
+`cancelled_by`. The words are `human` and `operator-agent`, read off the bearer that signed the request and
+never out of a body — a submitted `role` is refused with `400 actor_claim_refused` like any other actor claim.
+Two reads of the same plan can therefore disagree about who was steering it, which is the point: version 1 may
+say `declared_by: operator, declared_by_role: human` and version 2 `declared_by: night-bot,
+declared_by_role: operator-agent`. Nothing about the *effect* differs — a silence signed by an automated
+operator covers the same findings, and a person may cancel it as easily as the agent that declared it.
+
+Rows written before an automated operator could exist read as `human`, because that is what wrote them: a
+window whose declared block carries no role is an envelope v1 or v2 (`document_version` says which), and a
+revocation naming a `revoked_by` with no role is the two-field block an older build signed. This build writes
+envelope **v3**, which is the envelope that carries `author_role`.
 
 **Two windows may cover the same resource at the same time, and each keeps its own list.** When more than
 one live window covers a finding, the covering set is reported and the first match takes the page, so
@@ -408,6 +428,28 @@ would turn a report into an SQLite error. Authority stays where it always was �
 re-checks every window it applies against the envelope, the declaration and the attestation, so an index key
 is a search term and never a reason to silence a pager.
 
+## Schema v15: the role that signed the act
+
+Migration 15 adds three columns and changes no row's meaning: `occurrence_dispositions.actor_role`,
+`occurrence_disposition_history.actor_role` and `maintenance_schedules.declared_by_role`, each
+`NOT NULL DEFAULT 'human'` and each CHECK-bound to `human` or `operator-agent`. Every row a v14 file already
+held therefore reads as a person's act, which is the truth about who could sign one then, and a build that
+predates the step still selects the columns it knows. Windows are not in that list because a window is a JSON
+control document: its role lives in envelope v3, not in a column.
+
+The role is deliberately absent from the *signed* schedule document. That document's canonical digest is what
+"already declared, and says something else" is computed against, so adding a field to it would make a person's
+plan and an automated operator's re-declaration of the same plan two digests with one identity, and the first
+revision after an upgrade would refuse as a conflict. Storing the role beside the signature keeps one digest
+per version and keeps the attestation check matching its own audit row.
+
+**The downgrade to know about.** This build writes envelope v3 for every new window — a person's as much as an
+agent's — and a build that predates the change counts a v3 document `unusable`, which suppresses nothing. So on
+a rolled-back host, silences declared since the upgrade stop covering findings rather than losing a field. The
+windows stay visible in `windows` and in the `unusable` count of the list read; nothing is deleted, and
+re-declaring them on the older build is the fix. `docs/api/DECISIONS.md` D16 states the same cost as the
+decision's, and `docs/CONTRACTS.md` §7 still owns the snapshot rule.
+
 **Migration and rollback.** `lo-platform --database <path> migrate` makes and integrity-checks a
 `<path>.pre-v<from>-<utc stamp>.db` copy before applying each missing step, each in its own transaction
 ending in its own `PRAGMA user_version`, auditing one `schema.migrated` row per step. A crash between steps
@@ -421,7 +463,8 @@ file walks to reach the current version.
 
 * **No retroactive silence.** See above. If you need to explain a past outage, the interval read tells you
   what *was* planned; nothing here can add a window to a span that already closed.
-* **No background roll-forward.** Materialization is a human write. A plan that is never rolled forward
+* **No background roll-forward.** Materialization is an operator's write — signed by a bearer, by hand or by
+  an automated operator, and recorded as which. A plan that is never rolled forward
   stops suppressing at its horizon — deliberately, since a plan that keeps silencing while nobody is looking
   is the failure this feature must not have.
 * **Service membership is a snapshot.** Taken at declaration, per window. Re-declare to move it.

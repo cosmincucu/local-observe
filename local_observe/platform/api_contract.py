@@ -1,6 +1,6 @@
 """The shared HTTP boundary: error envelope, request id, idempotency, revision, paging, actor.
 
-`local_observe/platform/api.py` is a hand-written ASGI app with six server-assigned roles and a
+`local_observe/platform/api.py` is a hand-written ASGI app with seven server-assigned roles and a
 decade of response bodies that installed clients and this repository's own tests assert byte for byte
 (`tests/test_api_errors.py` pins `{'error': 'conflict', 'detail': 'Action is not pending'}`). A second
 route family — alert-occurrence acknowledgement, maintenance windows — must not invent its own answer

@@ -21,6 +21,12 @@ work in advance needs on top of it, and deliberately owns none of the enforcemen
   quiet, with the declared span and the span the platform actually held quiet side by side and the window
   that produced each named.
 
+Two roles sign planned work, and they are the two `state.OPERATOR_ROLES` names: the person on call
+behind a `human` credential, and the automated operator behind an `operator-agent` one. Both may declare,
+revise, cancel and roll forward a plan, and the version row stores which of them did — the effect of a
+plan is not decided by who typed it, but a report that said "a human scheduled this" about an agent's act
+would be a report that could not be trusted for anything else.
+
 Two claims here are load-bearing, and both are refusals.
 
 **Retroactive declarations are not supported** (`RETROACTIVE`). A window whose `starts_at` is already
@@ -65,8 +71,9 @@ from local_observe.inventory.validation import InvalidInventory, canonical, time
 from local_observe.log import get_logger
 from . import suppression
 from .state import (MAINTENANCE_ATTRIBUTION_WINDOW, MAINTENANCE_SCHEDULE_TABLE,
-                    MAINTENANCE_SCHEDULE_VERSION_LIMIT, MAINTENANCE_SUPPRESSED_OPERATION, Actor,
-                    StateError, Store, clock, control_write, identifier, label, require)
+                    MAINTENANCE_SCHEDULE_VERSION_LIMIT, MAINTENANCE_SUPPRESSED_OPERATION, OPERATOR_ROLE_SCHEDULES,
+                    OPERATOR_ROLES, Actor, StateError, Store, clock, control_write, identifier, label, require,
+                    stored_role)
 
 log = get_logger(__name__)
 
@@ -575,7 +582,10 @@ def _read_row(row: Any) -> dict[str, Any] | None:
         return None
     return dict(validated, id=row['schedule_id'], version=int(row['version']), state=row['state'],
                 horizon=str(row['horizon']), declared_at=row['declared_at'],
-                declared_by=row['declared_by'], attest=int(row['attest']))
+                declared_by=row['declared_by'],
+                # The column, read through `state.stored_role` so a version written before schema v15 — when
+                # `human` was the only role that could sign a plan — reads as that role and not as an absence.
+                declared_by_role=stored_role(row, OPERATOR_ROLE_SCHEDULES), attest=int(row['attest']))
 
 
 def _attested(connection: sqlite3.Connection, document: dict[str, Any], attest: int) -> bool:
@@ -725,7 +735,8 @@ def cancel_window(store: Store, window: str, actor: Actor, *,
     return {'window_id': window, 'status': 'cancelled', 'resource_id': stored['resource_id'],
             'rule_id': stored['rule_id'], 'starts_at': stored['starts_at'], 'ends_at': stored['ends_at'],
             'reason': stored['reason'], 'explains': stored.get('explains'),
-            'cancelled_by': stored['revoked_by'], 'cancelled_at': stored['revoked_at']}
+            'cancelled_by': stored['revoked_by'], 'cancelled_at': stored['revoked_at'],
+            'cancelled_by_role': stored['revoked_by_role']}
 
 
 def declare_window(store: Store, request: dict[str, Any], actor: Actor, *,
@@ -793,7 +804,8 @@ def _window_answer(window: dict[str, Any]) -> dict[str, Any]:
     stored = window['window']
     return {'window_id': stored['id'], 'status': window['status'], 'resource_id': stored['resource_id'],
             'starts_at': stored['starts_at'], 'ends_at': stored['ends_at'], 'reason': stored['reason'],
-            'declared_by': stored['author'], 'explains': stored.get('explains')}
+            'declared_by': stored['author'], 'declared_by_role': stored[suppression.AUTHOR_ROLE],
+            'explains': stored.get('explains')}
 
 
 def declare_schedule(store: Store, request: dict[str, Any], actor: Actor, *,
@@ -828,7 +840,7 @@ def declare_schedule(store: Store, request: dict[str, Any], actor: Actor, *,
             own bounds (thirty-two live, the candidate bound) and that refusal propagates — a plan that
             quietly materialized some of its occurrences is a plan that lies about what is quiet.
     """
-    require(actor, 'human')
+    require(actor, *OPERATOR_ROLES)
     now = clock(now)
     document, scope = _request(request, actor, store=store, index_path=index_path, now=now)
     document = dict(document, version=1, state='active')
@@ -862,7 +874,7 @@ def revise_schedule(store: Store, id: str, request: dict[str, Any], actor: Actor
             cancelled plan is not edited, the new plan is declared); the expectation does not match; or the
             request is not a schedule.
     """
-    require(actor, 'human')
+    require(actor, *OPERATOR_ROLES)
     now = clock(now)
     identifier(id)
     with readonly(store) as db:
@@ -901,7 +913,7 @@ def cancel_schedule(store: Store, id: str, actor: Actor, *,
     Raises:
         StateError: The role is not ``human``, no such schedule, or the current version already cancelled.
     """
-    require(actor, 'human')
+    require(actor, *OPERATOR_ROLES)
     now = clock(now)
     identifier(id)
     with readonly(store) as db:
@@ -935,7 +947,7 @@ def materialize_schedule(store: Store, id: str, actor: Actor, *,
     ended is still declared, because the plan covering it was signed in advance and the remaining silence is
     what the plan promised. An occurrence that has already ended is not declared at all.
     """
-    require(actor, 'human')
+    require(actor, *OPERATOR_ROLES)
     now = clock(now)
     identifier(id)
     with readonly(store) as db:
@@ -1035,8 +1047,7 @@ def _materialize(store: Store, document: dict[str, Any], scope: dict[str, Any], 
 
 # --- durable rows ----------------------------------------------------------------------------
 
-def _insert_version(store: Store, document: dict[str, Any], actor: Actor, *,
-                    now: dt.datetime) -> str:
+def _insert_version(store: Store, document: dict[str, Any], actor: Actor, *, now: dt.datetime) -> str:
     """Audit and insert one schedule version in one transaction, and report declared or duplicate.
 
     The audit row goes in *first* and its sequence is stored beside the document, exactly as a window
@@ -1062,11 +1073,16 @@ def _insert_version(store: Store, document: dict[str, Any], actor: Actor, *,
             return 'duplicate'
         store.audit(connection, now, actor.identity, SCHEDULE_OPERATION, document['id'],
                     {field: document[field] for field in SCHEDULE_KEYS})
+        # The role goes in a column and never into the signed document. `document` is the text the audit
+        # row quotes byte for byte (`_attested`), and widening it after the fact would split one plan into
+        # two digests — a schedule declared by a human before this role existed would stop matching its own
+        # version on a re-declaration, and the answer would be a false "already declared and says something
+        # else". Who signed is therefore stored *beside* the signature, in the one place a read can ask.
         connection.execute(
             f'INSERT INTO {MAINTENANCE_SCHEDULE_TABLE}(schedule_id,version,document,state,horizon,'
-            ' declared_at,declared_by,attest) VALUES (?,?,?,?,?,?,?,?)',
+            f' declared_at,declared_by,{OPERATOR_ROLE_SCHEDULES},attest) VALUES (?,?,?,?,?,?,?,?,?)',
             (document['id'], document['version'], key, document['state'], utc_text(now),
-             document['declared_at'], actor.identity,
+             document['declared_at'], actor.identity, actor.role,
              int(connection.execute('SELECT last_insert_rowid()').fetchone()[0])))
     return 'declared'
 
@@ -1190,7 +1206,9 @@ def schedule(store: Store, id: str, *, index_path: Path | str | None = None,
         for row in rows:
             document = _read_row(row)
             history.append({'version': int(row['version']), 'declared_at': row['declared_at'],
-                            'declared_by': row['declared_by'], 'state': row['state'],
+                            'declared_by': row['declared_by'],
+                            'declared_by_role': stored_role(row, OPERATOR_ROLE_SCHEDULES),
+                            'state': row['state'],
                             'horizon': row['horizon'], 'unreadable': document is None,
                             'attested': _attested(db, document, int(row['attest']))
                             if document is not None else False})
@@ -1229,7 +1247,9 @@ def schedule_history(store: Store, id: str) -> dict[str, Any]:
         for row in rows:
             document = _read_row(row)
             versions.append({'version': int(row['version']), 'declared_at': row['declared_at'],
-                             'declared_by': row['declared_by'], 'state': row['state'],
+                             'declared_by': row['declared_by'],
+                             'declared_by_role': stored_role(row, OPERATOR_ROLE_SCHEDULES),
+                             'state': row['state'],
                              'horizon': row['horizon'], 'unreadable': document is None,
                              'attested': _attested(db, document, int(row['attest']))
                              if document is not None else False,
@@ -1430,9 +1450,9 @@ def window_history(store: Store, window: str, *, now: dt.datetime | None = None)
     return {'window': stored, 'outcome': outcome, 'schedule': stored['schedule_id'],
             'occurrence_id': stored['occurrence_id'], 'events': [
                 {'at': stored['declared_at'], 'what': 'declared', 'by': stored['author'],
-                 'attested': stored['attested']}]
+                 'by_role': stored[suppression.AUTHOR_ROLE], 'attested': stored['attested']}]
             + ([{'at': stored['revoked_at'], 'what': 'revoked', 'by': stored['revoked_by'],
-                 'attested': True}] if stored['revoked_at'] else [])
+                 'by_role': stored['revoked_by_role'], 'attested': True}] if stored['revoked_at'] else [])
             + [{'at': row['at'], 'what': 'folded', 'by': 'suppression-worker',
                 'attested': True, 'delivery': row['delivery'],
                 'condition_class': row['condition_class']}

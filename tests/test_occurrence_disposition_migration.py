@@ -118,7 +118,11 @@ class SchemaV12Tests(unittest.TestCase):
         """The trigger and not the comment: an UPDATE and a DELETE both abort, and an INSERT still works."""
         incident = self.store.intake(verdict('1'), PRODUCER, now=NOW)['incident_id']
         with self.store.transaction() as connection:
-            connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE} VALUES (?,?,?,?,?,?)',
+            # The columns are named rather than positional: schema v15 added `actor_role` to this table, and
+            # an insert that lists what it writes is the statement that survives it — the role then arrives
+            # through the column's own default, which `test_a_row_written_without_a_role_is_a_human_row` pins.
+            connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,actor,'
+                               'reason,at,revision) VALUES (?,?,?,?,?,?)',
                                (incident, 'acknowledged', 'operator', 'looking', utc_text(NOW), 1))
             # Row triggers, so rows come first: SQLite fires a `BEFORE UPDATE`/`BEFORE DELETE` trigger once per
             # row it is actually changing, and a statement over an empty table changes none — it would succeed
@@ -126,7 +130,7 @@ class SchemaV12Tests(unittest.TestCase):
             # they would have rewritten exist, which is also the order a defect could reach this table in.
             for kind, reason in (('acknowledged', 'looking'), ('dismissed', 'closed it')):
                 connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_HISTORY_TABLE}'
-                                   ' VALUES (NULL,?,?,?,?,?,?)',
+                                   '(occurrence_id,kind,actor,reason,at,revision) VALUES (?,?,?,?,?,?)',
                                    (incident, kind, 'operator', reason, utc_text(NOW), 1))
             for statement, parameters in ((f'UPDATE {state.OCCURRENCE_DISPOSITION_HISTORY_TABLE}'
                                            ' SET reason=? WHERE 1=1', ('rewritten',)),
@@ -147,7 +151,8 @@ class SchemaV12Tests(unittest.TestCase):
         incident = self.store.intake(verdict('1'), PRODUCER, now=NOW)['incident_id']
         for offset, kind in enumerate(('ACKNOWLEDGED', 'suppress', '', 'muted')):
             with self.assertRaises(sqlite3.IntegrityError), self.store.transaction() as connection:
-                connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE} VALUES (?,?,?,?,?,?)',
+                connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,'
+                                   'actor,reason,at,revision) VALUES (?,?,?,?,?,?)',
                                    (f'{incident[:-3]}{offset:03x}' if offset else incident,
                                     kind, 'operator', 'reason', utc_text(NOW), 1))
 
@@ -156,22 +161,26 @@ class SchemaV12Tests(unittest.TestCase):
         incident = self.store.intake(verdict('1'), PRODUCER, now=NOW)['incident_id']
         for ordinal, reason in ((1, ''), (2, 'x' * (state.OCCURRENCE_REASON_LIMIT + 1))):
             with self.assertRaises(sqlite3.IntegrityError), self.store.transaction() as connection:
-                connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE} VALUES (?,?,?,?,?,?)',
+                connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,'
+                                   'actor,reason,at,revision) VALUES (?,?,?,?,?,?)',
                                    (incident, 'acknowledged', 'operator', reason, utc_text(NOW), ordinal))
 
     def test_one_effective_row_per_occurrence(self):
         incident = self.store.intake(verdict('1'), PRODUCER, now=NOW)['incident_id']
         with self.store.transaction() as connection:
-            connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE} VALUES (?,?,?,?,?,?)',
+            connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,actor,'
+                               'reason,at,revision) VALUES (?,?,?,?,?,?)',
                                (incident, 'acknowledged', 'operator', 'first', utc_text(NOW), 1))
             with self.assertRaises(sqlite3.IntegrityError):
-                connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE} VALUES (?,?,?,?,?,?)',
+                connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,'
+                                   'actor,reason,at,revision) VALUES (?,?,?,?,?,?)',
                                    (incident, 'dismissed', 'operator', 'second', utc_text(NOW), 2))
 
     def test_a_disposition_cannot_be_recorded_about_an_episode_that_never_opened(self):
         """The foreign key is why the routes can answer 404 instead of writing a fact about nothing."""
         with self.assertRaises(sqlite3.IntegrityError), self.store.transaction() as connection:
-            connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE} VALUES (?,?,?,?,?,?)',
+            connection.execute(f'INSERT INTO {state.OCCURRENCE_DISPOSITION_TABLE}(occurrence_id,kind,actor,'
+                               'reason,at,revision) VALUES (?,?,?,?,?,?)',
                                ('00000000-0000-4000-8000-000000000000', 'acknowledged', 'operator',
                                 'nowhere', utc_text(NOW), 1))
 

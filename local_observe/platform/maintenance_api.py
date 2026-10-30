@@ -65,8 +65,12 @@ NOT_FOUND = frozenset({'No such maintenance window', 'No such maintenance schedu
 WINDOW_SUBROUTES = ('history', 'cancellations')
 SCHEDULE_SUBROUTES = ('history', 'cancellations', 'materializations')
 
-READ_ROLES = ('reader', 'proposer', 'human', 'executor')
-WRITE_ROLES = ('human',)
+#: The roles that may read this family, and the two that may change it. `operator-agent` is in both:
+#: an automated operator reads what a `reader` reads, and it declares, edits, cancels and rolls forward a
+#: plan under its own name (`docs/CONTRACTS.md` §5, `docs/api/DECISIONS.md` D16). `producer` is in neither,
+#: because a detector that could open the window covering its own findings could silence its own pager.
+READ_ROLES = ('reader', 'proposer', 'human', 'executor', 'operator-agent')
+WRITE_ROLES = ('human', 'operator-agent')
 
 
 def writes(path: str) -> bool:

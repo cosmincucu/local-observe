@@ -1014,7 +1014,9 @@ class MaintenanceSchemaTests(unittest.TestCase):
         Store(self.path, NotificationPolicy(delivery_mode='off'))
         self.assertEqual(self.columns('maintenance_schedules'),
                          {'schedule_id', 'version', 'document', 'state', 'horizon', 'declared_at',
-                          'declared_by', 'attest'})
+                          # `declared_by_role` is schema v15: the role of the name in `declared_by`, stored
+                          # beside the signed document rather than inside it (see `state.py`'s v15 preamble).
+                          'declared_by', 'declared_by_role', 'attest'})
         self.assertIn('maintenance_outcome_evidence', self.indexes('incidents'))
         self.assertIn('maintenance_attribution', self.indexes('audit'))
         with Store(self.path, NotificationPolicy(delivery_mode='off')).transaction() as connection:

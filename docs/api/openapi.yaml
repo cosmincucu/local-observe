@@ -19,8 +19,11 @@ info:
   description: |
     Authenticated JSON surface for incidents, actions, notifications, evidence and review.
 
-    * One bearer credential per caller, assigned one of six server-side roles: `reader`, `producer`,
-      `proposer`, `human`, `executor`, `summary`. A body never names an actor (§5 of `docs/CONTRACTS.md`).
+    * One bearer credential per caller, assigned one of seven server-side roles: `reader`, `producer`,
+      `proposer`, `human`, `executor`, `summary`, `operator-agent`. A body never names an actor (§5 of
+      `docs/CONTRACTS.md`). Two of those seven sign operator acts: `human` is a person, `operator-agent` is an
+      automated operator acting under its own credential — same effect, and the role is stored with the act so
+      the two are never confused afterwards (`docs/api/DECISIONS.md` D16).
     * Two verbs carry everything: `GET` reads, `POST` writes. One route also answers `PATCH` —
       `/v1/maintenance-schedules/{id}`, where an edit appends a version and a `POST` would mean a second
       plan. Every other verb on every other path is answered `405`.
@@ -107,7 +110,7 @@ paths:
       tags: [identity]
       operationId: platform.identity.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor, summary]
+      x-required-role: [reader, producer, proposer, human, executor, summary, operator-agent]
       summary: Return the identity and role this credential carries.
       description: |
         Decided by the transport from the bearer token and nothing else. The one route besides
@@ -126,7 +129,7 @@ paths:
       tags: [health]
       operationId: platform.status.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: Counts of incidents, actions and queued deliveries.
       description: |
         A count is not a health verdict and an absent status key means no row holds that status. The shape
@@ -147,7 +150,7 @@ paths:
       tags: [health]
       operationId: platform.runtime.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: This process's startup snapshot, delivery-loop tally and refusal-audit counters.
       description: |
         Three sources in one body: a filesystem/module snapshot taken at startup, counters the delivery
@@ -171,7 +174,7 @@ paths:
       tags: [health]
       operationId: platform.overview.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor, summary]
+      x-required-role: [reader, producer, proposer, human, executor, summary, operator-agent]
       summary: The portal summary — durable counts plus freshness-qualified observations.
       description: |
         Portal summary v1. Unknown, disabled, stale and future-dated observations carry null values; a
@@ -191,7 +194,7 @@ paths:
       tags: [health]
       operationId: platform.audit.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: One bounded page of the append-only audit history, newest first.
       description: |
         The query parser runs before the store is asked for anything, so a bad page request opens no
@@ -220,7 +223,7 @@ paths:
       tags: [occurrences]
       operationId: incident.records.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: One capped newest-first window over one named record table.
       description: |
         `table` is a closed list — `events`, `incidents`, `actions`, `executions`, `audit`, `outbox`,
@@ -262,7 +265,7 @@ paths:
       tags: [occurrences]
       operationId: resource.inventory.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: The first 100 declared resources, by name.
       description: |
         Read from the rebuildable derived index, never from the operational store. Served only when this
@@ -285,7 +288,7 @@ paths:
       tags: [occurrences]
       operationId: evidence.sample.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: Ask whether one stored evidence sample is available, expired or unavailable.
       description: |
         Three answers and they are not interchangeable: `expired` means the sample was real and its
@@ -733,7 +736,7 @@ paths:
       tags: [notifications]
       operationId: config.notification_policy.read
       x-status: implemented
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: The delivery posture — mode, per-channel breakers, suppression count, test window.
       responses:
         '200':
@@ -1083,7 +1086,7 @@ paths:
       tags: [verification]
       operationId: verification.binding.read
       x-status: implemented
-      x-required-role: [reader, producer, human, proposer, executor]
+      x-required-role: [reader, producer, human, proposer, executor, operator-agent]
       x-admits-producer-when: 'a mounted verification policy names the producer identity'
       summary: The rule revision captured for an action, inside that action's own transaction.
       description: |
@@ -1122,7 +1125,7 @@ paths:
       tags: [verification]
       operationId: verification.records.list
       x-status: implemented
-      x-required-role: [reader, producer, human, proposer, executor]
+      x-required-role: [reader, producer, human, proposer, executor, operator-agent]
       x-admits-producer-when: 'a mounted verification policy names the producer identity'
       summary: The verification ids filed against one execution.
       description: Identifiers only, never documents.
@@ -1207,7 +1210,7 @@ paths:
       tags: [verification]
       operationId: verification.record.read
       x-status: implemented
-      x-required-role: [reader, producer, human, proposer, executor]
+      x-required-role: [reader, producer, human, proposer, executor, operator-agent]
       x-admits-producer-when: 'a mounted verification policy names the producer identity'
       summary: One stored verification record by its digest.
       parameters:
@@ -1499,7 +1502,7 @@ paths:
       tags: [identity]
       operationId: platform.openapi.read
       x-status: planned
-      x-required-role: [reader, producer, proposer, human, executor]
+      x-required-role: [reader, producer, proposer, human, executor, operator-agent]
       summary: Serve this document.
       description: |
         Not served. Publishing the route table to every caller that can reach the port is a decision of its
@@ -1518,7 +1521,7 @@ paths:
       tags: [occurrences]
       operationId: occurrence.list
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: One bounded page of alert episodes, each with its disposition and its delivery roll-up.
       description: |
         An occurrence is one episode of one condition, and its id is the incident id `Store.intake` mints
@@ -1554,7 +1557,7 @@ paths:
       tags: [occurrences]
       operationId: occurrence.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: One alert episode, with `ETag` set to the revision a write must send back.
       description: |
         An identifier that is not a canonical UUID, an identifier this platform never opened, and an address
@@ -1595,7 +1598,7 @@ paths:
       tags: [occurrences]
       operationId: occurrence.disposition_history.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Every disposition one episode has ever carried, oldest first.
       description: |
         Append-only: the effective state moves past a decision and the history keeps it, so "who else
@@ -1627,15 +1630,18 @@ paths:
       tags: [occurrences]
       operationId: occurrence.acknowledge
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Say that the human behind this credential has the episode, and stop its repeats.
       description: |
         The actor is the credential and the reason is required: a body field naming an identity is refused
-        `400 actor_claim_refused` before anything is written, and only a `human` credential is heard at all
-        (`403` for every other role, because §5 says a payload cannot claim that an agent is a human — with
-        one split worth knowing: a `summary` credential is stopped by the transport's own gate ahead of
-        routing and answers `403 {"error":"summary_only"}` in the flat body, while `reader`, `producer`,
-        `proposer` and `executor` reach `dispositions` and get `403 not_authorised` in the envelope).
+        `400 actor_claim_refused` before anything is written, and only a `human` or `operator-agent`
+        credential is heard at all (`403` for every other role, because §5 says a payload cannot claim which
+        credential the caller holds — with one split worth knowing: a `summary` credential is stopped by the
+        transport's own gate ahead of routing and answers `403 {"error":"summary_only"}` in the flat body,
+        while `reader`, `producer`, `proposer` and `executor` reach `dispositions` and get `403
+        not_authorised` in the envelope). A person and an automated operator are heard identically here and
+        told apart afterwards: the answer, the history row, the audit detail and the projection all carry
+        `actor_role` beside `actor`.
         The disposition, its history row, the fold of the episode's still-`pending` deliveries, the audit
         row and the projection records commit in one transaction; a delivery already on a lease is never
         recalled and says so (`delivery.in_flight`, `delivery.uncertain`). An acknowledgement expires
@@ -1683,7 +1689,7 @@ paths:
       tags: [occurrences]
       operationId: occurrence.dismiss
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Close one episode as not-actionable, durably, without resolving its condition.
       description: |
         Everything an acknowledgement does, plus a tombstone per (episode, condition) pair — which is what
@@ -1761,7 +1767,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.window.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: The windows this platform is holding, each with whether its attestation can be trusted.
       description: |
         `suppression.live_windows` over a credential: the declared rows whose span has not ended, ordered by
@@ -1785,10 +1791,11 @@ paths:
       tags: [maintenance]
       operationId: maintenance.window.declare
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Declare one planned silence over a resource, a service or a rule.
       description: |
-        The write half of what `suppression.declare_window` already did for a caller holding a human actor.
+        The write half of what `suppression.declare_window` already did for a caller holding a human or
+        operator-agent actor.
         The scope expands here and the durable shape stays the one the delivery path reads: a `service`
         scope declares **one window per member** of the built inventory index and answers with every id, so
         nobody has to guess how wide a silence they signed. A member added tomorrow is not covered.
@@ -1834,11 +1841,11 @@ paths:
       tags: [maintenance]
       operationId: maintenance.window.detail.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: One window by id — expired and revoked rows included — with the outcome observed.
       description: |
-        The record as stored (the span, selector, author, envelope version and condition classes a human
-        signed) plus the outcome the platform computed from its own log: `planned`, `active`, `completed`,
+        The record as stored (the span, selector, author, that author's role, the envelope version and the
+        condition classes its author signed) plus the outcome the platform computed from its own log: `planned`, `active`, `completed`,
         `cancelled`, `unused`, `overrun` or `unknown`, each with the evidence lines that earned it. Expired
         and revoked windows are readable here and not in `/v1/maintenance-windows`, which stays the cheap
         read on the delivery path.
@@ -1874,7 +1881,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.window.history.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: The timeline of one window — its declaration, its revocation, and every page it folded.
       description: |
         The attribution timeline, built from the window's audit evidence rather than from a second copy of
@@ -1911,11 +1918,13 @@ paths:
       tags: [maintenance]
       operationId: maintenance.window.revoke
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Cancel one named window so it stops covering immediately.
       description: |
-        Cancelling is an act, not a note: the body is empty, the durable revoke adds `revoked_by` and
-        `revoked_at` beside the row, and the audit log holds both ends. Reading a declaration is what
+        Cancelling is an act, not a note: the body is empty, the durable revoke adds `revoked_by`,
+        `revoked_by_role` and `revoked_at` beside the row, and the audit log holds both ends. Either operator
+        may cancel either one's silence — an automated operator may cancel a window a person declared and the
+        other way round — and the answer says which kind of credential did it. Reading a declaration is what
         silences a page, so a window that is merely expired is left as it was signed; a revoked one stops
         covering at the instant of the revocation.
 
@@ -1970,7 +1979,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.list
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Every recurring plan's current version, by state.
       description: |
         `state=active` (default), `state=cancelled` or `state=all`, filtered on the *current* version: a
@@ -2006,7 +2015,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.declare
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Sign a recurring maintenance plan and declare its first bounded slice of windows.
       description: |
         A schedule is the plan; the windows are what the platform actually holds quiet. Declaring one
@@ -2056,7 +2065,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: One plan — its current version, the occurrences still to come, and how far it is materialized.
       description: |
         A report read, never a scheduler: this answers what has been declared and what the plan still
@@ -2094,7 +2103,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.revise
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Make a new version of a plan effective, leaving windows already running exactly as they were.
       description: |
         The transport's only `PATCH`, and the verb is what makes the meaning readable: an edit appends a
@@ -2154,7 +2163,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.history.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Every version of a plan, each with whether a human attests it.
       description: |
         The answer to "what did the plan say in October?", read in November. Versions are append-only in the
@@ -2193,7 +2202,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.cancel
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Stop a plan's future without rewriting its past.
       description: |
         Cancels the current version and revokes every *unstarted* window the plan declared. Windows that
@@ -2248,7 +2257,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.schedule.materialize
       x-status: implemented
-      x-required-role: [human]
+      x-required-role: [human, operator-agent]
       summary: Roll the plan's horizon forward by one bounded slice of occurrences.
       description: |
         Recurring plans do not self-declare. This writes the windows for the next slice (at most 8
@@ -2304,7 +2313,7 @@ paths:
       tags: [maintenance]
       operationId: maintenance.interval.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: What was quiet over a span, or what one instant was — including for facts that arrive late.
       description: |
         Two questions in one route, chosen by the parameters you send, because they are the same read over
@@ -2398,7 +2407,7 @@ paths:
       tags: [resources]
       operationId: resource.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: One bounded, filtered page of declared resources, with the declaration behind it named.
       description: |
         The built index seen from a URL, ordered by (name, id), each row carrying its aliases and how many
@@ -2447,7 +2456,7 @@ paths:
       tags: [resources]
       operationId: resource.alias.resolve
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Which declared resource one alias or identifier names, including when nothing answers it.
       description: |
         `index.resolve`'s verdicts, shipped as it wrote them: `resolved`, `unknown` and `unknown_uuid`. A name
@@ -2508,7 +2517,7 @@ paths:
       tags: [resources]
       operationId: resource.dependents.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: What transitively depends on one declared resource, and whether the walk was cut off.
       description: |
         The recursive read `lo-inventory dependents` runs (`index.dependents`), over `runs-on` and
@@ -2595,7 +2604,7 @@ paths:
       tags: [resources]
       operationId: resource.observation.history.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: The newest snapshots one source reported, as summaries rather than whole observation sets.
       description: |
         `discovery.history` over a credential. Each row is a summary — status, completeness, instant, how much
@@ -2690,7 +2699,7 @@ paths:
       tags: [resources]
       operationId: resource.drift.evaluate
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Declared against observed, source by source, with each source's coverage beside its findings.
       description: |
         `discovery.drift` — the comparison `lo-inventory drift` prints — plus the one claim the module does not
@@ -2788,7 +2797,7 @@ paths:
       tags: [resources]
       operationId: resource.proposal.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Read one drafted proposal back, by the digest its own content produced.
       description: |
         The identifier is validated as a SHA-256 digest before any path is built, and the file is opened only
@@ -2815,7 +2824,7 @@ paths:
       tags: [queries]
       operationId: resource.query.series
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: One bounded signal window — the rows a verdict was made from, or the reason there are none.
       description: |
         The HTTP shape of the MCP `signal_series` tool, over the same reader and the same approved query-kind
@@ -2910,7 +2919,7 @@ paths:
       tags: [queries]
       operationId: resource.query.topology
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: A declared neighbourhood, with the bound that cut it off named in the answer.
       description: |
         `topology.Topology.upstream` / `.impact` — the walk the MCP `topology_neighbourhood` tool drives — and
@@ -2973,7 +2982,7 @@ paths:
       tags: [queries]
       operationId: resource.capability.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Which operations this installation can answer, which wait on a mount, and which are refused by decision.
       description: |
         One read that settles "is that missing feature a bug, a mount, or a decision?" — the three answers a
@@ -3518,7 +3527,7 @@ paths:
       tags: [health]
       operationId: platform.health.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: What this installation is wired to do, and what it was never given.
       description: |
         Three words per capability, because "off" and "cannot" are different answers to an installer's
@@ -3550,7 +3559,7 @@ paths:
       tags: [health]
       operationId: platform.boundary.read
       x-status: implemented
-      x-required-role: [reader, proposer, human, executor]
+      x-required-role: [reader, proposer, human, executor, operator-agent]
       summary: Which capabilities this product deliberately does not implement, and who owns each.
       description: |
         Call it before concluding an absent route is a missing feature. The body is the same document the
@@ -4061,7 +4070,7 @@ paths:
       tags: [observer]
       operationId: investigation.health.read
       x-status: implemented
-      x-required-role: [reader, human]
+      x-required-role: [reader, human, operator-agent]
       summary: Whether the newest finished investigation cycle is recent, complete and healthy.
       description: |
         The answer `lo-observer check` prints, from the same journal and the same rule: a running cycle
@@ -4155,7 +4164,7 @@ paths:
       tags: [observer]
       operationId: investigation.capability.read
       x-status: implemented
-      x-required-role: [reader, human]
+      x-required-role: [reader, human, operator-agent]
       summary: What this installation may do about investigations, and what is deliberately off.
       description: |
         An optional integration that is absent must not disable anything else, so a caller that needs to
@@ -4977,13 +4986,16 @@ components:
       additionalProperties: false
     ActorIdentity:
       type: object
-      description: The actor the credential decides, never the actor a body claimed.
+      description: |
+        The actor the credential decides, never the actor a body claimed. `human` is a person and
+        `operator-agent` an automated operator acting under its own credential (D16); the rest are machines
+        and dashboards with one narrow job.
       properties:
         identity:
           type: string
         role:
           type: string
-          enum: [reader, producer, proposer, human, executor, summary]
+          enum: [reader, producer, proposer, human, executor, summary, operator-agent]
       required: [identity, role]
       additionalProperties: false
     StatusCounts:
@@ -5227,13 +5239,22 @@ components:
             actor:
               type: string
               description: The identity in the bearer credential, never a body field.
+            actor_role:
+              type: string
+              enum: [human, operator-agent]
+              description: |
+                Which kind of credential that identity presented: `human` for a person, `operator-agent` for an
+                automated operator acting under its own identity (D16). It is read off the bearer and never out
+                of the body — a submitted `role` is refused as an actor claim — so the two roles can say the
+                same sentence and still be told apart afterwards. A statement recorded before an automated
+                operator could exist reads `human`, because that is what wrote it.
             reason:
               type: string
             at:
               type: string
             revision:
               type: integer
-          required: [kind, actor, reason, at, revision]
+          required: [kind, actor, actor_role, reason, at, revision]
         state:
           type: string
           enum: [unacknowledged, acknowledged, dismissed, source-resolved]
@@ -5367,13 +5388,20 @@ components:
           enum: [acknowledged, dismissed]
         actor:
           type: string
+        actor_role:
+          type: string
+          enum: [human, operator-agent]
+          description: |
+            The role in the credential that spoke this row, on the same rule as the effective disposition's:
+            stored beside the identity, read back as it was written, and `human` for a row from before an
+            automated operator could exist.
         reason:
           type: string
         at:
           type: string
         revision:
           type: integer
-      required: [sequence, kind, actor, reason, at, revision]
+      required: [sequence, kind, actor, actor_role, reason, at, revision]
     DispositionHistoryPage:
       type: object
       description: One bounded page of one episode's dispositions, oldest first.
@@ -5885,7 +5913,8 @@ components:
     MaintenanceWindowRow:
       type: object
       description: |
-        One stored window as the delivery path sees it: the selector, the span a human signed, the author,
+        One stored window as the delivery path sees it: the selector, the span its author signed, the author
+        and the author's role,
         the condition classes it explains, and the schedule and occurrence it came from when it did.
         `None` in the schedule fields means an ad-hoc window, not a missing read.
       properties:
@@ -5907,6 +5936,14 @@ components:
           type: string
         author:
           type: string
+        author_role:
+          type: string
+          enum: [human, operator-agent]
+          description: |
+            The role in the credential that declared this silence. A plan's own signature stays a person's or an
+            agent's per version, so a window materialized by an automated operator names that agent here even
+            when the plan it came from was written by a human. A row stored in an envelope older than the role
+            exists in reads `human`.
         declared_at:
           type: string
           format: date-time
@@ -5927,7 +5964,13 @@ components:
           format: date-time
         revoked_by:
           type: ['string', 'null']
-      required: [id, starts_at, ends_at, reason, author, declared_at]
+        revoked_by_role:
+          type: ['string', 'null']
+          enum: [human, operator-agent, null]
+          description: |
+            The role in the credential that cancelled it, and null when nothing has. A revocation written before
+            the role exists in reads `human`: only a person could sign one then.
+      required: [id, starts_at, ends_at, reason, author, author_role, declared_at]
     MaintenanceWindowList:
       type: object
       description: |
@@ -6000,11 +6043,17 @@ components:
                 type: string
               declared_by:
                 type: string
+              declared_by_role:
+                type: string
+                enum: [human, operator-agent]
+                description: |
+                  The role in the credential that made this declaration — the same word the stored window row
+                  answers with in `author_role`, spelled for the act rather than the record.
               explains:
                 type: ['array', 'null']
                 items:
                   $ref: '#/components/schemas/MaintenanceConditionClass'
-            required: [window_id, status, starts_at, ends_at, reason, declared_by]
+            required: [window_id, status, starts_at, ends_at, reason, declared_by, declared_by_role]
         count:
           type: integer
         members:
@@ -6052,10 +6101,18 @@ components:
             $ref: '#/components/schemas/MaintenanceConditionClass'
         cancelled_by:
           type: string
+        cancelled_by_role:
+          type: string
+          enum: [human, operator-agent]
+          description: |
+            The role in the credential that cancelled the window. A person may cancel a silence an automated
+            operator declared, and this answer then names the person — the role is of whoever cancelled, never
+            of whoever declared.
         cancelled_at:
           type: string
           format: date-time
-      required: [window_id, status, starts_at, ends_at, reason, cancelled_by, cancelled_at]
+      required: [window_id, status, starts_at, ends_at, reason, cancelled_by, cancelled_by_role,
+                 cancelled_at]
     MaintenanceOutcome:
       type: object
       description: |
@@ -6100,9 +6157,9 @@ components:
       type: object
       description: |
         One window and what became of it. `window` is the stored record — including `attested` (does its
-        audit evidence still stand) and `document_version` (1 or 2, which is what decides whether
-        `explains` was ever named) — and `schedule`/`occurrence_id` repeat the origin for a reader who came
-        from a report and wants the plan.
+        audit evidence still stand) and `document_version` (1, 2 or 3, which is what decides whether
+        `explains` and the author's role were ever named) — and `schedule`/`occurrence_id` repeat the origin
+        for a reader who came from a report and wants the plan.
       properties:
         window:
           allOf:
@@ -6113,7 +6170,11 @@ components:
                   type: boolean
                 document_version:
                   type: integer
-                  enum: [1, 2]
+                  enum: [1, 2, 3]
+                  description: |
+                    3 is the envelope that carries an `author_role`; 1 and 2 are the envelopes a deployed file
+                    can already hold, and both read `author_role` as `human` because no automated operator could
+                    have signed them.
               required: [attested, document_version]
         outcome:
           $ref: '#/components/schemas/MaintenanceOutcome'
@@ -6150,6 +6211,13 @@ components:
                 enum: [declared, revoked, folded]
               by:
                 type: string
+              by_role:
+                type: string
+                enum: [human, operator-agent]
+                description: |
+                  Present for the two acts a credential signed (`declared`, `revoked`) and absent for `folded`,
+                  which is something the platform did on a disposition's instructions rather than something a
+                  credential did: an absent role there is not an unknown role.
               attested:
                 type: boolean
               delivery:
@@ -6331,6 +6399,14 @@ components:
           format: date-time
         declared_by:
           type: string
+        declared_by_role:
+          type: string
+          enum: [human, operator-agent]
+          description: |
+            The role in the credential that signed this version, answered from the row beside the signature.
+            It is absent on a declare answer's `schedule`, which quotes the signed document alone; every read
+            of a stored version carries it. Deliberately not inside the signed text: widening that would move
+            the document digest and split one plan into two digests across an upgrade.
         attest:
           type: integer
       required: [id, version, state, reason, scope, explains, recurrence, bounds, author, declared_at]
@@ -6540,6 +6616,13 @@ components:
           type: string
         declared_by:
           type: string
+        declared_by_role:
+          type: string
+          enum: [human, operator-agent]
+          description: |
+            Who signed this version, by kind. A plan a person wrote and an automated operator revised reads
+            `human` on version 1 and `operator-agent` on version 2 — the history is the ledger of which kind of
+            operator was steering the plan at each version.
         state:
           type: string
           enum: [active, cancelled]
@@ -6549,7 +6632,7 @@ components:
           type: boolean
         attested:
           type: boolean
-      required: [version, declared_at, declared_by, state, horizon, unreadable, attested]
+      required: [version, declared_at, declared_by, declared_by_role, state, horizon, unreadable, attested]
     MaintenanceScheduleHistory:
       type: object
       description: Every version of one plan, oldest first, with the document as stored.
@@ -8833,13 +8916,15 @@ components:
       required: [rows, count, revocations, secrets]
     CredentialRow:
       type: object
-      description: One credential this installation may or may not honour, without its secret.
+      description: |
+        One credential this installation may or may not honour, without its secret. The role is the mounted
+        one, so this is where an operator checks which kind of operator an identity is.
       properties:
         identity:
           type: string
         role:
           type: string
-          enum: [reader, producer, proposer, human, executor, summary]
+          enum: [reader, producer, proposer, human, executor, summary, operator-agent]
         state:
           type: string
           enum: [active, revoked]

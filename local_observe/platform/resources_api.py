@@ -116,7 +116,10 @@ GUARDED_POSTS = (DECLARATION_VALIDATION_ROUTE, OBSERVED_ROUTE, PROPOSAL_ROUTE, R
 
 # --------------------------------------------------------------------------------------- roles, bounds
 
-READ_ROLES = ('reader', 'proposer', 'human', 'executor')
+#: The roles that may read this family. `operator-agent` reads it too: an automated operator that may
+#: acknowledge an alert has to be able to read the resource and rule rows behind it, and a read that
+#: shows a human but hides an agent is the same lie in the other direction.
+READ_ROLES = ('reader', 'proposer', 'human', 'executor', 'operator-agent')
 #: The identity a rule's verdict is filed under. Every evaluation below stamps its previewed events with
 #: the credential's own identity, because that is the identity the producer loop files them as — so the
 #: role that could file such an event is the role that may preview one. A `reader` may not, and `human`

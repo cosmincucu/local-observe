@@ -27,18 +27,22 @@ command. That is the whole boundary of what was added, and the routes that would
 
 ## Prerequisites
 
-* A platform database at **schema v14**. The v13→v14 step adds `platform_jobs` and
-  `credential_revocations`; a database at v13 is *refused* by this build until
-  `lo-platform --database <path> migrate` has run (`local_observe/platform/README.md`, `docs/CONTRACTS.md` §5).
-  Nothing in this family rewrites an existing row.
-* A **`reader`**, `proposer`, `human` or `executor` credential for the two reads anyone credentialed may make
-  (`/v1/health`, `/v1/boundary`). A `summary` credential is refused on every route in this family, including
-  the reads: it exists to see findings, not the shape of the installation holding them.
+* A platform database at **schema v15**. The v13→v14 step adds the two tables this family reads —
+  `platform_jobs` and `credential_revocations`; the v14→v15 step adds three role-attribution columns
+  (`docs/api/maintenance.md`) that nothing here touches. A database older than v14 is *refused* by this build
+  until `lo-platform --database <path> migrate` has run (`local_observe/platform/README.md`,
+  `docs/CONTRACTS.md` §5). Nothing in this family rewrites an existing row.
+* A **`reader`**, `proposer`, `human`, `executor` or `operator-agent` credential for the two reads anyone
+  credentialed may make (`/v1/health`, `/v1/boundary`). A `summary` credential is refused on every route in
+  this family, including the reads: it exists to see findings, not the shape of the installation holding them.
 * A **`human`** credential for everything else in this page. The credential ledger, the state surface, the
-  ledger of jobs and all four writes are `human`-only — the same rule the disposition and maintenance writes
-  follow, because each of these can end a silence, cut a bearer, or make the service copy its own database.
-  `producer` may not reach any of it: a detector that could read who is revoked could schedule its own
-  revocation.
+  ledger of jobs and all four writes are `human`-only, because each of these can cut a bearer, make the
+  service copy its own database, or withdraw a booking somebody else made. An `operator-agent` bearer is
+  refused here in particular, and deliberately: it exists to answer episodes and sign planned silence, and it
+  may do both elsewhere (`docs/api/occurrences.md`, `docs/api/maintenance.md`) without reaching this page —
+  an automated operator may not revoke the credential that lets it act, or book work against the database it
+  acts through. `producer` may not reach any of it: a detector that could read who is revoked could schedule
+  its own revocation.
 * Nothing optional. `/v1/health` answers over a bare app the same way it answers over a mounted one; it
   reports the difference rather than requiring it.
 
@@ -46,8 +50,8 @@ command. That is the whole boundary of what was added, and the routes that would
 
 | Method | Path | Credential | What it answers |
 | --- | --- | --- | --- |
-| `GET` | `/v1/health` | reader, proposer, human, executor | Each capability as `supported`, `disabled` or `unavailable`, with the evidence that decided it, plus what this endpoint cannot see. |
-| `GET` | `/v1/boundary` | reader, proposer, human, executor | The declared refusals and who owns each — the same document the `component_boundary` MCP tool answers with. |
+| `GET` | `/v1/health` | reader, proposer, human, executor, operator-agent | Each capability as `supported`, `disabled` or `unavailable`, with the evidence that decided it, plus what this endpoint cannot see. |
+| `GET` | `/v1/boundary` | reader, proposer, human, executor, operator-agent | The declared refusals and who owns each — the same document the `component_boundary` MCP tool answers with. |
 | `GET` | `/v1/credentials` | human | Identity, role and state of every mounted credential, joined to the durable revocations. Never token material. |
 | `GET` | `/v1/credentials/{identity}` | human | One row. An identity nobody mounted answers `404` with the same bytes as a typo of one that is. |
 | `POST` | `/v1/credentials/{identity}/revocations` | human | Refuse that bearer from the next request, durably. `reason` is required. `Idempotency-Key` honoured. |
@@ -91,7 +95,10 @@ reads `supported` on every line and has no backup is the failure that list exist
 
 The rows are the mounted role list this process was handed — projected from the credentials the request was
 authenticated against, not re-read from disk, so this route is not a second place that opens a mounted secret
-file — joined to the durable revocations in `credential_revocations`. No answer in this family contains token
+file — joined to the durable revocations in `credential_revocations`. The `role` column is the mounted word and
+so is the answer to "what kind of operator is this identity": `human` is a person's bearer and
+`operator-agent` an automated operator's own, which is the distinction the audit and disposition records are
+stored to keep (`docs/api/DECISIONS.md` D16). No answer in this family contains token
 material on any route; `tests/test_administration_api.py` asserts the absence rather than trusting the intent.
 
 Enrollment is not here, and not because nobody thought of it: the mounted file is the only statement of who may

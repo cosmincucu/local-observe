@@ -551,7 +551,7 @@ and durable volume are mandatory. Use database transactions for related state
 changes and an outbox for notifications and analytical copies. The derived
 inventory database is separate and is never used to store approvals.
 
-The platform schema is v14. The v11-to-v12 step adds the four occurrence-disposition tables (`docs/api/occurrences.md`); the v12-to-v13 step adds `maintenance_schedules` — one append-only row per
+The platform schema is v15. The v11-to-v12 step adds the four occurrence-disposition tables (`docs/api/occurrences.md`); the v12-to-v13 step adds `maintenance_schedules` — one append-only row per
 schedule *version*, with `UPDATE`/`DELETE` triggers, because an edit that restated an older version would
 destroy the only answer to "what did this plan say in October?" — plus the two indexes an outcome read needs
 (`maintenance_outcome_evidence` over `incidents(resource_id, opened_at)`, `maintenance_attribution` over the
@@ -577,6 +577,18 @@ report and a scan that did not. The step rewrites no incident, action, audit or 
 that never uses the new surface pays two empty tables. See
 [the state lifecycle and the credential ledger](api/administration.md) for the routes, the approval digests and
 what each job refuses to do.
+
+The v14-to-v15 step adds three columns and changes no existing row's meaning: `actor_role` on
+`occurrence_dispositions` and on `occurrence_disposition_history`, and `declared_by_role` on
+`maintenance_schedules`. Each is `NOT NULL DEFAULT 'human'` and each CHECK-bound to the two roles that may
+sign an operator act, so every row a v14 file already held reads as a person's act — which is what it was,
+because a person was the only thing that could sign one. Three and not more: a disposition and a schedule
+version are typed tables with no JSON column that could hold the fact honestly, while a maintenance *window*
+is a control document and gains its role inside envelope v3 instead (`author_role`, `revoked_by_role` — see
+[planned maintenance](api/maintenance.md)). The signed schedule document is deliberately untouched: its
+canonical digest is what "already declared and says something else" is computed against, and widening it would
+make one plan two documents across an upgrade. An automated operator's credential, what it may and may not do,
+and why the role is stored rather than inferred are `docs/api/DECISIONS.md` D16.
 
 The v10-to-v11 step adds `api_idempotency` and one index, and changes no existing row: it is where a caller
 that lost the response can ask "did this write already happen?", and its rules are in
@@ -621,8 +633,15 @@ Deleting or expiring raw telemetry must not delete action authority records.
 
 Approval request binds: requester identity, incident/evidence references,
 action name/version, target UUIDs, canonical parameters/hash, creation and
-expiry. Human identity is obtained from authenticated transport; payload fields
-cannot claim that an agent is a human. Read tokens cannot approve or execute.
+expiry. Actor identity and the role presenting it are obtained from the authenticated transport; payload
+fields cannot claim that an agent is a human, and cannot name a role, an identity or a credential at all.
+Two roles may sign an operator act — `human`, a person, and `operator-agent`, an automated operator acting
+under its own credential — and the act stores which of the two did it: `actor_role` on a disposition and its
+history, `declared_by_role` on a maintenance schedule version (schema v15), `author_role` and
+`revoked_by_role` in a window's envelope v3. The two roles have equal effect; a record may not read one as
+the other, and a row written before the second role existed reads as `human`. Adding a credential role means
+adding it to the refusal vocabulary too (`refusals.ROLES`), or a denial of that role is counted `unauditable`
+instead of named. Read tokens cannot approve or execute; neither role's token can.
 
 Lifecycle: proposed -> pending -> approved/denied/expired. Claim an approved
 request atomically before dispatch, recording execution ID and runner token.

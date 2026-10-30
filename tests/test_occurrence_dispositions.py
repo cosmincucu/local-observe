@@ -1228,8 +1228,11 @@ class ProjectionTests(DispositionFixture):
                          [(row['status'], row['attempts']) for row in from_call])
         shape = [sorted(json.loads(row['payload'])) for row in from_post]
         self.assertEqual(shape, [sorted(json.loads(row['payload'])) for row in from_call])
-        self.assertEqual(shape[0], ['actor', 'at', 'condition_key', 'kind', 'occurrence_id', 'projection',
-                                    'reason', 'resource_id'])
+        # `actor_role` (schema v15) travels with `actor`: a downstream that learns about a disposition from
+        # this document would otherwise be told "an operator named X dismissed this" by a statement an
+        # automated operator made — same effect to act on, different words to print.
+        self.assertEqual(shape[0], ['actor', 'actor_role', 'at', 'condition_key', 'kind', 'occurrence_id',
+                                    'projection', 'reason', 'resource_id'])
         self.assertNotIn('window', shape[0], 'a projection names the decision, never a verdict payload')
 
 

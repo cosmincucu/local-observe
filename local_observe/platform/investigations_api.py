@@ -207,7 +207,7 @@ class Investigations:
         if self.state is None and path != EXPLANATION_ROUTE:
             return ABSENT
         if path == HEALTH_ROUTE:
-            _require(actor, ('reader', 'human'))
+            _require(actor, READ_ROLES)
             asked = _query(scope.get('query_string', b''), {'max_age_seconds'})
             age = _bounded(asked['max_age_seconds'], MAX_AGE_SECONDS_LIMIT) if 'max_age_seconds' in asked \
                 else DEFAULT_MAX_AGE_SECONDS
@@ -217,7 +217,7 @@ class Investigations:
             return 200, await self._offloop(self._cases, _query(scope.get('query_string', b''),
                                                                 {'query', 'limit'}))
         if path == CAPABILITIES_ROUTE:
-            _require(actor, ('reader', 'human'))
+            _require(actor, READ_ROLES)
             return 200, await self._offloop(self._capabilities)
         if path == DELIVERY_ROUTE:
             _require(actor, ('human',))
@@ -546,6 +546,13 @@ def digest_of(value: Any) -> str:
     """The canonical SHA-256 of one document, from the same helper the state layer uses."""
     from local_observe.inventory.validation import digest
     return digest(value)
+
+
+#: The two investigation reads a credential may make without being the person on call: the journal's
+#: freshness and its capability list. `operator-agent` is in the pair because an automated operator
+#: reads what a `reader` reads. Everything else in this family — cases, jobs, runs, exports, reviews —
+#: stays `human`, because those are the surfaces where a person grades an investigation.
+READ_ROLES = ('reader', 'human', 'operator-agent')
 
 
 def _require(actor: Actor, roles: tuple[str, ...]) -> None:

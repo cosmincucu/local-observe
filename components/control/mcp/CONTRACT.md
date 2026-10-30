@@ -82,7 +82,12 @@ The mounted document is a JSON **list of rows**, not an object map — the shape
   rows** (one credential naming two identities makes every audit row a guess);
 * roles limited to `reader`, `proposer`, `executor`. `human` is refused ("a human-role credential may not
   be handed to an MCP agent"), `producer` is refused (it posts to `/v1/events` with its own credential and
-  needs no tool surface), `summary` is refused (it may not write).
+  needs no tool surface), `summary` is refused (it may not write), and `operator-agent` is refused with its
+  own sentence rather than as an unknown role: this surface carries three capabilities — read, propose,
+  execute — and none of them is what that credential is for. An automated operator acknowledges an occurrence
+  and signs a maintenance window with its own bearer on the platform's HTTP routes, where the role that acted
+  is stored beside it (`docs/api/DECISIONS.md` D16); a tool call could only ever speak as the bearer of the
+  process that mounted it.
 
 **Not checked at boot:** a row's `platform_token` is not validated against `LO_PLATFORM_CREDENTIALS`. The
 map is validated on its own; an unknown token is a `401` on that agent's first request. Catching it at

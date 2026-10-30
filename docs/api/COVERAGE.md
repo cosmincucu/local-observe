@@ -40,7 +40,7 @@ where the operation happens today, not where it should happen.
 | `resource` | The thing operated on (`occurrence`, `action`, `maintenance-window`, `credential`…). Grouping only — it carries no authority. |
 | `module` | The file that decides the behaviour, checked to exist by the test. Not "the file that mentions it". |
 | `access` | `read` or `write`, meaning *does this leave a durable trace*. A `read` row may still cost a database page. |
-| `required_role` | On an HTTP row, the credential roles that may call it. On the others, the authority reached: `local` is the operator's own file access, `bearer` a mounted credential, `none` deliberately unauthenticated. |
+| `required_role` | On an HTTP row, the credential roles that may call it. On the others, the authority reached: `local` is the operator's own file access, `bearer` a mounted credential, `none` deliberately unauthenticated. The roles come from `vocabularies.authority`; two of them may sign an operator act — `human` is a person, `operator-agent` an automated operator acting under its own credential — and a row that admits one without the other is asserting a difference that has to be deliberate (D16). |
 | `side_effects` | What exists afterwards that did not before — rows, files, messages sent. `none` is a claim, and `state_source` is what backs it. |
 | `state_source` | Which store or file answers the operation. `sqlite: api_idempotency (schema v11)` is checkable; "the database" is not. |
 | `status` | `implemented`, `planned` or `excluded`. `excluded` needs a reason in `notes`, because "nobody thought of it" and "we refused it" must not look the same in five years. |

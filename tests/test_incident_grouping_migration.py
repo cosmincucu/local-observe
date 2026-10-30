@@ -332,7 +332,8 @@ class GroupingMigrationTests(unittest.TestCase):
                         'audit is append-only: the v1 rows are a prefix of the migrated ones')
         steps = [row['subject'] for row in moved.records('audit') if row['operation'] == 'schema.migrated']
         self.assertEqual(sorted(steps, key=int),
-                         ['2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14'])
+                         [str(step) for step in range(2, state.VERSION + 1)],
+                         'every step this build ships leaves exactly one audit row, and no more')
         # v3 added four columns to `outbox`; the seven v1-era values a row already held must be the same
         # rows in the same order, with this build's defaults filled in beside them.
         after = self.rows_of('outbox')

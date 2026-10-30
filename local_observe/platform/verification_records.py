@@ -128,7 +128,11 @@ NOT_CAPTURED = 'not-captured'
 AUDIT_OPERATION = 'verification.recorded'
 #: Roles that may read a record or a binding. `producer` is admissible only while the current policy
 #: names that identity (see `_reader`), and `summary` never is.
-READ_ROLES = ('reader', 'human', 'proposer', 'executor')
+#: Roles that may read a record or a binding. `producer` is admissible only while the current policy
+#: names that identity (see `_reader`), and `summary` never is. `operator-agent` reads the ledger because
+#: a `reader` does: an automated operator that dismisses an occurrence about a verified check must be
+#: able to read the receipt it is dismissing in front of.
+READ_ROLES = ('reader', 'human', 'proposer', 'executor', 'operator-agent')
 
 #: Every reason the server may derive. `comparison-*`, `store-unanswered` and `window-empty` are the
 #: words `verification.py` already answers with; the rest are this record's own boundaries. A reason

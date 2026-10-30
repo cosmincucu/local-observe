@@ -282,8 +282,10 @@ class MaintenanceWindowTests(unittest.TestCase):
         after = self.window_document(declared['id'])
         self.assertEqual(after['declared'], json.loads(self.audit('maintenance.declared')[0]['detail']))
         self.assertEqual(after['attest'], before['attest'])
-        self.assertEqual(sorted(after['revoked']), ['revoked_at', 'revoked_by'])
+        self.assertEqual(sorted(after['revoked']), sorted(suppression.REVOKE_KEYS))
         self.assertEqual(after['revoked']['revoked_by'], HUMAN.identity)
+        self.assertEqual(after['revoked']['revoked_by_role'], HUMAN.role,
+                         'the cancellation names the kind of operator that signed it')
         self.assertEqual(len(self.window_rows()), 1, 'a revoke is not the insertion of a second window')
 
     def test_the_live_window_bound_is_enforced_at_declaration(self):
@@ -586,6 +588,11 @@ def plant_window(store: Store, name: str, *, start: dt.datetime, end: dt.datetim
     # "a window declared before condition classes existed is still readable and still covering" is tested.
     if version >= 2:
         declared.update({key: None for key in suppression.WINDOW_ORIGIN_KEYS})
+    if version >= 3:
+        # v3 names the role of the author above, and `_envelope` refuses a block that does not carry it.
+        # Asking for `version=2` or `version=1` is how "a window declared before an automated operator could
+        # exist reads as a human's" is tested, so the field is added *by version* and never defaulted here.
+        declared[suppression.AUTHOR_ROLE] = 'human'
     document = {'schema_version': version, 'declared': declared,
                 'revoked': None,
                 # An unattested row still names a sequence: "no attestation field at all" is a malformed

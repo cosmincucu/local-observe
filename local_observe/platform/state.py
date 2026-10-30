@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 14
+VERSION = 15
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -66,6 +66,30 @@ class Actor:
 def require(actor: Actor, *roles: str) -> None:
     if not isinstance(actor, Actor) or actor.role not in roles or not actor.identity:
         raise StateError('Actor is not authorised for this operation')
+
+
+# --- who may sign an operator's decision -------------------------------------------------------
+#: The role of a person. Everything that ever carried an operator's decision was written behind this
+#: credential, which is why a stored row with no recorded role reads as `human` (schema v15).
+HUMAN = 'human'
+#: The role of an automated operator — a program that acts on the platform under its own identity rather
+#: than borrowing a person's. It is a credential row like any other: the role is assigned by the mounted
+#: role file, `api.validate_credentials` refuses anything outside the closed vocabulary, and no body field
+#: can claim it (`docs/CONTRACTS.md` §5). What it may *do* is narrower than a human's: an occurrence
+#: disposition and a maintenance declaration, plus every read a `reader` makes, and nothing else.
+OPERATOR_AGENT = 'operator-agent'
+#: The two roles that may speak for an operator, and the whole vocabulary a stored `actor_role`,
+#: `declared_by_role` or `revoked_by_role` value may hold. The effect of the two is identical — an
+#: `operator-agent` dismissal silences the same occurrence a `human` dismissal silences — and the record
+#: says which of them spoke, so a later reader is never told "a human decided this" by a row that an
+#: agent wrote. Widening this tuple is a contract decision, not a value: it decides which credential may
+#: sign a silence.
+OPERATOR_ROLES = (HUMAN, OPERATOR_AGENT)
+#: Every role a mounted credential may carry. `api.validate_credentials` is the authority that turns a
+#: bearer token into one of these, `refusals.ROLES` re-states the same closed set for the refusal audit
+#: (pinned together by `tests/test_refusal_audit.py`), and a role outside it is a boot refusal rather than
+#: a credential with unusual powers.
+CREDENTIAL_ROLES = ('reader', 'producer', 'proposer', HUMAN, 'executor', 'summary', OPERATOR_AGENT)
 
 
 def identifier(value: str) -> str:
@@ -919,11 +943,63 @@ CREATE TABLE {CREDENTIAL_REVOCATION_TABLE} (identity TEXT PRIMARY KEY,
     reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND {CREDENTIAL_REVOCATION_REASON_LIMIT}));
 '''
 
+# Schema v15 (who signed what: the role beside the identity, for the three typed rows that record an
+# operator's decision): three columns, and no change to any existing row's meaning.
+#
+# Until this step the platform could store *who* decided and could only answer "was that a person?" from
+# the role vocabulary it was built with, in which exactly one role could sign a disposition or a silence.
+# `operator-agent` is a second one — an automated operator acting under its own credential — and a row that
+# cannot say which of the two spoke is a row that reads differently the day the second role appears. So
+# each of the three tables that holds an operator's statement gains the role of the actor named beside it:
+# the effective disposition, its append-only history, and one version of a maintenance plan.
+#
+# `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT 'human'` is the whole step, and the default is not a
+# convenience: an existing row was written when only a `human` credential could sign one, so `human` is a
+# fact about that row rather than a guess about it, and the backfill means no read has to branch on a
+# version. The CHECK is the same closed pair the writers accept (`state.OPERATOR_ROLES`), spelled once here
+# so a row naming a role the platform never configured is unrepresentable rather than merely unwritten —
+# the v12 argument for a CHECK over a caller's discipline, applied to a column two builds now read.
+#
+# What is deliberately **not** in this step, with the reason each was rejected rather than left as an
+# oversight: `occurrence_dismissals` (the tombstone) keeps its `actor` alone, because no read answers a
+# question about who tombstoned a pair — the row exists to say *whether* an episode was closed, and an
+# effect nobody reads is not a fact worth a column; `platform_jobs.approved_by` and
+# `credential_revocations.revoked_by` stay human-only by policy, so a role column there would describe a
+# state the gates refuse to produce. A *window* stores the role too, and needs no column at all: a window
+# is a JSON control document, and its declared block gains `author_role` as envelope version 3
+# (`platform/suppression.py`), which is also what puts the role into the `maintenance.declared` audit row
+# the window is attested against, byte for byte.
+#
+# The checklist a new step must answer (the v7 preamble's, applied here): this step adds **no table**, so
+# `tests/test_state_migration.py`'s `CURRENT_TABLES` pin is unmoved, and it adds no index, so
+# `escalation_reader`'s `INDEXED BY` statements, `tests/test_escalation_history.py` (rewound to steps 1..6)
+# and `tests/test_upgrade_acceptance.py`'s `INDEX_NAMES` are unmoved. It *does* move
+# `tests/test_incident_grouping_migration.py`'s list of `schema.migrated` subjects for a v1 file walking the
+# whole chain, which now ends at '15', and it is proven from a v14 file by
+# `tests/test_operator_agent_migration.py`, which also asserts that a disposition and a schedule version
+# written *before* the step still read as `human` afterwards. `tests/test_maintenance_history.py` (rewound
+# to 5) and `tests/test_verification_records_migration.py` (to 4) compare a fresh file against one migrated
+# to *their own* pinned version, so a step above theirs changes nothing. The documents that state the schema
+# number — `docs/CONTRACTS.md` §5, `local_observe/platform/README.md`, `docs/api/COVERAGE.md` and the rows of
+# `docs/api/coverage.yaml` that quote a version — move with it.
+OPERATOR_ROLE_DISPOSITIONS = 'actor_role'
+OPERATOR_ROLE_SCHEDULES = 'declared_by_role'
+_OPERATOR_ROLE_SQL = ','.join(f"'{role}'" for role in OPERATOR_ROLES)
+OPERATOR_ATTRIBUTION_SCHEMA = f'''
+ALTER TABLE {OCCURRENCE_DISPOSITION_TABLE} ADD COLUMN {OPERATOR_ROLE_DISPOSITIONS} TEXT NOT NULL
+    DEFAULT '{HUMAN}' CHECK({OPERATOR_ROLE_DISPOSITIONS} IN ({_OPERATOR_ROLE_SQL}));
+ALTER TABLE {OCCURRENCE_DISPOSITION_HISTORY_TABLE} ADD COLUMN {OPERATOR_ROLE_DISPOSITIONS} TEXT NOT NULL
+    DEFAULT '{HUMAN}' CHECK({OPERATOR_ROLE_DISPOSITIONS} IN ({_OPERATOR_ROLE_SQL}));
+ALTER TABLE {MAINTENANCE_SCHEDULE_TABLE} ADD COLUMN {OPERATOR_ROLE_SCHEDULES} TEXT NOT NULL
+    DEFAULT '{HUMAN}' CHECK({OPERATOR_ROLE_SCHEDULES} IN ({_OPERATOR_ROLE_SQL}));
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
                               7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
                               10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA, 12: OCCURRENCE_DISPOSITION_SCHEMA,
-                              13: MAINTENANCE_SCHEDULES_SCHEMA, 14: ADMINISTRATION_SCHEMA}
+                              13: MAINTENANCE_SCHEDULES_SCHEMA, 14: ADMINISTRATION_SCHEMA,
+                              15: OPERATOR_ATTRIBUTION_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
@@ -932,6 +1008,21 @@ CONTROL_MODE = 'mode'
 def circuit_key(channel: str) -> str:
     """Return the control key holding the flood breaker of one notification channel."""
     return 'circuit:' + channel
+
+
+def stored_role(row: Any, column: str, *, default: str = HUMAN) -> str:
+    """Return the actor role one row carries, reading a pre-v15 row as the role that could write it.
+
+    A file this build opens is migrated, so the column exists and is NOT NULL. A test harness or a repair
+    tool that rewinds `MIGRATIONS` to a lower step, and a `SELECT` that named fewer columns than the table
+    holds, are the two ways a row arrives without one — and both deserve the honest answer (`human`, which
+    is the only role that could sign a disposition or a schedule version before v15) rather than an
+    `IndexError` in the middle of a read. Nothing here invents a role for a row that has one.
+    """
+    if column not in row.keys():
+        return default
+    value = row[column]
+    return default if value is None else str(value)
 
 
 def test_window_key(window_id: str) -> str:

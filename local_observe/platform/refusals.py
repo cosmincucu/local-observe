@@ -48,9 +48,11 @@ OPERATION = 'action.refused'
 #: reason alone is not enough to tell the two stories apart.
 ATTEMPTS = ('propose', 'decide', 'claim', 'outcome')
 #: The roles the platform knows. `api.create_app` accepts exactly this list for a credential, and
-#: `test_the_role_vocabulary_is_the_one_the_api_accepts` pins the two spellings together: a seventh
-#: role would otherwise become an audit value nobody reviewed.
-ROLES = ('reader', 'producer', 'proposer', 'human', 'executor', 'summary')
+#: `test_the_role_vocabulary_is_the_one_the_api_accepts` pins the two spellings together: an eighth
+#: role would otherwise become an audit value nobody reviewed. `operator-agent` joined it in schema v15
+#: for the same reason the other six are here: a denied write by an automated operator is a refusal an
+#: operator reads about, so the audit must be able to name which credential class was turned away.
+ROLES = ('reader', 'producer', 'proposer', 'human', 'executor', 'summary', 'operator-agent')
 #: Stored instead of a subject that is not a canonical UUID. A refusal often has no durable row to
 #: point at (a bad identifier, a missing action), and "we do not know which one" is the honest value.
 UNBOUND = 'unbound'
@@ -152,7 +154,7 @@ def attribution(actor: Any) -> tuple[str, str] | None:
     """Return ``(identity, role)`` for an `Actor` this module can honestly name, else `None`.
 
     `None` is the answer that matters: a caller that hands the state layer something which is not an
-    `Actor`, or one whose identity is not a bounded label, or whose role is not one of the six words,
+    `Actor`, or one whose identity is not a bounded label, or whose role is not one of the seven words,
     gets **no row at all** rather than a row naming a fabricated or hashed actor. Counting the refusal
     as unauditable is the honest record; inventing an identity for it would put words in a reader's
     mouth about who was refused.
