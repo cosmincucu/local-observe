@@ -807,6 +807,58 @@ paths:
           $ref: '#/components/responses/SummaryOnly'
         '409':
           $ref: '#/components/responses/IdempotencyConflict'
+  /v1/notifications/deliveries:
+    post:
+      tags: [notifications]
+      operationId: notification.deliver.request
+      x-status: implemented
+      x-required-role: [human]
+      summary: Attempt one queued delivery now, through the channel this service already has.
+      description: |
+        `lo-platform notify` as a route: one outbox claim, the provider call behind it, and the outcome
+        class recorded on the attempt row — through `notifications.deliver_one`, the same call the service's
+        own delivery loop makes, so this is a pump and not a second delivery path. It sends only when this
+        installation's mode says live; under `recording` the claim goes to the local sink, and under `off`
+        the route answers `409` rather than pretending to have a queue it will drain. `Idempotency-Key` is
+        what stops a lost answer from becoming a second page: the replayed request reads its first answer
+        back and claims nothing.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        '200':
+          description: One claim attempted, or `idle` when the queue was empty.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationDelivery'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
   /v1/callbacks/{channel}:
     post:
       tags: [notifications]
@@ -1387,6 +1439,555 @@ paths:
           oneOf:
             - $ref: '#/components/responses/ObserverReviewBusy'
             - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/health:
+    get:
+      tags: [observer]
+      operationId: investigation.health.read
+      x-status: implemented
+      x-required-role: [reader, human]
+      summary: Whether the newest finished investigation cycle is recent, complete and healthy.
+      description: |
+        The answer `lo-observer check` prints, from the same journal and the same rule: a running cycle
+        neither refreshes nor hides the newest finished one, and `healthy` means "completed, completely,
+        within `max_age_seconds`" and nothing else. A `reader` may ask it because it is an operational
+        posture, not a review: no answer, finding, correction or grade appears here, and `meaning` says so
+        in the body. The bound the verdict was judged against is echoed as `max_age_seconds`, because a
+        `false` against a week and a `false` against an hour are different facts. Served only when this
+        installation named an observer journal; otherwise `404`.
+      parameters:
+        - name: max_age_seconds
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 604800
+            default: 7200
+      responses:
+        '200':
+          description: The freshness verdict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObserverHealth'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/cases:
+    get:
+      tags: [observer]
+      operationId: investigation.case.list
+      x-status: implemented
+      x-required-role: [human]
+      summary: The retained human corrections the observer may retrieve as examples.
+      description: |
+        `human` alone: these are the corrected answers a reviewer approved for reuse, with the evidence
+        they were corrected against. Every row carries `trust: untrusted_reference_only` — a retrieved
+        example is material to read, never an instruction to obey, and this route is the read side of the
+        same rule that stops a model's own claim from becoming a label. Newest first, and only the latest
+        correction of a cycle is ever returned.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        '200':
+          description: The retrievable cases.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObserverCaseList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/capabilities:
+    get:
+      tags: [observer]
+      operationId: investigation.capability.read
+      x-status: implemented
+      x-required-role: [reader, human]
+      summary: What this installation may do about investigations, and what is deliberately off.
+      description: |
+        An optional integration that is absent must not disable anything else, so a caller that needs to
+        know whether a family is live asks here instead of probing a write: the journal this surface reads,
+        the delivery session's state word, whether a rule-floor round is configured, and the notification
+        mode this process booked itself. Nothing names a host, a path, a model version, a channel
+        identifier or a secret.
+      responses:
+        '200':
+          description: The posture of this installation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObserverCapabilities'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/runs:
+    post:
+      tags: [observer]
+      operationId: investigation.run.request
+      x-status: implemented
+      x-required-role: [human]
+      summary: Admit one bounded investigation cycle.
+      description: |
+        `202` with a job, not a cycle: one run queries every configured source, asks a model and holds the
+        journal's exclusive lock, which is work a request may not wait for and a request handler cannot
+        host — the cycle runtime refuses any thread but the main one with a live alarm
+        (`unix_main_thread_required`). The observer process claims admitted cycles with `lo-observer drain`,
+        under its own lock and deadline, and the job's `runner` says which process will run it. The cycle
+        identifier is the request's identity: asking twice for the same one reads the same job back with
+        `reused: true` and admits nothing second time.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvestigationRunRequest'
+      responses:
+        '202':
+          description: The cycle is admitted; read the job for its state.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/exports:
+    post:
+      tags: [observer]
+      operationId: investigation.export.request
+      x-status: implemented
+      x-required-role: [human]
+      summary: Admit one provenance-preserving export of the retrievable cases.
+      description: |
+        The same walk and the same file `lo-observer export` writes — one canonical example per line, inside
+        the private state directory, created exclusively and never at a caller-named path — started here and
+        answered with a job. This process runs it: the work is bounded by `limit`, needs no model and holds
+        no lock but the journal's. The answer names the job, and the job's `result` names the file. There is
+        no durable dedupe on purpose: an export is a fresh view of the retained cases, so `Idempotency-Key`
+        is what covers a lost acknowledgement of this one request.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvestigationExportRequest'
+      responses:
+        '202':
+          description: The export is admitted and started.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAnswer'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/jobs:
+    get:
+      tags: [observer]
+      operationId: investigation.job.list
+      x-status: implemented
+      x-required-role: [human]
+      summary: The jobs this installation admitted, newest first.
+      description: |
+        A page over the durable job records, so an operator can see what is waiting, what is running and
+        what nobody reported on. A `running` row whose runner has not reported within two hours is returned
+        as `unknown`: the process that owned it may have died, and an honest queue says so rather than
+        keeping a job looking alive forever.
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: One page of jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/jobs/{job_id}:
+    get:
+      tags: [observer]
+      operationId: investigation.job.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: One job, its state, and what its runner reported.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/jobs/{job_id}/cancellations:
+    post:
+      tags: [observer]
+      operationId: investigation.job.cancel
+      x-status: implemented
+      x-required-role: [human]
+      summary: Withdraw a job that has not started.
+      description: |
+        Takes an empty object. A job still `accepted` has done nothing, and withdrawing it is true. A
+        `running` one answers `409`: the only thing that stops a cycle in flight is its own wall-clock
+        deadline, and a platform that pretended otherwise would leave a caller believing work had stopped
+        when it had not. Asking again about a job that already finished reads that job back.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        '200':
+          description: The job is withdrawn, or was already finished.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDetail'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/delivery:
+    get:
+      tags: [observer]
+      operationId: investigation.delivery.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: The delivery session this journal holds, and whether it may send.
+      description: |
+        The session's state — waiting for a reconciliation, armed, disarmed, or shadowed after an uncertain
+        send — plus the acceptance record it binds and the precision of the human labels gathered since.
+        The destination's own identifiers are never returned: `channel` carries the kind, the daily budget
+        and the digest that binds the configured channel, which answers "is this the channel I set?" without
+        publishing a chat identifier to every credential that can read the route.
+      responses:
+        '200':
+          description: The delivery session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/delivery/disarm:
+    post:
+      tags: [observer]
+      operationId: investigation.delivery.disarm
+      x-status: implemented
+      x-required-role: [human]
+      summary: Stop this journal from sending anything further.
+      description: |
+        `lo-observer disarm` over the same row: the send epoch is replaced, so nothing another process holds
+        in memory can send again, and the sessions and delivery rows — including an uncertain attempt — stay
+        exactly as they were. Takes an empty object; there is no reason field to attach to a stop.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        '200':
+          description: The session, after the disarm.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryStatus'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/observer/delivery/reconciliations:
+    post:
+      tags: [observer]
+      operationId: investigation.delivery.reconcile
+      x-status: implemented
+      x-required-role: [human]
+      summary: Attest that a waiting session's earlier external effects were reconciled.
+      description: |
+        A restarted observer refuses to send until somebody has checked what the previous process may have
+        already sent — the `waiting` state is that refusal, and this write is the answer to it. The
+        attestation is the `human` credential that signed the request, exactly as an approval is, so the
+        body carries no `attested`, no `actor` and no `epoch`: this platform mints the epoch, and a caller
+        that supplied one could hand back an epoch the journal has already seen. A session that is not
+        waiting, or whose hour has run out, is a `409` that says which.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryReconciliationRequest'
+      responses:
+        '200':
+          description: The session, authorized to send under a fresh epoch.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryStatus'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '503':
+          oneOf:
+            - $ref: '#/components/responses/ObserverReviewBusy'
+            - $ref: '#/components/responses/ObserverStateUnavailable'
+  /v1/explanations/rounds:
+    post:
+      tags: [observer]
+      operationId: investigation.explanation.request
+      x-status: implemented
+      x-required-role: [human]
+      summary: One round of the rule-floor explanation over the open incidents.
+      description: |
+        The same bounded pass `lo-platform rca` runs, through `rca.tick` and no other path: it files no
+        event, issues no query, and asks no model — `generate` stays unset here as it does in the CLI, so a
+        missing AI provider cannot make this route fail and the rule floor answers on its own. With no
+        rule-floor configuration installed the answer is `{"status": "off", "configured": false}`, which is
+        a posture and not an error; the round itself is bounded by the installed document's `max_incidents`,
+        which is why it is a bounded write rather than a job. The configuration is this process's, never a
+        request's: `LO_RCA_CONFIG` names the document and `LO_RCA_SOURCE` labels what it files, exactly the
+        pair `lo-platform rca` takes. A named document that cannot be parsed stops the service when it is
+        constructed, because a round that reads no rules would report causes it never had.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        '200':
+          description: The round's report, or the honest `off` answer.
+          headers:
+            X-Idempotency-Replayed:
+              $ref: '#/components/headers/XIdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ExplanationRound'
+                  - $ref: '#/components/schemas/ExplanationRoundOff'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/NotAuthorised'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/IdempotencyConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
   /v1/operator-auth:
     get:
       tags: [operator]
@@ -2427,6 +3028,17 @@ components:
       description: An opaque continuation token from a previous page's `next_cursor`. A token this service never issued is refused.
       schema:
         type: string
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      description: |
+        The job identifier one `202` handed back. An identifier that is not a bounded one is refused by the
+        parser (`400`), and one this queue never admitted answers `404`: those are different facts, and a
+        caller holding a truncated id needs to know which one it has.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$'
     OccurrenceId:
       name: id
       in: path
@@ -2568,6 +3180,17 @@ components:
           schema:
             $ref: '#/components/schemas/LegacyError'
           example: {"error": "conflict", "detail": "Action is not pending"}
+    NotAuthorised:
+      description: |
+        A credential this route does not answer to. `403` and not `400`: the request was well-formed, and
+        what is missing is an authority the caller may hold under a different token.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
     ContractError:
       description: |
         A refusal the shared boundary chose, in the machine envelope: one code, one sentence, and the request
@@ -4476,3 +5099,368 @@ components:
         bound_exceeded:
           type: boolean
       required: [status, id, version, schedule, windows_revoked, windows_superseded, bound_exceeded]
+    ObserverHealth:
+      type: object
+      description: |
+        Freshness and completeness of the newest *finished* cycle. `healthy` is execution and coverage only;
+        whether a human agreed with the cycle is a separate fact this record cannot carry.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        healthy:
+          type: boolean
+        cycle_id:
+          type:
+            - string
+            - 'null'
+        status:
+          type: string
+          description: The cycle's own status, or `never_run` when the journal holds no record at all.
+        coverage:
+          type: string
+        ended_at:
+          type:
+            - string
+            - 'null'
+        meaning:
+          type: string
+          const: execution_and_coverage_only; human_review_is_separate
+        max_age_seconds:
+          type: integer
+          description: The freshness bound this verdict was judged against — the query value, or 7200.
+      required: [schema_version, healthy, cycle_id, status, coverage, ended_at, meaning,
+        max_age_seconds]
+    ObserverCaseList:
+      type: object
+      description: The retained human corrections, each one the latest of its cycle.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        examples:
+          type: array
+          items:
+            type: object
+        returned:
+          type: integer
+        trust:
+          type: string
+          const: untrusted_reference_only
+        bound:
+          type: string
+          const: latest_independent_correction_per_cycle
+      required: [schema_version, examples, returned, trust, bound]
+    ObserverCapabilities:
+      type: object
+      description: |
+        Posture, not configuration: which optional surfaces this installation may use, in words a caller can
+        branch on. No host, path, model version, channel identifier or secret appears in any answer.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        journal:
+          type: string
+          enum: [mounted, absent]
+        delivery:
+          type: object
+          properties:
+            session:
+              type: string
+              description: The session's state, or `no_journal` / `unreadable` when there is nothing to read.
+            disarm:
+              type: string
+              enum: [available, absent]
+          required: [session, disarm]
+        explanation:
+          type: object
+          properties:
+            configured:
+              type: boolean
+            model_used:
+              type: boolean
+              description: |
+                Always false on this build: the explanation round runs the rule floor and never constructs a
+                model client, so a missing or broken AI provider cannot disable this route.
+            reason:
+              type:
+                - string
+                - 'null'
+          required: [configured, model_used, reason]
+        notification_mode:
+          type: string
+          description: The mode this process booked for itself — `off`, `recording` or `live`.
+        meaning:
+          type: string
+          const: posture_only; no host, path, model, channel identifier or secret is named
+      required: [schema_version, journal, delivery, explanation, notification_mode, meaning]
+    Job:
+      type: object
+      description: |
+        One admitted request. `status` is what happened, not what was asked: `unknown` means a runner stopped
+        reporting and the outcome cannot be told, and `runner` names the process able to move the job.
+      properties:
+        job_id:
+          type: string
+        kind:
+          type: string
+        runner:
+          type: string
+          enum: [observer, platform]
+        actor:
+          type: string
+          description: The credential identity that admitted the job. Never a body field.
+        status:
+          type: string
+          enum: [accepted, running, succeeded, failed, cancelled, unknown]
+        argument:
+          type: object
+        result:
+          type:
+            - object
+            - 'null'
+        error:
+          type:
+            - string
+            - 'null'
+          description: A public refusal code, never exception prose or a provider message.
+        created_at:
+          type: string
+        started_at:
+          type:
+            - string
+            - 'null'
+        finished_at:
+          type:
+            - string
+            - 'null'
+        claimed_by:
+          type:
+            - string
+            - 'null'
+      required: [job_id, kind, runner, actor, status, argument, result, error, created_at, started_at,
+                 finished_at, claimed_by]
+    JobAnswer:
+      type: object
+      description: The accepted ask, plus the two facts a caller needs to stop asking.
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        job:
+          $ref: '#/components/schemas/Job'
+        reused:
+          type: boolean
+          description: This request is already in the queue; nothing was admitted a second time.
+        runner:
+          type: string
+          enum: [observer, platform]
+        note:
+          type: string
+      required: [schema_version, job, reused, runner]
+    JobList:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+        limit:
+          type: integer
+        returned:
+          type: integer
+        next_cursor:
+          type: string
+        statuses:
+          type: array
+          items:
+            type: string
+      required: [schema_version, rows, limit, returned, statuses]
+    JobDetail:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        job:
+          $ref: '#/components/schemas/Job'
+      required: [schema_version, job]
+    InvestigationRunRequest:
+      type: object
+      description: |
+        One cycle identity, chosen by the caller and used as the request's dedupe key: `Observer.run` treats
+        a cycle it has already recorded as an answer rather than a second run, and the queue says the same.
+      properties:
+        cycle_id:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$'
+      required: [cycle_id]
+    InvestigationExportRequest:
+      type: object
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 100
+    DeliveryReconciliationRequest:
+      type: object
+      description: |
+        The session being reconciled, and optionally how many model sends a human has confirmed already went
+        out today. Nothing here attests anything: the `human` credential that signed the request is the
+        attestation, and an `attested` or `epoch` field in this body is refused.
+      properties:
+        session_id:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$'
+        used_today_floor:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          maximum: 2
+      required: [session_id]
+    DeliverySession:
+      type: object
+      description: |
+        One delivery session as the journal holds it. `channel` is a summary by design — the destination's
+        own `chat_id` and `user_id` are never part of an answer here.
+      properties:
+        state:
+          type: string
+          enum: [no_running_session, waiting, authorized, armed, disarmed, shadow]
+        session_id:
+          type: string
+        created_at:
+          type: string
+        expires_at:
+          type: string
+        acceptance_sha256:
+          type: string
+        channel:
+          type: object
+          properties:
+            channel:
+              type: string
+            daily_limit:
+              type: integer
+            channel_sha256:
+              type: string
+        epoch:
+          type:
+            - string
+            - 'null'
+        actor:
+          type:
+            - string
+            - 'null'
+        reconciled_at:
+          type:
+            - string
+            - 'null'
+        used_today_floor:
+          type:
+            - integer
+            - 'null'
+        reviewed_precision:
+          type: object
+        error:
+          type:
+            - string
+            - 'null'
+      required: [state]
+    DeliveryStatus:
+      type: object
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        delivery:
+          $ref: '#/components/schemas/DeliverySession'
+      required: [schema_version, delivery]
+    ExplanationRound:
+      type: object
+      description: |
+        One round's accounting. `count_scope: page` and `capped` together are what let a caller tell "these
+        are all the open incidents" from "this round stopped at its own bound".
+      properties:
+        status:
+          type: string
+          const: ran
+        source:
+          type: string
+        incidents_open:
+          type: integer
+        incidents_read:
+          type: integer
+        count_scope:
+          type: string
+          const: page
+        capped:
+          type: boolean
+        cycle_complete:
+          type: boolean
+        attempted:
+          type: integer
+        failed:
+          type: integer
+        analyzed:
+          type: integer
+        written:
+          type: integer
+        unchanged:
+          type: integer
+        no_candidate:
+          type: integer
+        model_used:
+          type: integer
+          description: |
+            Generation calls this round made. Zero on this build: the rule floor answers on its own, so a
+            missing AI provider cannot make this route fail.
+        discarded:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+      required: [status, source, incidents_open, incidents_read, count_scope, capped, cycle_complete,
+                 attempted, failed, analyzed, written, unchanged, no_candidate, model_used, discarded,
+                 results]
+    ExplanationRoundOff:
+      type: object
+      description: No rule-floor document is installed, so nothing ran and nothing failed.
+      properties:
+        status:
+          type: string
+          const: 'off'
+        configured:
+          type: boolean
+          const: false
+        analyzed:
+          type: integer
+          const: 0
+        reason:
+          type: string
+          const: no-rule-floor-configuration
+      required: [status, configured, analyzed, reason]
+    NotificationDelivery:
+      type: object
+      description: |
+        One claim and its outcome. `idle` means the queue was empty; `suppressed` means a decision, not a
+        failure, stopped the send; the cause class of a failure lives on the attempt row, where
+        `GET /v1/records/notification_attempts` reads it.
+      properties:
+        status:
+          type: string
+          enum: [idle, suppressed, pending, sent, dead]
+        delivery_id:
+          type: string
+        destination:
+          type: string
+        reason:
+          type: string
+      required: [status]

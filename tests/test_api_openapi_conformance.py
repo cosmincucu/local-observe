@@ -49,7 +49,8 @@ OPENAPI = ROOT / 'docs' / 'api' / 'openapi.yaml'
 #: whole package would either forgive a missing document entry or demand one for someone else's API.
 SERVED_TRANSPORTS = ('local_observe/platform/api.py', 'local_observe/platform/verification_api.py',
                      'local_observe/platform/observer_review.py', 'local_observe/platform/operator.py',
-                     'local_observe/platform/maintenance_api.py')
+                     'local_observe/platform/maintenance_api.py',
+                     'local_observe/platform/investigations_api.py')
 
 READER = {'identity': 'reader', 'role': 'reader', 'token': 'r' * 32}
 PRODUCER = {'identity': 'test-detector', 'role': 'producer', 'token': 'p' * 32}

@@ -181,33 +181,52 @@ class ImportBoundaryTests(unittest.TestCase):
         the tail of its module rather than by package arithmetic: the question is "does this file reach
         rca", not "under what absolute name does it arrive".
         """
+        return self._reach('local_observe', every_node=True)
+
+    def _reach(self, directory: str, *, every_node: bool) -> list[str]:
+        """The files under `directory` that bind `rca`, in their header or anywhere by `every_node`."""
         found = []
-        for path in sorted((ROOT / 'local_observe').rglob('*.py')):
+        for path in sorted((ROOT / directory).rglob('*.py')):
             tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import) and any(alias.name.split('.')[-1] == 'rca'
-                                                        for alias in node.names):
-                    found.append(path)
-                    break
-                if isinstance(node, ast.ImportFrom) and (node.module or '').split('.')[-1] == 'rca':
-                    found.append(path)
-                    break
-                if isinstance(node, ast.ImportFrom) and any(alias.name == 'rca'
-                                                            for alias in node.names):
+            for node in (ast.walk(tree) if every_node else tree.body):
+                if self.names_rca(node):
                     found.append(path)
                     break
         return [path.relative_to(ROOT).as_posix() for path in found]
 
-    def test_exactly_two_modules_import_this_one(self) -> None:
-        """The command that runs a round, and the view that reads the record back. Nothing else.
+    @staticmethod
+    def names_rca(node) -> bool:
+        """Whether one import statement binds this module, in any of the three shapes the product uses."""
+        if isinstance(node, ast.Import):
+            return any(alias.name.split('.')[-1] == 'rca' for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            return ((node.module or '').split('.')[-1] == 'rca'
+                    or any(alias.name == 'rca' for alias in node.names))
+        return False
+
+    def test_the_modules_that_reach_this_one_are_the_command_the_view_and_the_route(self) -> None:
+        """The command that runs a round, the view that reads the record back, and the route that admits one.
 
         This is the `If disabled` clause read structurally: `api.py` cannot depend on it, the delivery
-        rail cannot, and no producer can, so deleting this module costs an operator one label on one view
-        and one subcommand — which is exactly what the component row claims, and the only two names this
-        assertion can therefore tolerate.
+        rail cannot, and no producer can, so deleting this module costs an operator one label on one view,
+        one subcommand, and one route — the third name is new, and it arrived with
+        `POST /v1/explanations/rounds` rather than with a looser rule: the next two assertions still
+        refuse `api.py`, and they refuse a module-scope bind in the route family too.
         """
         self.assertEqual(self.importers(), ['local_observe/platform/cli.py',
+                                            'local_observe/platform/investigations_api.py',
                                             'local_observe/platform/presentation.py'])
+
+    def test_the_route_holds_it_inside_a_body_never_in_its_header(self) -> None:
+        """`conformance.md` §2's harder meaning, kept true for a route: the module may be uninstalled.
+
+        A round is admitted over HTTP now, but `import local_observe.platform.api` must still work on an
+        image with no `rca` in it, because nothing in the serving path may make detection, incidents and
+        notifications unimportable. So the route family binds this module only inside function bodies —
+        the file is read as syntax, and an `import` in its header is a failure, not a style note.
+        """
+        self.assertEqual(self._reach('local_observe/platform', every_node=False),
+                         ['local_observe/platform/cli.py'])
 
     def test_the_serving_and_delivery_modules_do_not_name_it_at_all(self) -> None:
         for relative in ('local_observe/platform/api.py', 'local_observe/platform/notifications.py',

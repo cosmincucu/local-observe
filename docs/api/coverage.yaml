@@ -296,25 +296,31 @@ operations:
   # ------------------------------------------------------------------------------------------
   - {operation_id: investigation.run, surface: cli, method: run, path: "lo-observer run", resource: investigation,
      module: local_observe/observer/runtime.py, access: write, required_role: [local],
-     side_effects: "one bounded cycle: journal rows, retained redacted evidence, delivery state", state_source: "observer journal (private 0700 directory)", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "one bounded cycle: journal rows, retained redacted evidence, delivery state", state_source: "observer journal (private 0700 directory)", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.run.request` (a job) and read back by `investigation.job.read`; `lo-observer drain` is the half that claims admitted cycles and runs them under this process's own lock, main thread and wall-clock deadline."}
   - {operation_id: investigation.serve, surface: cli, method: run, path: "lo-observer serve", resource: investigation,
      module: local_observe/observer/runtime.py, access: write, required_role: [local],
      side_effects: "scheduled cycles on the same journal", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
-  - {operation_id: investigation.replay, surface: cli, method: run, path: "lo-observer replay <cycle_id>", resource: investigation,
-     module: local_observe/observer/journal.py, access: write, required_role: [local],
-     side_effects: "a re-run of one recorded cycle; the original record stays", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.replay, surface: cli, method: read, path: "lo-observer replay <cycle_id>", resource: investigation,
+     module: local_observe/observer/journal.py, access: read, required_role: [local],
+     side_effects: none, state_source: "observer journal, read-only", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Corrected from `write`: `journal.replay` returns the retained cycle document and its feedback and changes nothing — no cycle re-runs. The read over HTTP is `investigation.cycle.read`, which returns the same record and calls it `replay`; running a recorded cycle again is `investigation.run` with that cycle id."}
   - {operation_id: investigation.check, surface: cli, method: read, path: "lo-observer check", resource: investigation,
      module: local_observe/observer/journal.py, access: read, required_role: [local],
-     side_effects: none, state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: none, state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.health.read`, over the same `journal.check` call."}
   - {operation_id: investigation.feedback.record, surface: cli, method: run, path: "lo-observer feedback <cycle_id>", resource: investigation-review,
      module: local_observe/observer/journal.py, access: write, required_role: [local],
-     side_effects: "one versioned human correction; the model's own claim is never rewritten", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "one versioned human correction; the model's own claim is never rewritten", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "The same `journal.feedback` append `investigation.review.record` serves; the CLI is graded as `os-uid:<uid>` and the authenticated surface as `platform-human:<identity>`, and neither can be named from a body."}
   - {operation_id: investigation.retrieve, surface: cli, method: read, path: "lo-observer retrieve", resource: investigation,
      module: local_observe/observer/journal.py, access: read, required_role: [local],
-     side_effects: none, state_source: "observer journal (eligible corrected cases)", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: none, state_source: "observer journal (eligible corrected cases)", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.case.list`, over the same `journal.examples` call."}
   - {operation_id: investigation.export, surface: cli, method: run, path: "lo-observer export", resource: investigation,
      module: local_observe/observer/journal.py, access: write, required_role: [local],
-     side_effects: "a provenance-preserving export file inside the private state directory", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "a provenance-preserving export file inside the private state directory", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.export.request`, which runs the same walk and the same file writer and names the file in the job result — a caller never names a path."}
   - {operation_id: investigation.quality.accept, surface: cli, method: run, path: "lo-observer quality-accept|quality-revoke", resource: investigation-quality,
      module: local_observe/observer/acceptance.py, access: write, required_role: [local],
      side_effects: "one acceptance record, or its withdrawal; a pooled cycle is refused", state_source: "evaluation report and journal", status: implemented, owner_area: investigations-notifications-actions}
@@ -323,13 +329,16 @@ operations:
      side_effects: "one model-assisted message on the configured channel, when acceptance and the daily floor allow it", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
   - {operation_id: investigation.delivery_status.read, surface: cli, method: read, path: "lo-observer delivery-status", resource: investigation-delivery,
      module: local_observe/observer/delivery.py, access: read, required_role: [local],
-     side_effects: none, state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: none, state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.delivery.read`, with the destination's own identifiers removed."}
   - {operation_id: investigation.disarm, surface: cli, method: run, path: "lo-observer disarm", resource: investigation-delivery,
      module: local_observe/observer/delivery.py, access: write, required_role: [local],
-     side_effects: "delivery is disarmed for this journal; nothing further may send", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "delivery is disarmed for this journal; nothing further may send", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.delivery.disarm` — the same `delivery.disarm`."}
   - {operation_id: investigation.reconcile, surface: cli, method: run, path: "lo-observer reconcile", resource: investigation-delivery,
      module: local_observe/observer/delivery.py, access: write, required_role: [local],
-     side_effects: "one reconciled session/epoch against its external effects, with the attestation recorded", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "one reconciled session/epoch against its external effects, with the attestation recorded", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.delivery.reconcile`. There the attestation is the `human` credential instead of a typed session id and the epoch is minted by the service; the OS-derived actor is why the two entry points share rules and not an identity."}
   - {operation_id: investigation.cycle.list, surface: http, method: GET, path: /v1/observer/cycles, resource: investigation,
      module: local_observe/platform/observer_review.py, access: read, required_role: [human],
      side_effects: none, state_source: "observer journal, read-only", status: implemented, owner_area: investigations-notifications-actions,
@@ -342,10 +351,12 @@ operations:
      side_effects: "one appended human grade against the cycle's digest", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions}
   - {operation_id: investigation.explain, surface: cli, method: run, path: "lo-platform rca", resource: explanation,
      module: local_observe/platform/rca.py, access: write, required_role: [local],
-     side_effects: "one explanation record per incident with a rule floor; no model is asked without one", state_source: "sqlite + optional built index", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "one explanation record per incident with a rule floor; no model is asked without one", state_source: "sqlite + optional built index", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `investigation.explanation.request` — the same `rca.tick`, `generate` unset."}
   - {operation_id: notification.deliver, surface: cli, method: run, path: "lo-platform notify", resource: notification,
      module: local_observe/platform/notifications.py, access: write, required_role: [local],
-     side_effects: "one outbox claim and the provider call behind it, only when the mode says live", state_source: "sqlite outbox", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "one outbox claim and the provider call behind it, only when the mode says live", state_source: "sqlite outbox", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Closed over HTTP by `notification.deliver.request` — the same `deliver_one` the service's own delivery loop calls."}
   - {operation_id: notification.retry, surface: http, method: POST, path: /v1/notifications/retry, resource: notification,
      module: local_observe/platform/state.py, access: write, required_role: [human],
      side_effects: "one re-booked delivery for a dead or failed attempt", state_source: "sqlite outbox", status: implemented, owner_area: investigations-notifications-actions,
@@ -417,16 +428,96 @@ operations:
   - {operation_id: verification.binding.cli, surface: cli, method: run, path: "lo-platform verification binding|records|record", resource: verification-record,
      module: local_observe/platform/verification_cli.py, access: read, required_role: [bearer],
      side_effects: none, state_source: "a remote platform over HTTPS", status: implemented, owner_area: investigations-notifications-actions,
-     notes: "HTTPS-only, one request per invocation, no local database and no credential on a command line."}
+     notes: "HTTPS-only, one request per invocation, no local database and no credential on a command line. The three reads it performs are `verification.binding.read`, `verification.records.list` and `verification.record.read`."}
   - {operation_id: verification.record.submit_cli, surface: cli, method: run, path: "lo-platform verification submit", resource: verification-record,
      module: local_observe/platform/verification_cli.py, access: write, required_role: [bearer],
-     side_effects: "one submitted observation", state_source: "a remote platform over HTTPS", status: implemented, owner_area: investigations-notifications-actions}
+     side_effects: "one submitted observation", state_source: "a remote platform over HTTPS", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "The write it performs is `verification.record.submit`, through this same transport."}
   - {operation_id: verification.observe.follow, surface: cli, method: run, path: "lo-platform verify-follow", resource: verification-record,
      module: local_observe/platform/verification_follower.py, access: write, required_role: [bearer],
      side_effects: "one saved post-terminal observation, replayed unchanged after a lost acknowledgement", state_source: "local saved-history file + remote platform", status: implemented, owner_area: investigations-notifications-actions}
   - {operation_id: verification.derive, surface: cli, method: run, path: "verification through lo-platform (LO_VERIFY_CONFIG)", resource: verification-record,
      module: local_observe/platform/verification.py, access: write, required_role: [local],
      side_effects: "the post-action verdict and its evidence, off unless a file is named", state_source: "sqlite + ClickHouse reads", status: implemented, owner_area: investigations-notifications-actions}
+
+  # ---- closed by this milestone: the same application functions, seen from one URL (`docs/api/investigations.md`)
+  - {operation_id: investigation.health.read, surface: http, method: GET, path: /v1/observer/health, resource: investigation,
+     module: local_observe/platform/investigations_api.py, access: read, required_role: [reader, human],
+     side_effects: none, state_source: "observer journal, read-only", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "The `lo-observer check` verdict over the same journal: execution and coverage, never a grade. That is why a `reader` is admissible here and nowhere else in this family."}
+  - {operation_id: investigation.case.list, surface: http, method: GET, path: /v1/observer/cases, resource: investigation,
+     module: local_observe/platform/investigations_api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "observer journal (eligible corrected cases)", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "`lo-observer retrieve` over the same rows: the latest human-approved correction per cycle, each marked `untrusted_reference_only`. Human only — a corrected answer is review data."}
+  - {operation_id: investigation.capability.read, surface: http, method: GET, path: /v1/observer/capabilities, resource: investigation,
+     module: local_observe/platform/investigations_api.py, access: read, required_role: [reader, human],
+     side_effects: none, state_source: "observer journal + process configuration", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "The read a caller uses to tell `off` from `not allowed for me`: journal, delivery-session state, rule-floor configuration and notification mode. Names no host, path, model version, channel identifier or secret."}
+  - {operation_id: investigation.run.request, surface: http, method: POST, path: /v1/observer/runs, resource: investigation,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "one admitted job row in the observer journal; the cycle runs when the observer claims it", state_source: "observer journal platform_jobs", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key, and deduplicates on (kind, cycle_id) as well: `Observer.run` already answers a cycle it has recorded with that record rather than a second run. `202` with the job, because a cycle is minutes of model calls under a kernel lock, and `observer/runtime.py::deadline` refuses any thread but the main one."}
+  - {operation_id: investigation.job.list, surface: http, method: GET, path: /v1/observer/jobs, resource: investigation-job,
+     module: local_observe/platform/investigations_api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "observer journal platform_jobs", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Newest first, bounded page. A `running` row whose runner stopped reporting is returned as `unknown`, which is what `job_queue.reclaim` decides two hours after the last claim."}
+  - {operation_id: investigation.job.read, surface: http, method: GET, path: "/v1/observer/jobs/{job_id}", resource: investigation-job,
+     module: local_observe/platform/investigations_api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "observer journal platform_jobs", status: implemented, owner_area: investigations-notifications-actions}
+  - {operation_id: investigation.job.cancel, surface: http, method: POST, path: "/v1/observer/jobs/{job_id}/cancellations", resource: investigation-job,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "one `accepted` job becomes `cancelled`; a running one is untouched", state_source: "observer journal platform_jobs", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key. A `running` job answers `409` with the truth: only its own wall-clock deadline ends a cycle, and a platform that claimed otherwise would report stopped work that is still running. A withdrawal of a finished job reads that job back."}
+  - {operation_id: investigation.export.request, surface: http, method: POST, path: /v1/observer/exports, resource: investigation,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "one export file inside the private state directory, created exclusively, plus its job row", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "The same `journal.examples` walk and the same one-example-per-line file `lo-observer export` writes, run in this process because it needs no model and no main thread. No durable dedupe on purpose (an export is a fresh view); `Idempotency-Key` covers a lost acknowledgement of one request. The caller never names the path."}
+  - {operation_id: investigation.delivery.read, surface: http, method: GET, path: /v1/observer/delivery, resource: investigation-delivery,
+     module: local_observe/platform/investigations_api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "observer journal, read-only", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "`lo-observer delivery-status`, with the destination's own `chat_id`/`user_id` left out: `channel` carries the kind, the daily budget and the digest that binds the configured channel."}
+  - {operation_id: investigation.delivery.disarm, surface: http, method: POST, path: /v1/observer/delivery/disarm, resource: investigation-delivery,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "delivery is disarmed for this journal; nothing further may send", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key. `delivery.disarm` unchanged, including the reason it takes no reason field: a stop needs who and when, which the row already carries."}
+  - {operation_id: investigation.delivery.reconcile, surface: http, method: POST, path: /v1/observer/delivery/reconciliations, resource: investigation-delivery,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "one reconciled session/epoch against its external effects, with the attestation recorded", state_source: "observer journal", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key. The `human` credential is the attestation, so the body carries no `attested` field and no `epoch`: this platform mints a fresh one per reconciliation, which is what makes a replayed or stolen epoch impossible to reuse."}
+  - {operation_id: investigation.explanation.request, surface: http, method: POST, path: /v1/explanations/rounds, resource: explanation,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "one explanation record per incident with a rule floor; no model is asked without one", state_source: "sqlite + optional built index", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "`rca.tick` with `generate` unset — what the CLI does and what keeps the optional `ai` package out of this process. Bounded by the installed document's own budgets, so it is a synchronous bounded write and not a job; with no document installed it answers `{\"status\": \"off\"}` and files nothing."}
+  - {operation_id: notification.deliver.request, surface: http, method: POST, path: /v1/notifications/deliveries, resource: notification,
+     module: local_observe/platform/investigations_api.py, access: write, required_role: [human],
+     side_effects: "one outbox claim and the provider call behind it, only when the mode says live", state_source: "sqlite outbox + notification_attempts", status: implemented, owner_area: investigations-notifications-actions,
+     notes: "Honours Idempotency-Key: the replayed request reads its first answer back and claims nothing, which is the whole point on a route whose side effect is a page. Sends on the channel this service already has; `off` is answered `409` rather than a silent no-op."}
+
+  # ---- refused on purpose: the same five rows, seen from HTTP, with the reason attached
+  - {operation_id: investigation.serve.http, surface: http, method: POST, path: planned, resource: investigation,
+     module: local_observe/observer/runtime.py, access: write, required_role: [human],
+     side_effects: "a second long-lived scheduler per installation, each with its own cadence", state_source: "observer journal", status: excluded, owner_area: investigations-notifications-actions,
+     notes: "A route starts a request and answers it; `lo-observer serve` is the long-lived scheduler and the flock that makes one observer the active one. A `POST /v1/observer/serve` would either fork a process the transport cannot supervise or serve cycles on the request thread, and it would replace the one lock that guarantees a single writer. CLI: `lo-observer serve --state <dir> --config <file>`."}
+  - {operation_id: investigation.quality.accept.http, surface: http, method: POST, path: planned, resource: investigation-quality,
+     module: local_observe/observer/acceptance.py, access: write, required_role: [human],
+     side_effects: "one acceptance receipt written as the OS account that re-verifies it on every send", state_source: "protected files + observer journal", status: excluded, owner_area: investigations-notifications-actions,
+     notes: "`accept_quality` reads a measured report of up to 4 MiB from a protected file the caller's OS account must own, recomputes every arm of it, and records the accepting party as `os-uid:<uid>` — the identity `AcceptedQuality.verify` re-checks before any send. A route would need either a network-supplied path (a file-read primitive) or a body this transport refuses to read that large, and its receipt would be a second, weaker writer of delivery authority. CLI: `lo-observer quality-accept`, withdrawn by `quality-revoke`."}
+  - {operation_id: investigation.deliver.http, surface: http, method: POST, path: planned, resource: investigation-delivery,
+     module: local_observe/observer/delivery.py, access: write, required_role: [human],
+     side_effects: "one model-assisted message on the configured channel", state_source: "protected channel/acceptance/report files", status: excluded, owner_area: investigations-notifications-actions,
+     notes: "The CLI sends only from a session armed by a human at the machine: it requires a TTY, prints the session identifier and refuses until the operator types it back, and it holds the channel token, acceptance and report as protected files the API does not have. What a browser can do about that session is on the list: read it, reconcile it, disarm it. CLI: `lo-observer deliver <cycle_id>`."}
+  - {operation_id: verification.observe.follow.http, surface: http, method: POST, path: planned, resource: verification-record,
+     module: local_observe/platform/verification_follower.py, access: write, required_role: [producer],
+     side_effects: "would move telemetry-store credentials into the API and make it run their queries", state_source: "a metrics store over HTTP", status: excluded, owner_area: investigations-notifications-actions,
+     notes: "The follower's own write already has a route — `POST /v1/verification/records` is what it posts through. What cannot become a route is its read side: it queries the telemetry backend with credentials mounted for itself, and a route that ran those queries would be an unvalidated query proxy holding a store credential. CLI: `lo-platform verify-follow`."}
+  - {operation_id: verification.derive.http, surface: http, method: POST, path: planned, resource: verification-record,
+     module: local_observe/platform/verification.py, access: write, required_role: [local],
+     side_effects: "would derive a verdict from backends the API is not mounted to read", state_source: "sqlite + ClickHouse reads", status: excluded, owner_area: investigations-notifications-actions,
+     notes: "The verdict is derived where the action ran, against the local `LO_VERIFY_CONFIG` and the store reads that file names, and it reaches this platform as an ordinary submitted record. Serving the derivation would put the same store credentials behind the API and make the derived verdict a function of a caller-chosen configuration. CLI: `lo-platform`'s verification path."}
+  - {operation_id: administration.evaluation.report.http, surface: http, method: POST, path: planned, resource: evaluation-report,
+     module: local_observe/evaluation/__main__.py, access: write, required_role: [local],
+     side_effects: "would be a multi-hour model workload with a protected output namespace", state_source: "corpus files + observer journal + a model route", status: excluded, owner_area: investigations-notifications-actions,
+     notes: "Offline measurement, not an operation the service should host: it builds a held-out corpus, runs three arms and writes a report into a protected output directory it reserves exclusively — hours of model calls that must still be reachable when the API is down, because the report is what a repair is measured against. CLI: `python -B -m local_observe.evaluation`."}
 
   # ------------------------------------------------------------------------------------------
   # administration — the operator surface, credentials, state lifecycle, bootstrap and recovery
