@@ -54,7 +54,8 @@ SERVED_TRANSPORTS = ('local_observe/platform/api.py', 'local_observe/platform/ve
                      # imported here the same way, so a document drift names the family it belongs to instead
                      # of a 1 300-line dispatcher.
                      'local_observe/platform/resources_api.py',
-                     'local_observe/platform/administration_api.py')
+                     'local_observe/platform/administration_api.py',
+                     'local_observe/platform/investigations_api.py')
 
 READER = {'identity': 'reader', 'role': 'reader', 'token': 'r' * 32}
 PRODUCER = {'identity': 'test-detector', 'role': 'producer', 'token': 'p' * 32}

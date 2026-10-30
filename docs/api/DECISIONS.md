@@ -318,3 +318,35 @@ still measure is the thing they were written to measure: that a refusal writes n
 does not have to. `tests/test_administration_api.py` pins the ordering itself, both directions: one read per
 admitted request, none for a bearer that did not match, and a `500` rather than a pass when the ledger is
 unreadable.
+
+## D15 — Admitted investigation work is a job in the observer's journal, not a task in the platform process
+
+**Status:** accepted, 2026-10-30.
+
+A cycle takes minutes and an export walks the retained evidence, so neither runs inside a request. The
+route records the ask and answers `202` with a job; `POST /v1/observer/runs` admits a cycle that the
+observer process later claims (`lo-observer drain`), and `POST /v1/observer/exports` admits one this
+service starts itself, because its work is a journal read and one file write.
+
+The queue is a `platform_jobs` table in the **observer journal**, not a table in the operational store, and
+that is the part a reviewer will be asked about. An investigation cycle may only run where the journal's
+exclusive lock, the process's main thread and the protected model route already are — `observer/runtime.py`
+refuses to run a cycle on any other thread outright — so a queue the API process owned would describe work
+its owner cannot perform, and a claimer would have to reach across two databases to take a job. Living in
+the journal also keeps this off `state.VERSION`: no migration step, no `tests/test_state_migration.py` pin,
+and the table arrives by `CREATE TABLE IF NOT EXISTS` on first use, which is exactly how
+`observer/delivery.py`'s session table arrived. The cost is the one every shared file pays: two processes
+now hold facts about the same rows, and the rules below exist because of it.
+
+- **Admission is not execution.** A `202` whose job stays `accepted` until a drainer arrives is honest, and
+  says so in the body (`note`) and in the operation description. A caller that needs the cycle now runs the
+  CLI it already runs.
+- **One worker identity per process.** A claimer names itself (`os-uid:<uid>:<token>` for the CLI,
+  `platform-<hex>` for this service) and only that claimer may close the row, so a dead service's work is
+  left as evidence rather than reported as success by a process that never saw it.
+- **A stalled job is judged, not resumed.** A `running` row nobody reported on for `JOB_STALE_SECONDS`
+  becomes `unknown` at the head of the next read; its `finished_at` is the instant this process stopped
+  believing the row described live work, never an instant somebody saw the work stop. Nothing retries it:
+  a second investigation cycle is an external effect nobody authorised.
+- **A running job cannot be withdrawn.** The `409` names the only thing that ends it — the cycle's own
+  deadline — because a platform-side kill would leave a half-written journal and a claim nobody released.

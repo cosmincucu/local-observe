@@ -172,9 +172,16 @@ REFUSAL_POST_ROUTES = {'/v1/actions': 'propose', '/v1/actions/decision': 'decide
 #: * The pre-existing acknowledgement surfaces (`/v1/actions/decision`, `/v1/callbacks/<channel>`) bind a
 #:   decision or an intent of their own and stay out for the reasons above; they are not dispositions, and
 #:   `docs/api/occurrences.md` §6 says what the difference is.
+#: * The investigation family's writes are in, and its one address-by-identifier write (`/v1/observer/jobs/
+#:   {id}/cancellations`) is matched by the seam's own `writes`, for the reason the maintenance family is:
+#:   the identifier is caller data. A withdrawal is idempotent at the row as well (`cancel` of a cancelled
+#:   job reads the job back), so a lost answer costs nothing and a replayed one cannot withdraw twice.
 IDEMPOTENT_POST_ROUTES = frozenset({'/v1/events', '/v1/evidence', '/v1/actions/claim',
                                     '/v1/notifications/retry', '/v1/notifications/reset-safety',
-                                    '/v1/executions/outcome', '/v1/runner/claim'})
+                                    '/v1/notifications/deliveries', '/v1/executions/outcome',
+                                    '/v1/runner/claim', '/v1/observer/runs', '/v1/observer/exports',
+                                    '/v1/observer/delivery/disarm',
+                                    '/v1/observer/delivery/reconciliations', '/v1/explanations/rounds'})
 
 
 def idempotency_enabled(path: str) -> bool:
@@ -187,10 +194,12 @@ def idempotency_enabled(path: str) -> bool:
     cannot name. A GET under those prefixes also reads as guarded, and never claims a key, because the
     claim lives in the write branch.
     """
-    from . import administration_api, maintenance_api, resources_api  # the seams own their prefixes; see `create_app`
+    from . import (administration_api, investigations_api, maintenance_api,  # the seams own their
+                   resources_api)  # prefixes; see `create_app`
     return (path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
             or occurrence_write(path) is not None or maintenance_api.writes(path)
-            or resources_api.writes(path) or administration_api.writes(path))
+            or resources_api.writes(path) or administration_api.writes(path)
+            or investigations_api.writes(path))
 
 
 def _retrieve_execution(future: Any) -> None:
@@ -357,7 +366,9 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                observer_review: Path | str | None = None,
                observed_path: Path | str | None = None,
                proposals_path: Path | str | None = None,
-               store_reader: Any | None = None) -> Callable[..., Awaitable[None]]:
+               store_reader: Any | None = None,
+               explanation_config_path: str | None = None,
+               explanation_source: str | None = None) -> Callable[..., Awaitable[None]]:
     validate_credentials(credentials)
     runner_ids = set(runner_handoff.runners) if runner_handoff is not None else set()
     if guided_setup is not None:
@@ -455,6 +466,18 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                              'runner_handoff': runner_handoff is not None,
                              'guided_setup': guided_setup is not None,
                              'observer_review': review_api is not None}
+    # The investigation route family (`investigations_api.py`): the rest of what this product can do about
+    # a bounded investigation, a delivery session and a rule-floor round. Built once per app and mounted
+    # whether or not a journal exists, because the family's own off switch is per-path: with `state=None`
+    # every `/v1/observer/*` path it owns answers the same `404 not_found` it answered before it existed,
+    # and `/v1/explanations/rounds` — a store-side operation with no journal to lose — keeps answering.
+    # The two explanation values come from `app_factory`'s environment and from nowhere else: a request may not choose
+    # which configuration an analysis round runs under.
+    from . import investigations_api as investigation_routes
+    from .investigations_api import Investigations
+    investigations = Investigations(store, state=observer_review, index_path=index_path,
+                                   explanation_config_path=explanation_config_path,
+                                   explanation_source=explanation_source)
 
     def note_delivery_failure() -> int:
         """Count one failed delivery-loop iteration, stamp when it happened, return the tally."""
@@ -1036,6 +1059,12 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(*administration_routes.read(store, path,
                                                                      scope.get('query_string', b''), actor,
                                                                      credentials=credentials, seams=seams))
+                if investigation_routes.owns(path):
+                    # The investigation reads await their own journal calls off the loop (the journal is
+                    # another process's file, and a request waiting on it would hold up authentication and
+                    # health); everything else about the answer — envelope, request id, the `summary` and
+                    # role gates above — is this transport's, as it is for every other route.
+                    return await respond(*await investigations.read(path, scope, actor))
                 return await respond(404, {'error': 'not_found'})
             if method not in ('POST', 'PATCH') or (method == 'PATCH'
                                                    and not maintenance_routes.edits(path)):
@@ -1152,6 +1181,38 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 result = guided_setup.request(path, body, actor)
             elif path == '/v1/notifications/retry' and set(body) == {'delivery_id'}:
                 result = store.retry_notification(body['delivery_id'], actor)
+            elif path == '/v1/notifications/deliveries':
+                # One queued delivery, claimed and attempted now, through `deliver_one` — the same call the
+                # service's own delivery loop makes, and the same one `lo-platform notify` makes, so this
+                # route is a pump and not a second delivery path. It runs on a worker thread for the reason
+                # the delivery loop runs it off the loop: the provider call is the slowest thing this
+                # platform does, and the serving loop must stay free to authenticate. `Idempotency-Key` is
+                # honoured by the boundary above, which is what stops a lost answer becoming a second page.
+                if body:
+                    # The route pumps whatever the queue already holds, so it has no fields to name, and the
+                    # refusal is a `400`: this path exists and is documented as taking `{}`. The narrow
+                    # `and set(body) == {...}` branches elsewhere answer `404` to a body they do not read,
+                    # which is the pre-existing shape those routes shipped with; a route new to this build
+                    # says what is actually wrong instead of sending the caller off to look for one.
+                    raise api_contract.ContractError(
+                        400, 'invalid_request', 'This route pumps the queue it holds and takes no fields')
+                try:
+                    # The role test happens here and not inside `deliver_one`, because that function is the
+                    # delivery loop's own and the loop has no credential to consult: it runs as this
+                    # installation, not as a caller. A route that pumps the queue is a human act — the same
+                    # authority `POST /v1/notifications/retry` needs and for the same reason (decision
+                    # notifications and manual re-sends are the operator's, not any token holder's).
+                    require(actor, 'human')
+                except StateError as exc:
+                    raise api_contract.ContractError(403, 'not_authorised', str(exc)) from None
+                if notification_client is None:
+                    # `off` is a posture, not a failure: this installation delivers nothing, and it must say
+                    # so rather than claim a queue it will never drain. `GET /v1/notifications/safety` and
+                    # `GET /v1/observer/capabilities` both report the same word.
+                    raise api_contract.ContractError(
+                        409, 'conflict', 'This installation delivers nothing: its notification mode is off')
+                result = await asyncio.to_thread(deliver_one, store, notification_client)
+                return await respond(200, result)
             elif occurrence_write(path) is not None:
                 # The two dispositions (`docs/api/occurrences.md`). The role test, the reason bound and the
                 # revision comparison all live in `dispositions`, so this branch adds exactly one thing the
@@ -1210,6 +1271,12 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 # the same job id rather than booking a second copy of the file.
                 return await respond(*administration_routes.write(store, path, body, actor,
                                                                  credentials=credentials))
+            elif investigation_routes.owns(path):
+                # The same two orders the maintenance family documents, and one more: this seam may answer
+                # `202` rather than `200`, because the answer to "run an investigation" is the job and not
+                # the cycle. A 2xx is what the idempotency boundary stores, so a replayed ask reads back
+                # the same job identifier and never admits a second cycle.
+                return await respond(*await investigations.write(path, body, actor))
             else:
                 return await respond(404, {'error': 'not_found'})
             return await respond(200, result)
@@ -1368,6 +1435,14 @@ def app_factory() -> Callable[..., Awaitable[None]]:
     # surface takes — a read that cannot happen says so in its envelope instead of falling back wider.
     from . import resources_api
     from .query import open_reader
+    # The rule floor's own configuration, read the way the other optional components are read: unset is off
+    # and costs nothing, and a named file that cannot be read is a boot refusal rather than a round that
+    # quietly explains nothing. The source label is required with it, exactly as `lo-platform rca`
+    # requires `--source` beside `--config`.
+    # The file itself is read by the route family that runs the round, which is also where the refusal for
+    # an unparseable one lands: `create_app` is construction, so a bad rule floor still stops the boot.
+    if os.environ.get('LO_RCA_CONFIG') and not os.environ.get('LO_RCA_SOURCE'):
+        raise ValueError('LO_RCA_SOURCE is required with LO_RCA_CONFIG')
     return create_app(store, credentials,
                       policy, clients or None,
                       os.environ['LO_INDEX_PATH'], display, os.environ.get('LO_OVERVIEW_PATH'),
@@ -1375,4 +1450,6 @@ def app_factory() -> Callable[..., Awaitable[None]]:
                       observer_review=observer_state,
                       observed_path=resources_api.path_from_environment('LO_OBSERVED_PATH'),
                       proposals_path=resources_api.path_from_environment('LO_PROPOSALS_PATH'),
-                      store_reader=open_reader())
+                      store_reader=open_reader(),
+                      explanation_config_path=os.environ.get('LO_RCA_CONFIG'),
+                      explanation_source=os.environ.get('LO_RCA_SOURCE'))

@@ -68,7 +68,12 @@ Counted from the file, so this table cannot drift from it silently:
 | `foundation` — identity, health, the transport boundary | 11 | 10 | 1 | 0 |
 | `occurrences` — events, incidents, escalation, acknowledgement | 17 | 14 | 2 | 1 |
 | `maintenance` — declared windows, suppression, flap accounting | 17 | 16 | 0 | 1 |
-COUNTS_TABLE_PLACEHOLDER
+| `resources-queries-rules-config` — inventory, queries, rules, deployment config | 33 | 24 | 0 | 9 |
+| `investigations-notifications-actions` — bounded investigations, delivery, the approval lifecycle | 65 | 58 | 0 | 7 |
+| `administration` — credentials, sessions, state, migration, backup, setup, runner | 48 | 48 | 0 | 0 |
+| **Total** | **191** | **170** | **3** | **18** |
+
+By surface: 120 HTTP, 56 CLI, 7 MCP, 8 UI. The OpenAPI document describes 104 paths and 110 operations (108 implemented, 2 planned).
 
 ### Why so many CLI rows
 
@@ -151,7 +156,7 @@ cannot be taken while the process holding the file is serving.
   read, so the refusal cannot be a parser or size verdict wearing a 403.
 * **Two verbs.** `GET` reads, `POST` writes. Anything else is `405`.
 * **Six transport refusals.** `401`, `403`, `404`, `405`, `413`, `500` are stated once in
-  `x-transport-errors` rather than repeated under all OPERATION_COUNT operations, because they are produced by the
+  `x-transport-errors` rather than repeated under all 110 operations, because they are produced by the
   dispatcher before any handler runs. Each one is proved answerable by
   `test_the_six_transport_refusals_are_all_answerable`, so the shared list cannot accrete a code this app
   never returns.

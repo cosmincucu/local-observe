@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import os
 from pathlib import Path
+import secrets
 import sys
 
 from .contract import Config, ObserverError, encoded, instant, require, strict_json
@@ -54,6 +55,13 @@ def main(argv: list[str] | None = None) -> int:
             action.add_argument('--now', help='explicit UTC observation window end for replayable local runs')
     check = commands.add_parser('check')
     check.add_argument('--max-age-seconds', type=int, default=7200)
+    # The other half of `POST /v1/observer/runs`: an admitted cycle is run here, by the process that can
+    # hold the journal's lock, own the model route and carry a wall-clock deadline on its main thread.
+    drain = commands.add_parser('drain', help='claim and run the cycles another surface admitted')
+    drain.add_argument('--config', required=True)
+    drain.add_argument('--environment', help='protected allowlisted environment JSON; no shell or ambient merge')
+    drain.add_argument('--limit', type=int, default=4,
+                       help='at most this many admitted cycles per invocation; idle is an answer, not an error')
     replay = commands.add_parser('replay')
     replay.add_argument('cycle_id')
     feedback = commands.add_parser('feedback')
@@ -167,6 +175,46 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 result = session_status(journal)
             print(encoded(result))
+            return 0
+        if args.command == 'drain':
+            # One pass over the admitted queue, then exit: a deployment puts this on a timer, and a
+            # long-lived claimer would be `serve` with a different name. The claim happens under the
+            # journal's own lock and the cycle runs outside it, because `Observer.run` takes that lock
+            # itself; the worker identity is per process, so a claim this drainer lost is visible as
+            # somebody else's `running` row rather than as two processes in one cycle.
+            # Read here and not at module scope: the queue lives beside the platform's HTTP boundary, and
+            # the observer reaches `local_observe.platform` from exactly one other place, for the same
+            # reason — a command that does not drain must not pay for it or fail on it.
+            from local_observe.platform import job_queue
+            require(1 <= args.limit <= 100, 'invalid_drain_bound')
+            config = Config.from_dict(read_json(args.config))
+            environment = load_environment(args.environment)
+            observer = Observer(config, journal, environ=environment)
+            worker = f'os-uid:{os.getuid()}:' + secrets.token_hex(6)
+            outcome = []
+            for _attempt in range(args.limit):
+                with journal.lock() as acquired:
+                    require(acquired, 'observer_busy')
+                    job = job_queue.claim(journal.db, kind=job_queue.KIND_RUN, worker=worker, now=now_utc())
+                if job is None:
+                    break
+                try:
+                    cycle = observer.run(job['argument']['cycle_id'])
+                except Exception as exc:
+                    # The job closes with what the runner could do, never with the exception text: a
+                    # transport message can carry a payload, and a job row is retained state.
+                    job_queue.finish(journal.db, job_id=job['job_id'], worker=worker, status='failed',
+                                error=str(exc) if isinstance(exc, ObserverError) else 'cycle_failed',
+                                now=now_utc())
+                    raise
+                job_queue.finish(journal.db, job_id=job['job_id'], worker=worker, status='succeeded',
+                            result={key: cycle[key] for key in
+                                    ('cycle_id', 'status', 'coverage', 'decision', 'error', 'ended_at')},
+                            now=now_utc())
+                outcome.append({'job_id': job['job_id'], 'cycle_id': cycle['cycle_id'],
+                                'status': cycle['status'], 'coverage': cycle['coverage'],
+                                'decision': cycle['decision'], 'error': cycle['error']})
+            print(encoded({'schema_version': 1, 'drained': len(outcome), 'cycles': outcome}))
             return 0
         if args.command == 'check':
             result = journal.check(now=dt.datetime.now(dt.timezone.utc), max_age_seconds=args.max_age_seconds)
