@@ -103,8 +103,20 @@ IDEMPOTENT_POST_ROUTES = frozenset({'/v1/events', '/v1/evidence', '/v1/actions/c
 
 
 def idempotency_enabled(path: str) -> bool:
-    """Whether one POST route honours `Idempotency-Key`, as the two lists above decided."""
-    return path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
+    """Whether one write route honours `Idempotency-Key`, as the lists above and the seam decided.
+
+    The maintenance family answers through `maintenance_api.writes`, matched by prefix as well as by
+    exact path, because its writes are addressed (`POST /v1/maintenance-windows/<id>/cancellations`,
+    `PATCH /v1/maintenance-schedules/<id>`) and a list of exact paths cannot name a route whose id is
+    caller data. What that costs is nothing here and one
+    thing elsewhere: the gate is a *matcher*, so a GET under those prefixes also reads as guarded — and a
+    GET never claims a key, because the claim lives in the write branch below. The thing it buys is the
+    reason the family asked for it: a retried window declaration must not buy a second silence, and a
+    retried cancellation must not become somebody else's second act.
+    """
+    from . import maintenance_api  # the seam owns its prefixes; see the import note in `create_app`
+    return (path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
+            or maintenance_api.writes(path))
 
 
 def _retrieve_execution(future: Any) -> None:
@@ -315,6 +327,14 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     # on its account. Its path census is the module's own `owns`, so no prefix in this file decides.
     from . import verification_api as verification_service
     verification = verification_service.VerificationAPI(store)
+    # The maintenance route family: ten paths and thirteen operations over `maintenance.py` and
+    # `suppression.py`. Imported here for the reason `verification_api`, `runtime` and `audit_reader` are — a
+    # sibling transport must not be
+    # able to fail an `api` import on its own account — and its path census is the module's `owns`, so no
+    # prefix in this file decides which routes exist. What stays here is the boundary: this app's `Store`,
+    # this app's index path, and the actor the credential named, handed over after the body was read and
+    # claimed, so a replayed declaration never reaches the state layer twice.
+    from . import maintenance_api as maintenance_routes
 
     # The optional observer review seam: three routes over the observer's own private journal, built only
     # when this installation names one (`observer_review.py` owns the rules, the bounds and the refusals).
@@ -824,8 +844,27 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                         return await respond(400, {'error': 'invalid_request',
                                                    'detail': 'source and sample_id query parameters are required'})
                     return await respond(200, store.get_evidence(params['source'][0], params['sample_id'][0]))
+                if maintenance_routes.owns(path):
+                    # Inside the branch, after the `summary` refusal above and after `/v1/me`: the family
+                    # answers `summary` with 403 like every other read. The family's own read gate names
+                    # `reader`, `proposer`, `human` and `executor` and not `producer` — a choice, documented in
+                    # `docs/api/maintenance.md` — but under this app a `producer` never reaches it: the GET
+                    # branch's own role test refuses that credential first, with the state layer's 400. The
+                    # seam's gate is therefore the second line, for a caller that uses the module directly.
+                    # Raw query bytes go over
+                    # whole: `maintenance.parse_query` is the thing that refuses a repeated or unknown
+                    # parameter, and re-encoding a parsed dict would silently write its rules.
+                    return await respond(*maintenance_routes.read(store, path,
+                                                                  scope.get('query_string', b''), actor,
+                                                                  index_path=index_path))
                 return await respond(404, {'error': 'not_found'})
-            if method != 'POST':
+            if method not in ('POST', 'PATCH') or (method == 'PATCH'
+                                                   and not maintenance_routes.edits(path)):
+                # `PATCH` is admitted for exactly one path — `/v1/maintenance-schedules/{id}`, which
+                # `maintenance_routes.edits` recognises — and every other path reaches the 405 it always
+                # gave. The verb is a deliberate exception for one route, not a widening of the write
+                # surface, and `tests/test_api_openapi_conformance.py` pins which verbs a documented
+                # operation may claim.
                 return await respond(405, {'error': 'method_not_allowed'})
             if actor.role == 'summary':
                 # A summary credential never reaches the state layer on a write route, so the state
@@ -948,6 +987,13 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(401, {'error': 'callback_unauthorised'})
             elif path == '/v1/executions/outcome' and set(body) <= {'execution_id', 'outcome', 'runner_token'}:
                 result = store.execution_outcome(body['execution_id'], body['outcome'], actor, body.get('runner_token'))
+            elif maintenance_routes.owns(path):
+                # After the idempotency claim, so a replayed write returns its first answer with
+                # `Idempotency-Replayed: true` and never reaches this line a second time; after
+                # `assert_no_actor_claim`, so an author in the body is refused before the state layer ever
+                # sees it and every `author`/`declared_by` in the answer came from the credential.
+                return await respond(*maintenance_routes.write(store, path, body, actor, method=method,
+                                                              index_path=index_path))
             else:
                 return await respond(404, {'error': 'not_found'})
             return await respond(200, result)

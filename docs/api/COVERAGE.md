@@ -14,6 +14,12 @@ source that answers a socket, contract against the running app — and `tests/te
 the behaviour the contract promises. Neither is a documentation linter: each can fail in ways the other
 cannot see.
 
+A capability with rules a table cannot carry gets its own page beside these four:
+[`maintenance.md`](maintenance.md) states the planned-maintenance family in prose — which credential may
+silence what, over which scope, for how long, what happens when the clocks change, which outcomes a window
+can reach, and what a bounded historical read may and may not claim. The census row and the OpenAPI operation
+still decide what exists; the page says what they mean.
+
 ## Reading a row
 
 One row is one operation. `operation_id` is the stable name — `resource.verb`, dotted by resource — and it
@@ -186,7 +192,9 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
 3. Use `api_contract` for the answer: `ContractError` for a refusal, `page_params`/`page_payload` for a
    list, `expected_revision`/`check_revision` for a conditional write, `actor_context` for who acted. If a
    durable answer must survive a lost acknowledgement, add the path to `IDEMPOTENT_POST_ROUTES` — and say
-   in the row what the replay promise is.
+   in the row what the replay promise is. A family whose writes are addressed by id cannot be named as a list
+   of exact paths, so it may expose a matcher instead and `idempotency_enabled` consults it beside the list
+   (`maintenance_api.writes` is that matcher for `/v1/maintenance-windows/…` and `/v1/maintenance-schedules/…`).
 4. Run the gates: `.venv/bin/python -B -m unittest tests.test_api_openapi_conformance
    tests.test_api_contract`, then the base tier, `scripts/check_foundation.py` and the public-tree check.
 5. If the operation changes a status code an existing client can receive, that is a compatibility

@@ -551,7 +551,23 @@ and durable volume are mandatory. Use database transactions for related state
 changes and an outbox for notifications and analytical copies. The derived
 inventory database is separate and is never used to store approvals.
 
-The platform schema is v10. The v9-to-v10 step adds `runner_approvals`, `runner_requests`
+The platform schema is v12. The v11-to-v12 step adds `maintenance_schedules` — one append-only row per
+schedule *version*, with `UPDATE`/`DELETE` triggers, because an edit that restated an older version would
+destroy the only answer to "what did this plan say in October?" — plus the two indexes an outcome read needs
+(`maintenance_outcome_evidence` over `incidents(resource_id, opened_at)`, `maintenance_attribution` over the
+window id a suppressed page already carries in its audit detail). It rewrites no window, no incident and no
+audit row: a maintenance window stays a control document, so every silence declared before this step is
+still readable, still honoured, and still class-blind as it was approved. Neither index is named with
+`INDEXED BY`, because both reads have an honest zero to report and a missing index must not turn a report
+into an error. See [planned maintenance](api/maintenance.md) for the routes, the bounds and the migration
+checklist this step moves.
+
+The v10-to-v11 step adds `api_idempotency` and one index, and changes no existing row: it is where a caller
+that lost the response can ask "did this write already happen?", and its rules are in
+`api_contract.py`; see [capability census and API coverage](api/COVERAGE.md) and its
+[decisions](api/DECISIONS.md).
+
+The v9-to-v10 step adds `runner_approvals`, `runner_requests`
 and `setup_plans` for exact human approvals and durable trusted handoffs. It does not rewrite
 existing incident, action or verification rows. The explicit migration makes and verifies a
 pre-migration backup; rollback requires that compatible backup. Setup and runner configuration

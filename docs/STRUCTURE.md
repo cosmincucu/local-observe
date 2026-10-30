@@ -28,4 +28,5 @@ its injected boundaries allow tests without a live deployment.
 | Evaluation, `local_observe/evaluation/` | Shared-evidence comparisons, unknown labels and independent quality measurements |
 | [Refusal audit](units/refusal-audit.md) | Durable refusal records and bounded dispatch |
 | API boundary, `local_observe/platform/api_contract.py` | Error envelope, request identity, idempotency, expected revision, bounded paging and actor context for platform routes; see [`docs/api/COVERAGE.md`](api/COVERAGE.md) |
+| Planned maintenance, `local_observe/platform/maintenance.py` | Windows (a signed, bounded silence, stored as a control document) and the recurring schedules that materialize them; roles, bounds, DST policies, outcomes and historical reads in [`docs/api/maintenance.md`](api/maintenance.md) |
 | Shared HTTP, `local_observe/http.py` | Explicit client trust configuration shared by integrations; no global TLS changes |

@@ -564,20 +564,29 @@ class MaintenanceWindowTests(unittest.TestCase):
 
 
 def plant_window(store: Store, name: str, *, start: dt.datetime, end: dt.datetime,
-                 reason: str = 'work', attest: bool = True) -> str:
+                 reason: str = 'work', attest: bool = True,
+                 version: int = suppression.WINDOW_DOCUMENT_VERSION) -> str:
     """Write one window control row straight into `store`, past every validation in the module.
 
     These are the rows a restore, a copy or a wider build leaves behind: `declare_window` would never
     write them, which is the point, and the read path is the last thing standing between them and a quiet
     night. With `attest` the matching `maintenance.declared` audit row is written first and its sequence
     stored, so the only thing that can refuse the row is its shape or its bound — an unattested row is a
-    different refusal, tested by name.
+    different refusal, tested by name. `version` names the envelope shape to write, so a caller can plant
+    the document an older build left rather than only the one this build writes.
     """
     declared = {'id': str(uuid.uuid5(uuid.NAMESPACE_DNS, f'fixture-window/{name}')),
                 'resource_id': RESOURCE, 'rule_id': None, 'starts_at': utc_text(start),
                 'ends_at': utc_text(end), 'reason': reason, 'author': 'operator',
                 'declared_at': utc_text(NOW)}
-    document = {'schema_version': suppression.WINDOW_DOCUMENT_VERSION, 'declared': declared,
+    # The block carries exactly the fields `version` names. A v2 row has the four optional fields
+    # present-and-null (`explains` None is the class-blind reading), and a v1 row omits them entirely —
+    # `_envelope` compares the block's field set to the version's, so a "v1" row that grew an `explains`
+    # key would be counted unusable rather than read as an old declaration. Asking for `version=1` is how
+    # "a window declared before condition classes existed is still readable and still covering" is tested.
+    if version >= 2:
+        declared.update({key: None for key in suppression.WINDOW_ORIGIN_KEYS})
+    document = {'schema_version': version, 'declared': declared,
                 'revoked': None,
                 # An unattested row still names a sequence: "no attestation field at all" is a malformed
                 # document and lands in `unusable`, which is a different refusal from one whose

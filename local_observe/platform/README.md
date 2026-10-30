@@ -459,7 +459,7 @@ a candidate whose state pin differs from what is live, so migrating is a separat
 taken before a release whose pin already names the version that migration produces. Rollback is the
 pre-migration copy, not a code rollback.
 
-`VERSION` is 9. Migration 2 is the first real one: it moves the runtime control of notification
+`VERSION` is 12. Migration 2 is the first real one: it moves the runtime control of notification
 delivery out of the audit log. It creates `notification_control` (the delivery mode under `mode`, one
 flood breaker per channel under `circuit:<channel>`, one approved human-channel test window under
 `test_window:<id>`), `notification_reservations` (every send slot already taken) and
@@ -563,6 +563,29 @@ belonging to a channel nobody here has a policy for are never deleted, and `noti
 has no prune at all, because a suppressed delivery must never replay whatever its age — so the
 reservations table is a budget that ages, not the history of deliveries. That history is the audit log,
 which nothing here prunes.
+
+Migration 12 (planned maintenance: schedules) adds one table and two indexes, and rewrites nothing.
+`maintenance_schedules(schedule_id, version, document, state, horizon, declared_at, declared_by, attest)`
+holds one row per *version* of a recurring plan, with `UPDATE` and `DELETE` triggers that reject both in the
+same words `api_idempotency` uses: an edit appends version 2 rather than restating version 1, because the
+version a plan carried while its windows ran is the only answer to "what did the plan say then?", and a row
+may not vanish while windows it declared still cover findings. `attest` points at the `maintenance.schedule_declared`
+audit row booked in the same transaction, which is what lets a read distinguish a window a human signed from
+a document somebody inserted with a database tool. The two indexes are the reads an *outcome* is made of —
+`maintenance_outcome_evidence` over `incidents(resource_id, opened_at)`, which no existing incident index can
+serve because the query has no upper bound on `opened_at`, and `maintenance_attribution`, a partial
+expression index on `audit` keyed by the `window_id` a suppressed page already carries in its own detail.
+Neither is named with `INDEXED BY`: both reads have an honest zero to report, and a missing index would turn
+a report into an error. **No existing row changes.** A maintenance window remains a control document in
+`notification_control`, so windows declared before this step keep their ids, stay readable, and keep
+suppressing exactly as approved — including the class-blind behaviour of a window that predates condition
+classes. `tests/test_state_migration.py` moves its table pin for the new name, and
+`tests/test_incident_grouping_migration.py` now ends a v1 file's walk at step '12'. What the routes on top of
+this table promise is [docs/api/maintenance.md](../../docs/api/maintenance.md).
+
+The paragraphs above stop at migration 9; migrations 3 to 11 are described in
+`docs/CONTRACTS.md` §5 and [docs/api/DECISIONS.md](../../docs/api/DECISIONS.md), and the exact SQL of every step
+lives beside it as a `MIGRATIONS` entry.
 
 Copy discipline is unchanged and stricter than it looks. `Store.backup()` — the online backup API,
 which reads the `-wal` — stays the only safe copy of a running database. `Store.__init__` now refuses
