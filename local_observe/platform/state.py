@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 APPLICATION_ID = 0x4C4F5001
 # The schema this build reads and writes. It must always name the highest key of MIGRATIONS below.
-VERSION = 10
+VERSION = 13
 
 # The outcome class of one delivery attempt, spelled once. `pending` is an attempt still in flight;
 # `accepted` is a receipt that repeated the delivery id; the other three are the only answers
@@ -33,6 +33,17 @@ ATTEMPT_CAUSES = ('pending', 'accepted', 'rejected', 'transport', 'policy')
 # within. A callback is an intent and not a decision, so a short life costs nothing (ledger notifications).
 CALLBACK_TTL_SECONDS = 3600
 CALLBACK_TTL_BOUNDS = (60, 86400)
+#: How long a completed idempotent write may be replayed, and how long an in-flight claim may outlive
+#: the process that made it (`api_idempotency`, schema v11, api boundary foundation). Both are bounds on
+#: a durable record, not tuning: a key is a caller's promise about one intention, and the replay window
+#: is how far back that promise reaches. `300 s` for the in-flight marker is longer than any write this
+#: platform performs, so a reclaimed key means the first attempt died rather than that it is slow.
+IDEMPOTENCY_TTL_SECONDS = 86400
+IDEMPOTENCY_TTL_BOUNDS = (60, 604800)
+IDEMPOTENCY_IN_FLIGHT_SECONDS = 300
+#: Rows one reserve call may delete as expired. Bounded work per call, so the sweep never becomes the
+#: thing holding the write lock; what is left is deleted by the next call.
+IDEMPOTENCY_PRUNE_ROWS = 200
 MIGRATE_COMMAND = 'lo-platform migrate'
 MIGRATE_ACTOR = 'platform-migrate'
 # SQLite header: bytes 18/19 are the WAL file-format versions, 24..27 the change counter and
@@ -554,10 +565,260 @@ CREATE TABLE setup_plans (id TEXT PRIMARY KEY, payload TEXT NOT NULL,
     expires_at TEXT, runner TEXT NOT NULL, receipt TEXT);
 '''
 
+# Schema v11 (api boundary foundation): one table and one index, and no change to any existing row,
+# column or business value. What the table holds is the answer to "did this write already happen?", the
+# question a caller who lost the response cannot answer from its own side and this file is the only place
+# in the product that can. `platform/api_contract.py` owns the *rules* (what a replay means, how long an
+# in-flight claim lives, what may be stored); this step owns the durability, because a key remembered
+# only in process memory is exactly the lost-acknowledgement failure `docs/CONTRACTS.md` §5 is written
+# around: the client retries, the side effect happens twice, and nothing on either side can see it.
+#
+# Why a table when the maintenance-window note above chose a control key: those windows are *declared
+# state* — small, operator-visible, audited, read by the delivery path — and the argument for the key
+# was that a table there moved two pins for no CHECK constraint anybody needed. This is the opposite
+# shape: an append-mostly, per-request, high-cardinality record keyed by (actor, key) that nobody reads
+# as operator state, whose whole value is a PRIMARY KEY that makes "one row per caller per key" a
+# constraint rather than a discipline, and whose TTL is a column predicate rather than a policy.
+#
+# `completed_at IS NULL` is the in-flight marker, and the CHECK makes the three answer columns agree with
+# it, so a half-written answer is not a shape the file can hold. `status BETWEEN 100 AND 599` and the
+# payload ceiling are the same promise `api_contract.MAX_STORED_REPLY_BYTES` makes before writing: the
+# bound belongs to the file, and the module refuses the oversized reply rather than letting SQLite
+# truncate one silently.
+#
+# The checklist a new step must answer (the v7 preamble's, applied here): this step **does** move
+# `tests/test_state_migration.py`'s `CURRENT_TABLES` pin — one table joined the schema, named there — and
+# `tests/test_maintenance_windows.py` takes that pin by import, so it moves with it. It adds no index
+# that `escalation_reader`/`maintenance_reader` name with `INDEXED BY`, so
+# `tests/test_escalation_history.py` (rewound to steps 1..6) and `tests/test_upgrade_acceptance.py`'
+# `INDEX_NAMES` are unmoved; `tests/test_maintenance_history.py` and
+# `tests/test_verification_records_migration.py` compare a fresh file against one migrated *to their own
+# pinned version*, so a step above theirs changes nothing; and the two documents that state the schema
+# number — `docs/CONTRACTS.md` §5 and the migration paragraph of `local_observe/platform/README.md` —
+# move with it, as does `docs/api/COVERAGE.md`, which names the table as the state source of every
+# idempotent write.
+#
+# The one index serves the read that runs on every write: the expired-record sweep, which asks by
+# completion time over a table that grows with request volume for the life of the file. The stale
+# in-flight reclaim needs no index at all, because it is addressed by (actor, key) — the primary key.
+# Like v8 and v9, this index is deliberately **not** named with `INDEXED BY`: the sweep has an honest
+# zero to report, and an SQLite error for a missing index would turn bookkeeping into a failed write.
+API_IDEMPOTENCY_TABLE = 'api_idempotency'
+#: Characters one stored reply may hold — `api_contract.MAX_STORED_REPLY_BYTES`, written into the CHECK
+#: so the replay promise and the column cannot disagree. Repeated once here as the schema's own number.
+API_IDEMPOTENCY_REPLY_LIMIT = 65536
+IDEMPOTENCY_SCHEMA = f'''
+CREATE TABLE {API_IDEMPOTENCY_TABLE} (actor TEXT NOT NULL, key TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL CHECK(length(request_sha256) = 64),
+    reserved_at TEXT NOT NULL, completed_at TEXT, status INTEGER, payload TEXT,
+    CHECK(completed_at IS NULL OR (status BETWEEN 100 AND 599
+                                   AND length(payload) BETWEEN 1 AND {API_IDEMPOTENCY_REPLY_LIMIT})),
+    PRIMARY KEY (actor, key));
+CREATE INDEX api_idempotency_expiry ON {API_IDEMPOTENCY_TABLE}(completed_at);
+'''
+
+# Schema v12 (alert-occurrence dispositions): four tables, two indexes, and no existing row, column or
+# business value touched. What they hold is the answer to "what has a named human decided about this
+# episode?", which is the one of the three states of an occurrence that no table could carry before: the
+# measurement lives in `incidents`/`conditions` and the delivery lives in `outbox`, and between them there
+# was nothing for an acknowledgement to attach to except an `actions` row that was not about acknowledging
+# anything and an `action.approval_intent` audit row written by whoever tapped a page link
+# (`docs/api/occurrences.md` §6 says why neither can be an actor-and-reason record).
+#
+# `occurrence_dispositions` is keyed by the **incident id**, and that key is the episode identity: an
+# incident is opened by one firing verdict and closed when its last condition reports `resolved`, so one
+# incident row already is one episode, and it is durable across an API restart, a notifier restart and a
+# replay of the verdicts that produced it. A disposition therefore needs no identity of its own, and giving
+# it a second one would be the defect: message text and evaluation windows change between two reports of
+# one episode, so an identity built from them would forget every acknowledgement on the next verdict.
+#
+# `occurrence_dismissals` is keyed by **(incident id, condition key)** and not by the condition key alone.
+# That is the whole dismissal contract in one key choice: a tombstone on a condition would silence every
+# future episode of that condition — including the next boot and the next real failure — forever, which is
+# the inverse of what an operator asked for. Keyed on the pair, the dismissed episode stays quiet through
+# restarts and replays, and a re-fire after a genuine clear (a new incident, §1 of the unit document) or a
+# discrete occurrence with a new boot identity (a new condition *and* a new incident) pages.
+#
+# `occurrence_projections` holds the two statements the committed action must eventually reach — a
+# telemetry metric and the rule's operator-visible card — as retryable records rather than as calls made
+# inside the disposition transaction. A downstream that is down must not be able to undo an operator's
+# decision, so it gets a row instead of a rollback, and the row's status is what the read surface reports.
+#
+# Why a typed table here when the maintenance-window note above chose a control key: that argument was
+# "no CHECK anybody needed". Three of these columns *are* CHECKs the contract needs in the file — the two
+# disposition kinds, the projection targets and the revision the conditional write compares against — and
+# the tables they relate are three, not one document.
+#
+# The checklist the v7 preamble promised every new step must answer, and what this one moved: this step
+# **does** move `tests/test_state_migration.py`'s `CURRENT_TABLES` pin (four tables joined the schema, all
+# named there) and `tests/test_maintenance_windows.py` takes that pin by import, so it moves with it, as do
+# the two files that compare a fresh file's table set against a pinned older one
+# (`tests/test_maintenance_history.py`, `tests/test_verification_records_migration.py`), whose assertions
+# now exclude the v12 set explicitly rather than by accident. `tests/test_escalation_history.py` rewinds
+# `MIGRATIONS` to steps 1..6 and is unmoved; `tests/test_upgrade_acceptance.py`'s `INDEX_NAMES` names the
+# four escalation/maintenance indexes and is unmoved, because neither new index is guarded by `INDEXED BY`
+# (see below). `platform/escalation_reader.py` does read one of the new tables, and it checks the table is
+# there rather than naming an index, so a file this build has not migrated escalates exactly as it did
+# before instead of holding every incident. `tests/test_idempotency_migration.py`'s successor for this step
+# is `tests/test_occurrence_disposition_migration.py`. The documents that state the schema number —
+# `docs/api/COVERAGE.md`, `docs/api/DECISIONS.md`, `local_observe/platform/README.md` and
+# `docs/api/coverage.yaml` rows — move with it.
+#
+# Neither new index is named with `INDEXED BY`, for the v8/v9/v11 reason: both serve reads with an honest
+# answer to give when they cannot be served cheaply (a history page is still a page, and a projection drain
+# that scans is a drain that costs more, not one that lies), and an SQLite refusal would turn a slow read
+# into a failed one.
+OCCURRENCE_DISPOSITION_TABLE = 'occurrence_dispositions'
+OCCURRENCE_DISPOSITION_HISTORY_TABLE = 'occurrence_disposition_history'
+OCCURRENCE_DISMISSAL_TABLE = 'occurrence_dismissals'
+OCCURRENCE_PROJECTION_TABLE = 'occurrence_projections'
+#: The two dispositions an operator may record, spelled once here so the CHECK in the file, the routes,
+#: `dispositions.py` and `platform/escalation_reader.py` cannot disagree about the vocabulary. A third kind
+#: would be a new answer to "what did the human decide?", which is a contract change and not a value.
+OCCURRENCE_ACKNOWLEDGED = 'acknowledged'
+OCCURRENCE_DISMISSED = 'dismissed'
+OCCURRENCE_DISPOSITION_KINDS = (OCCURRENCE_ACKNOWLEDGED, OCCURRENCE_DISMISSED)
+#: The two downstream statements a committed disposition owes. Bounded by the column CHECK for the same
+#: reason as the kinds: a projection target nobody named is a claim about an integration that may not exist.
+OCCURRENCE_PROJECTION_KINDS = ('telemetry-metric', 'rule-card')
+#: Characters one stored `reason` may hold — the bound `dispositions.MAX_REASON_CHARS` refuses before
+#: writing, repeated here so the promise is a property of the file and not of one caller's discipline (the
+#: v4 verification-payload and v7 rationale precedents). 400 is `suppression.MAX_SUPPRESSION_CHARS`: a
+#: disposition reason and a suppression reason are read in the same operator surface and should be able to
+#: say the same amount.
+OCCURRENCE_REASON_LIMIT = 400
+#: Characters one stored projection statement may hold. The document is an id-and-a-decision — occurrence,
+#: kind, actor, reason, instants — never an event payload, and 64 KiB is the width every other stored
+#: document in this file refuses above.
+OCCURRENCE_PROJECTION_LIMIT = 65_536
+#: Attempts one projection record may account for. This is a bound on the *reported* number, not a give-up
+#: rule: a projection stays retryable whatever its count, because a downstream that was down for a week is
+#: not a reason to forget an operator's decision. A value above it is a row this build did not write.
+OCCURRENCE_PROJECTION_ATTEMPTS = 1000
+#: The one audit operation a disposition takes, named here so a reader of `audit`, a test and the writer
+#: cannot disagree about its spelling. `dispositions.py` is its only author.
+OCCURRENCE_DISPOSITION_OPERATION = 'occurrence.disposed'
+#: The one suppression cause word a folded delivery carries. `suppression.CAUSES` belongs to the causes that
+#: module measures (window, dependency, flap); a disposition is a human judgement, and an operator reading
+#: `presentation.delivery_route` should be able to tell the two apart.
+OCCURRENCE_DISMISSAL_CAUSE = 'occurrence-dismissed'
+OCCURRENCE_DISMISSAL_ACK_CAUSE = 'occurrence-acknowledged'
+#: The evidence word an escalation round carries in `escalation.acknowledged` for each disposition kind. These
+#: are the two cause words above, and deliberately one spelling: "a human acknowledged this episode" is the
+#: same fact whether the sentence is a folded delivery's `cause` or a held ladder's `evidence`, and two
+#: vocabularies for one fact is how an operator ends up reading them differently.
+OCCURRENCE_DISPOSITION_EVIDENCE = {OCCURRENCE_ACKNOWLEDGED: OCCURRENCE_DISMISSAL_ACK_CAUSE,
+                                   OCCURRENCE_DISMISSED: OCCURRENCE_DISMISSAL_CAUSE}
+
+_KIND_SQL = ",".join(f"'{kind}'" for kind in OCCURRENCE_DISPOSITION_KINDS)
+_PROJECTION_KIND_SQL = ",".join(f"'{kind}'" for kind in OCCURRENCE_PROJECTION_KINDS)
+OCCURRENCE_DISPOSITION_SCHEMA = f'''
+CREATE TABLE {OCCURRENCE_DISPOSITION_TABLE} (occurrence_id TEXT PRIMARY KEY REFERENCES incidents(id),
+    kind TEXT NOT NULL CHECK(kind IN ({_KIND_SQL})),
+    actor TEXT NOT NULL, reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND {OCCURRENCE_REASON_LIMIT}),
+    at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));
+CREATE TABLE {OCCURRENCE_DISPOSITION_HISTORY_TABLE} (sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurrence_id TEXT NOT NULL REFERENCES incidents(id),
+    kind TEXT NOT NULL CHECK(kind IN ({_KIND_SQL})),
+    actor TEXT NOT NULL, reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND {OCCURRENCE_REASON_LIMIT}),
+    at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));
+CREATE TRIGGER {OCCURRENCE_DISPOSITION_HISTORY_TABLE}_no_update BEFORE UPDATE ON {OCCURRENCE_DISPOSITION_HISTORY_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only disposition history'); END;
+CREATE TRIGGER {OCCURRENCE_DISPOSITION_HISTORY_TABLE}_no_delete BEFORE DELETE ON {OCCURRENCE_DISPOSITION_HISTORY_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only disposition history'); END;
+CREATE INDEX {OCCURRENCE_DISPOSITION_HISTORY_TABLE}_occurrence
+    ON {OCCURRENCE_DISPOSITION_HISTORY_TABLE}(occurrence_id, sequence);
+CREATE TABLE {OCCURRENCE_DISMISSAL_TABLE} (occurrence_id TEXT NOT NULL REFERENCES incidents(id),
+    condition_key TEXT NOT NULL CHECK(length(condition_key) = 64),
+    actor TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (occurrence_id, condition_key));
+CREATE TABLE {OCCURRENCE_PROJECTION_TABLE} (occurrence_id TEXT NOT NULL REFERENCES incidents(id),
+    kind TEXT NOT NULL CHECK(kind IN ({_PROJECTION_KIND_SQL})),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 2 AND {OCCURRENCE_PROJECTION_LIMIT}),
+    status TEXT NOT NULL CHECK(status IN ('pending','sent')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND {OCCURRENCE_PROJECTION_ATTEMPTS}),
+    available_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    last_error TEXT NOT NULL CHECK(length(last_error) BETWEEN 0 AND 64),
+    PRIMARY KEY (occurrence_id, kind));
+CREATE INDEX {OCCURRENCE_PROJECTION_TABLE}_due ON {OCCURRENCE_PROJECTION_TABLE}(status, available_at);
+'''
+
+# Schema v13 (planned maintenance: schedules, and the two reads an outcome is made of): one append-only
+# table and two indexes, and no change to any existing row, column or business value. A *window* stayed a
+# control document — it is declared state that the delivery path reads, and the v2 argument above still
+# holds. A **schedule** is a different shape, and it is the shape that has no honest home in
+# `notification_control`: a schedule is edited, and an edit must produce a *new effective version* while
+# every version that was ever in force stays readable. `control_declare` inserts and never updates, so it
+# cannot express an edit; `control_write` replaces, so it destroys the history an operator is entitled to
+# ask back. A table keyed by `(schedule_id, version)` with `UPDATE`/`DELETE` refused by triggers is the
+# one shape in this file where "the version that was in force in October" and "the one in force now" are
+# two rows that cannot overwrite each other — the same promise `audit` and `verification_records` make.
+#
+# The two indexes are the reads that make an *outcome* more than a guess, and both follow an existing
+# step rather than inventing a shape. `incidents(resource_id, opened_at)` is plain columns over a v1
+# table, the way v6's `escalation_incidents_status` is: it answers "did anything about this resource
+# overlap the declared span", which is the only evidence that separates a window that was **unused** from
+# one that was never observed (`unknown`). The second is a partial expression index over the suppression
+# audit rows, guarded by `json_valid` inside the same expression exactly as v5 guards its window end and
+# v6 its approval intent — SQLite does not promise to evaluate `json_valid` before a neighbouring
+# extract, and a statement that could fail here fails the migration and every later audit write. It
+# answers "which pages did *this* window fold", by the id the decision already wrote into its own audit
+# detail, so the attribution survives a restart without a second copy of the fact.
+#
+# Neither index is named with `INDEXED BY`. Both reads have an honest zero to report — no overlapping
+# incident, no attributed page — and a missing index would turn a report into an SQLite error, which is
+# the trade v11 declined for the same reason. Authority stays where it was: `suppression._scan` re-checks
+# every window it applies against the envelope, the declaration and the attestation, and an index key
+# remains a search term rather than a reason to silence a pager.
+#
+# The checklist a new step must answer (the v7 preamble's, applied here): this step **does** move
+# `tests/test_state_migration.py`'s `CURRENT_TABLES` pin — one table joined the schema, named there, and
+# `tests/test_maintenance_windows.py` takes that pin by import — and it moves
+# `tests/test_incident_grouping_migration.py`'s list of `schema.migrated` subjects for a v1 file walking
+# the whole chain, which now ends at '13'. It adds no index that `escalation_reader` names with
+# `INDEXED BY`, so `tests/test_escalation_history.py` (rewound to steps 1..6) and
+# `tests/test_upgrade_acceptance.py`'s `INDEX_NAMES` (four names, all still built by their own steps) are
+# unmoved; `tests/test_maintenance_history.py` (rewound to 5) and
+# `tests/test_verification_records_migration.py` (to 4) compare a fresh file against one migrated *to
+# their own pinned version*, so a step above theirs changes nothing. The two documents that state the
+# schema number — `docs/CONTRACTS.md` §5 and the migration paragraph of `local_observe/platform/README.md`
+# — move with it, and `docs/api/maintenance.md` states what the new table and indexes are for.
+MAINTENANCE_SCHEDULE_TABLE = 'maintenance_schedules'
+#: The highest `version` one schedule may carry, spelled once for the CHECK and for
+#: `platform/maintenance.py`, which refuses a longer-lived plan at its door rather than at the column.
+MAINTENANCE_SCHEDULE_VERSION_LIMIT = 1000
+#: Characters one stored schedule document may hold. The same ceiling the idempotency reply and a
+#: verification payload carry: it is a column width, and the module refuses an oversized document rather
+#: than letting SQLite truncate a recurrence rule into a different promise.
+MAINTENANCE_SCHEDULE_DOCUMENT_LIMIT = 65536
+#: The audit operation a folded page takes, and the one expression by which a decision says *which*
+#: window it folded the page on. Spelled once: the index is cut on this text and the read filters by it.
+MAINTENANCE_SUPPRESSED_OPERATION = 'notification.suppressed'
+MAINTENANCE_ATTRIBUTION_WINDOW = ("CASE WHEN json_valid(detail) THEN"
+                                  " json_extract(detail,'$.window_id') END")
+MAINTENANCE_OUTCOME_INDEX = 'maintenance_outcome_evidence'
+MAINTENANCE_ATTRIBUTION_INDEX = 'maintenance_attribution'
+MAINTENANCE_SCHEDULES_SCHEMA = f'''
+CREATE TABLE {MAINTENANCE_SCHEDULE_TABLE} (schedule_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version BETWEEN 1 AND {MAINTENANCE_SCHEDULE_VERSION_LIMIT}),
+    document TEXT NOT NULL CHECK(length(CAST(document AS BLOB)) <= {MAINTENANCE_SCHEDULE_DOCUMENT_LIMIT}),
+    state TEXT NOT NULL CHECK(state IN ('active','cancelled')),
+    horizon TEXT NOT NULL, declared_at TEXT NOT NULL, declared_by TEXT NOT NULL,
+    attest INTEGER NOT NULL CHECK(attest > 0),
+    PRIMARY KEY (schedule_id, version));
+CREATE TRIGGER {MAINTENANCE_SCHEDULE_TABLE}_no_update BEFORE UPDATE ON {MAINTENANCE_SCHEDULE_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only maintenance schedule'); END;
+CREATE TRIGGER {MAINTENANCE_SCHEDULE_TABLE}_no_delete BEFORE DELETE ON {MAINTENANCE_SCHEDULE_TABLE}
+    BEGIN SELECT RAISE(ABORT,'append-only maintenance schedule'); END;
+CREATE INDEX {MAINTENANCE_OUTCOME_INDEX} ON incidents(resource_id, opened_at);
+CREATE INDEX {MAINTENANCE_ATTRIBUTION_INDEX} ON audit({MAINTENANCE_ATTRIBUTION_WINDOW}, sequence)
+    WHERE operation='{MAINTENANCE_SUPPRESSED_OPERATION}';
+'''
+
 MIGRATIONS: dict[int, str] = {1: SCHEMA, 2: CONTROL_SCHEMA, 3: DELIVERY_SCHEMA,
                               4: VERIFICATION_SCHEMA, 5: MAINTENANCE_WINDOW_SCHEMA, 6: ESCALATION_INDEX_SCHEMA,
                               7: GROUPING_SCHEMA, 8: MEMBER_INDEX_SCHEMA, 9: MEMBERS_CONDITION_INDEX_SCHEMA,
-                              10: RUNNER_SCHEMA}
+                              10: RUNNER_SCHEMA, 11: IDEMPOTENCY_SCHEMA, 12: OCCURRENCE_DISPOSITION_SCHEMA,
+                              13: MAINTENANCE_SCHEDULES_SCHEMA}
 
 # The one key that is not prefixed: which delivery mode the service last recorded for itself.
 CONTROL_MODE = 'mode'
@@ -630,6 +891,29 @@ def record_suppression(connection: sqlite3.Connection, outbox_id: str, reason: s
     """Mark one delivery as never sendable, beside the audit row that records the same reason."""
     connection.execute('INSERT OR IGNORE INTO notification_suppressions(outbox_id,reason,at) VALUES (?,?,?)',
                        (outbox_id, reason, utc_text(now)))
+
+
+def episode_dismissed(connection: sqlite3.Connection, incident_id: str, condition_key: str) -> bool:
+    """Whether a dismissal covers one booked delivery, answered by the pair's primary key.
+
+    The delivery rail's question (`platform/notification_safety.reserve`) is "may this row ever reach a
+    human?", and this answers it for a dismissed episode without reading a reason, an actor or a document:
+    one primary-key lookup, one bit, so the durable no an operator gave outlives the process that recorded
+    it and survives an API restart, a notifier restart and a replay of the verdict that booked the row.
+
+    The pair, not the condition: `occurrence_dismissals` is keyed on (episode, condition) precisely so that
+    the *next* episode of this condition — a re-fire after a genuine clear, or the next discrete occurrence
+    of a producer that puts its boot identity in `condition` — is not covered by this answer. A lookup that
+    ignored `incident_id` would be a dismissal that outlived its own incident, which is the one thing this
+    table exists not to be.
+
+    Raises:
+        sqlite3.Error: The table cannot be read. Deliberately not swallowed: a claim that could not check
+            the tombstone must fail loudly rather than decide that nobody dismissed anything.
+    """
+    return connection.execute(f'SELECT 1 FROM {OCCURRENCE_DISMISSAL_TABLE}'
+                              ' WHERE occurrence_id=? AND condition_key=?',
+                              (incident_id, condition_key)).fetchone() is not None
 
 
 def notification_id(event_id: str) -> str:
@@ -1747,6 +2031,112 @@ class Store:
         """
         from .verification_reader import list_records
         return list_records(self, execution_id, actor)
+
+    def idempotency_reserve(self, actor: str, key: str, request_sha256: str, *,
+                            now: dt.datetime | None = None,
+                            ttl_seconds: int = IDEMPOTENCY_TTL_SECONDS,
+                            stale_seconds: int = IDEMPOTENCY_IN_FLIGHT_SECONDS,
+                            prune_rows: int = IDEMPOTENCY_PRUNE_ROWS) -> dict[str, Any]:
+        """Claim one idempotency key, or hand back the answer already stored under it.
+
+        Returns `{'state': ...}`, and `api_contract.IdempotencyGate` is what turns each state into an
+        HTTP answer; this method decides nothing about statuses, because a durable record is not a
+        response code. The four states, in the order they are tested:
+
+        * `replay` — the key completed with this exact digest, so `status` and `payload` are the answer
+          the caller already received and the write must not run again.
+        * `conflict` — the key exists under a different digest. Two intentions under one name; nothing
+          runs and nothing is written.
+        * `in_progress` — the key is claimed and unexpired elsewhere. The caller is told to stop, not
+          made to wait: waiting here would be a queue of duplicate side effects.
+        * `reserved` — this call wrote the in-flight marker (or reclaimed one whose owner died).
+
+        Expiry is swept in the same transaction, bounded to `prune_rows`, so no scheduler is required to
+        keep the table from growing for the life of the file.
+
+        Raises:
+            StateError: The actor or key is not a bounded label, or the digest is not 64 lowercase hex
+                characters. Raised before the table is read.
+        """
+        label(actor)
+        label(key)
+        if not re.fullmatch(r'[0-9a-f]{64}', request_sha256 or ''):
+            raise StateError('Invalid idempotency request digest')
+        if not (IDEMPOTENCY_TTL_BOUNDS[0] <= ttl_seconds <= IDEMPOTENCY_TTL_BOUNDS[1]) \
+                or not 1 <= stale_seconds <= ttl_seconds or not 1 <= prune_rows <= 1000:
+            raise StateError('Invalid idempotency retention bounds')
+        now = clock(now)
+        expiry = utc_text(now - dt.timedelta(seconds=ttl_seconds))
+        stale = utc_text(now - dt.timedelta(seconds=stale_seconds))
+        with self.transaction() as connection:
+            connection.execute(
+                f'DELETE FROM {API_IDEMPOTENCY_TABLE} WHERE rowid IN ('
+                ' SELECT rowid FROM ' + API_IDEMPOTENCY_TABLE +
+                ' WHERE (completed_at IS NOT NULL AND completed_at <=?)'
+                ' OR (completed_at IS NULL AND reserved_at <=?) LIMIT ?)',
+                (expiry, stale, prune_rows))
+            row = connection.execute(
+                f'SELECT request_sha256, completed_at, status, payload, reserved_at FROM {API_IDEMPOTENCY_TABLE}'
+                ' WHERE actor=? AND key=?', (actor, key)).fetchone()
+            if row is None:
+                connection.execute(
+                    f'INSERT INTO {API_IDEMPOTENCY_TABLE}(actor,key,request_sha256,reserved_at)'
+                    ' VALUES (?,?,?,?)', (actor, key, request_sha256, utc_text(now)))
+                return {'state': 'reserved'}
+            if row['request_sha256'] != request_sha256:
+                return {'state': 'conflict'}
+            if row['completed_at'] is not None:
+                return {'state': 'replay', 'status': row['status'], 'payload': row['payload']}
+            if row['reserved_at'] > stale:
+                return {'state': 'in_progress'}
+            # The owner of this claim died. Re-stamp it rather than delete and re-insert: the row is the
+            # same key, and a delete/insert pair across a lock boundary could hand one key to two callers.
+            connection.execute(
+                f'UPDATE {API_IDEMPOTENCY_TABLE} SET reserved_at=? WHERE actor=? AND key=?',
+                (utc_text(now), actor, key))
+            return {'state': 'reserved'}
+
+    def idempotency_complete(self, actor: str, key: str, request_sha256: str, status: int,
+                             payload: str, *, now: dt.datetime | None = None) -> bool:
+        """Store one answer under a key this request holds, and return whether the row was this request's.
+
+        The digest is part of the WHERE clause on purpose: a completion can only land on the in-flight row
+        the same caller reserved, and never on one it reserved and lost to a reclaim. `False` therefore
+        means "someone else owns this key now", which is an answer, not an error — the caller's response
+        was already correct when it was served, and the stored copy is the part that is dropped.
+
+        Raises:
+            StateError: The status is not an HTTP status, or the payload is not bounded canonical JSON.
+        """
+        label(actor)
+        label(key)
+        if not 100 <= status <= 599:
+            raise StateError('Invalid idempotency response status')
+        if not isinstance(payload, str) or not 1 <= len(payload) <= API_IDEMPOTENCY_REPLY_LIMIT:
+            raise StateError('Invalid idempotency response payload')
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                f'UPDATE {API_IDEMPOTENCY_TABLE} SET completed_at=?, status=?, payload=?'
+                ' WHERE actor=? AND key=? AND request_sha256=? AND completed_at IS NULL',
+                (utc_text(clock(now)), status, payload, actor, key, request_sha256))
+            return cursor.rowcount == 1
+
+    def idempotency_release(self, actor: str, key: str, request_sha256: str) -> None:
+        """Let go of an in-flight claim whose answer was refused, oversized or never produced.
+
+        Idempotent, and safe to call on a row that already completed: the completed_at test means a
+        release racing a completion discards nothing.
+
+        Raises:
+            StateError: The actor or key is not a bounded label.
+        """
+        label(actor)
+        label(key)
+        with self.transaction() as connection:
+            connection.execute(
+                f'DELETE FROM {API_IDEMPOTENCY_TABLE}'
+                ' WHERE actor=? AND key=? AND request_sha256=? AND completed_at IS NULL',
+                (actor, key, request_sha256))
 
     def status(self) -> dict[str, Any]:
         with self.transaction() as connection:

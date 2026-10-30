@@ -551,7 +551,23 @@ and durable volume are mandatory. Use database transactions for related state
 changes and an outbox for notifications and analytical copies. The derived
 inventory database is separate and is never used to store approvals.
 
-The platform schema is v10. The v9-to-v10 step adds `runner_approvals`, `runner_requests`
+The platform schema is v13. The v11-to-v12 step adds the four occurrence-disposition tables (`docs/api/occurrences.md`); the v12-to-v13 step adds `maintenance_schedules` — one append-only row per
+schedule *version*, with `UPDATE`/`DELETE` triggers, because an edit that restated an older version would
+destroy the only answer to "what did this plan say in October?" — plus the two indexes an outcome read needs
+(`maintenance_outcome_evidence` over `incidents(resource_id, opened_at)`, `maintenance_attribution` over the
+window id a suppressed page already carries in its audit detail). It rewrites no window, no incident and no
+audit row: a maintenance window stays a control document, so every silence declared before this step is
+still readable, still honoured, and still class-blind as it was approved. Neither index is named with
+`INDEXED BY`, because both reads have an honest zero to report and a missing index must not turn a report
+into an error. See [planned maintenance](api/maintenance.md) for the routes, the bounds and the migration
+checklist this step moves.
+
+The v10-to-v11 step adds `api_idempotency` and one index, and changes no existing row: it is where a caller
+that lost the response can ask "did this write already happen?", and its rules are in
+`api_contract.py`; see [capability census and API coverage](api/COVERAGE.md) and its
+[decisions](api/DECISIONS.md).
+
+The v9-to-v10 step adds `runner_approvals`, `runner_requests`
 and `setup_plans` for exact human approvals and durable trusted handoffs. It does not rewrite
 existing incident, action or verification rows. The explicit migration makes and verifies a
 pre-migration backup; rollback requires that compatible backup. Setup and runner configuration
@@ -757,7 +773,38 @@ this is one automatic observation per execution, not polling until recovery. The
 resolve incidents, change runner outcomes or redispatch actions. Source implementation is not a
 claim that a follower is deployed or that live verification has passed.
 
+### 5.2 The shared HTTP boundary (`platform/api_contract.py`)
+
+Every refusal this boundary produces is `{"error": {"code", "message", "request_id"}}`: a code from one
+closed catalogue, one sentence chosen by this module, and the id of the request that produced it. Never a
+request value, a path, a token or an exception string. Refusals produced before the boundary existed keep
+their flat `{"error": "<code>", "detail": "<sentence>"}` bytes unchanged — installed clients and
+`tests/test_api_errors.py` assert them, so which shape a response uses is a fact about which constructor
+ran, listed as `api_contract.LEGACY_CODES`. `X-Request-Id` is on every answer, both shapes.
+
+`Idempotency-Key` is honoured only on the POST routes `api.IDEMPOTENT_POST_ROUTES` names, and the promise is
+durable: records live in `api_idempotency` (the schema step that migration applies) and survive the process.
+A key is bound to the request's method, path and canonical body. Same key plus the same method, path and body
+replays the stored answer with `X-Idempotency-Replayed: true`; same key plus a different body or a different
+target path is `409 idempotency_conflict` and nothing runs; a key still in flight is `409
+request_in_progress`, never a queue. Only a 2xx is stored, records expire after 24 hours, and a claim older
+than the in-flight window belongs to a process that died. A route outside the list ignores the header, so no
+client that exists today changes behaviour.
+
+Actor identity comes from the authenticated credential and nowhere else. `assert_no_actor_claim` refuses a
+body that names an identity, a role or a credential on any route that opted in, counting the offending fields
+without naming them; `expected_revision`/`check_revision` read `If-Match` and answer `412 stale_revision`
+when the caller's expectation no longer matches the state it could not see. `page_params` refuses an
+over-large `limit` rather than clamping it, and `page_payload` emits a continuation token only for a full
+page: a short answer must not read as an absent one.
+
+`docs/api/openapi.yaml` is the contract for this surface and `tests/test_api_openapi_conformance.py` fails
+when the document, the census in `docs/api/coverage.yaml`, the routes in the code and what the running app
+answers disagree. Serving the document as a route is a separate decision, recorded in
+`docs/api/DECISIONS.md`.
+
 ## 6. Component conformance record
+
 
 Record component/revision, image digests, config/schema identities, platform,
 commands, start/end time and results with redacted evidence. Every check reports

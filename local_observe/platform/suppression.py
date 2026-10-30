@@ -115,10 +115,10 @@ import uuid
 from local_observe import topology
 from local_observe.inventory.validation import InvalidInventory, canonical, digest, timestamp, utc_text
 from local_observe.log import get_logger
-from .state import (Actor, GROUPING_TABLE, MAINTENANCE_WINDOW_END, MAINTENANCE_WINDOW_INDEX,
-                    MAINTENANCE_WINDOW_KEYS, MAINTENANCE_WINDOW_LIVE, StateError, Store, clock,
-                    control_declare, control_write, identifier, label, maintenance_key, notification_id,
-                    record_suppression, require, validate_event)
+from .state import (Actor, GROUPING_TABLE, MAINTENANCE_SCHEDULE_VERSION_LIMIT, MAINTENANCE_WINDOW_END,
+                    MAINTENANCE_WINDOW_INDEX, MAINTENANCE_WINDOW_KEYS, MAINTENANCE_WINDOW_LIVE,
+                    StateError, Store, clock, control_declare, control_write, identifier, label,
+                    maintenance_key, notification_id, record_suppression, require, validate_event)
 
 log = get_logger(__name__)
 
@@ -187,6 +187,16 @@ MAX_SUPPRESSION_CHARS = 400
 #: either matches the event or it does not, and a rule id that matches nothing simply pages as usual.
 SELECTOR_KEYS = ('resource_id', 'rule_id')
 WINDOW_KEYS = ('resource_id', 'rule_id', 'starts_at', 'ends_at', 'reason')
+#: The four fields a declaration may add to a window, all of them optional at the library door and all of
+#: them part of the window's *identity* when named. `explains` is the condition classes the window
+#: accounts for (see `CONDITION_CLASSES`); the other three name the schedule occurrence a window was
+#: materialized from, which is how a recurring plan stays readable as one plan after its windows are
+#: separate rows.
+WINDOW_ORIGIN_KEYS = ('explains', 'schedule_id', 'schedule_version', 'occurrence_id')
+#: What `window_id` digests: the five assertions of v1 in their own order, then these. A declaration that
+#: names none of the optional keys digests exactly the text v1 digested, so every window a deployed file
+#: already holds keeps the id it was stored under.
+WINDOW_ID_KEYS = WINDOW_KEYS + WINDOW_ORIGIN_KEYS
 #: The envelope one stored window occupies under its key, and the version of that envelope. `declared` is
 #: the block a human authored and the audit row attests byte for byte; `revoked` is the only thing this
 #: module ever adds to a stored window; `attest` is the `audit` sequence of the `maintenance.declared`
@@ -194,15 +204,68 @@ WINDOW_KEYS = ('resource_id', 'rule_id', 'starts_at', 'ends_at', 'reason')
 #: that no append-only audit row names is never applied, whatever else it claims, so "a window exists"
 #: means "a human's declaration of it survives in the one table that cannot be rewritten". Checking it
 #: costs one primary-key lookup per candidate window, on the read path, and nothing at all on the write.
-WINDOW_DOCUMENT_VERSION = 1
+WINDOW_DOCUMENT_VERSION = 2
+#: Both envelope versions this build reads. Version 1 stays on the list because a window is durable state
+#: that outlives the build that wrote it, and because the alternative — refusing a v1 row — is a change
+#: that stops suppressing work somebody is still doing. A v1 declared block carries no `explains`, and `explains`
+#: reads that silence as *class-blind*: every finding inside the selector is covered, which is exactly the
+#: behaviour that row was approved under. Narrowing a silence an operator is relying on is a human act,
+#: and the way to do it is to revoke that window and declare a v2 one with the classes named.
+WINDOW_DOCUMENT_VERSIONS = (1, 2)
 WINDOW_DOCUMENT_KEYS = ('schema_version', 'declared', 'revoked', 'attest')
 #: The declared block's whole field set, in the shape the audit detail stores it. A stored window with an
-#: extra or a missing field is not a window this build declared, and is not applied.
+#: extra or a missing field is not a window this build declared, and is not applied — so the set is keyed
+#: by version rather than widened in place: a v1 row that grew an `explains` field is not a v1 row this
+#: build wrote, and the audit row it is attested against would not match it either way.
 DECLARED_KEYS = ('id', 'resource_id', 'rule_id', 'starts_at', 'ends_at', 'reason', 'author',
                  'declared_at')
+#: The same block as this build writes it: the eight fields of v1 plus the four above. Both spellings are
+#: named rather than one derived at read time, and `_declared_keys` is a function rather than a
+#: module-level map, because `tests/test_flap_folding.py` refuses a container that survives a call in this
+#: module — a read path must ask the file, not a cache.
+DECLARED_KEYS_V2 = DECLARED_KEYS + WINDOW_ORIGIN_KEYS
 #: The two fields a revocation adds. Stored window rows carry them as null until then, so the shape a
 #: reader sees is the shape the typed table had and no caller has to branch on where the state lives.
 REVOKE_KEYS = ('revoked_at', 'revoked_by')
+
+# --- what a window explains -----------------------------------------------------------------
+#: The closed vocabulary of condition *classes*. A class is derived from fields the canonical envelope
+#: already validates (`kind`, `status`, the evidence `query_type`, the first segment of `rule_id` /
+#: `condition`) and never from an expression over labels: the failure v0.1's selector recorded — "degraded
+#: visibly by simply not suppressing — never guessed" — is not a shape this table can reach, because every
+#: input of `condition_class` is a field `state.validate_event` already refused anything outside its own
+#: vocabulary for. What cannot be classified is `unclassified`, and `unclassified` is in
+#: `NEVER_EXPLAINED_BY_DEFAULT`: a finding this build cannot name pages, whatever a window claims.
+CONDITION_CLASSES = ('availability', 'restart', 'silence', 'freshness', 'backup-integrity',
+                     'security', 'application', 'unclassified')
+#: What planned work is expected to account for: the thing is down, the thing came back, nothing arrived,
+#: what arrived was too old. A window declared without a class list at the HTTP door explains these.
+EXPLAINED_BY_DEFAULT = ('availability', 'restart', 'silence', 'freshness')
+#: What planned work does not account for, whatever a window says, unless the window's author *named*
+#: them: a compromise found by a detector, a backup that cannot be trusted, and the application's own
+#: failures. Naming one in a declaration is allowed and is written into the attested declaration, so a
+#: reviewer can see a human widened a silence; what is not allowed is for a window to widen itself.
+NEVER_EXPLAINED_BY_DEFAULT = ('security', 'backup-integrity', 'application', 'unclassified')
+#: A rule whose **first dot-separated segment** is this word names a backup-integrity check. One exact
+#: segment, spelled here: a substring search over rule ids would classify `disk-backup-watermark` as a
+#: backup verdict, and a rule that matches nothing pages as usual.
+BACKUP_RULE_SEGMENT = 'backup'
+#: The one evidence query type that asserts *nothing arrived*, which is a different claim from "what
+#: arrived is old" and the only one that makes a finding a silence rather than a freshness failure.
+HEARTBEAT_QUERY_TYPE = 'source-heartbeat'
+#: The application's own vocabulary: a measured thing is out of range, a thing drifted, a thing is
+#: anomalous. None of those three is what a planned outage predicts.
+APPLICATION_KINDS = ('threshold', 'anomaly', 'drift')
+#: How far behind the clock a fact may arrive and still be judged against the window that covered *it*
+#: rather than the one covering the ingest. Bounded, because a queue that has been down for a month must
+#: not fold a fresh page against a window nobody has read since; past it, the event is judged as it was
+#: before this field existed — against the clock.
+MAX_EVENT_LOOKBACK_SECONDS = 7 * 86400
+#: How many stored window rows one *historical* read may walk. The live read is protected by v5's index
+#: and never sees an expired row; a report question is about the rows the pager stopped caring about, and
+#: the only bound available there is a row count over the window keys themselves. Past it the answer says
+#: `bound_exceeded`, and no conclusion of the form "nothing covered that instant" may be drawn from it.
+MAX_HISTORY_ROWS = 2048
 
 # --- dependency suppression -----------------------------------------------------------------
 #: One hop by default — the same bound `platform/presentation.py` labels its incident view with. Deeper
@@ -353,12 +416,18 @@ def window_id(declaration: dict[str, Any]) -> str:
 
     Content-addressed, so the same declaration typed twice is one row (`declare_window` answers the
     second as a duplicate instead of adding a second silence over the same work) and any edit — a later
-    end, a different reason — is a different window with its own row and its own audit entry. The author
-    is deliberately not an input: who declared it is recorded in the row and in the audit log, and a
-    window is not a different promise because a second person entered it.
+    end, a different reason, a narrower class list — is a different window with its own row and its own
+    audit entry. The author is deliberately not an input: who declared it is recorded in the row and in the
+    audit log, and a window is not a different promise because a second person entered it.
+
+    The digest reads `WINDOW_ID_KEYS`, skipping any the declaration leaves out, so a v1-shaped declaration
+    keeps the id it had before condition classes existed — a stored window's id is recomputed on every
+    read by `_envelope`'s caller, and changing it for rows already in a file would make every one of them
+    unreadable. The consequence is the point: two windows differing only in what they explain, or two
+    occurrences of one schedule that happen to share a selector and a span, cannot collide into one row.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL,
-                          canonical([[key, declaration[key]] for key in WINDOW_KEYS
+                          canonical([[key, declaration[key]] for key in WINDOW_ID_KEYS
                                      if declaration.get(key) is not None])))
 
 
@@ -372,9 +441,12 @@ def declare_window(store: Store, declaration: dict[str, Any], actor: Actor, *,
     is that the thing being suppressed cannot suppress itself.
 
     Args:
-        store: The platform database the window is recorded in.
+        store: The operational store the window is recorded in.
         declaration: Exactly one of `resource_id` / `rule_id` (both or neither is a refusal), plus
-            `starts_at`, `ends_at` and a one-line `reason` of at most `MAX_REASON_CHARS`.
+            `starts_at`, `ends_at` and a one-line `reason` of at most `MAX_REASON_CHARS`. Optionally
+            `explains` — the condition classes this window accounts for, from `CONDITION_CLASSES`, stored
+            sorted — and, for a window a recurring schedule materialized, `schedule_id`,
+            `schedule_version` and `occurrence_id` together.
         actor: Must carry role ``human``; its identity is stored as `author`.
         now: The aware clock the declaration is checked against.
 
@@ -387,12 +459,19 @@ def declare_window(store: Store, declaration: dict[str, Any], actor: Actor, *,
         StateError: The role is not ``human``; the selector is not exactly one of the two shapes; a
             timestamp is unparseable, unordered, empty-spanned or longer than `MAX_WINDOW_SECONDS`; the
             window is already over at the moment it is declared; the reason is not one printable bounded
-            line; an unknown key is present; `MAX_LIVE_WINDOWS` windows are already live; or the candidate
-            read is already past `MAX_WINDOW_ROWS`, which is a silence this build cannot promise to apply.
+            line; `explains` names a class outside `CONDITION_CLASSES`, repeats one, or is empty; the
+            three schedule fields do not arrive together and well-formed; an unknown key is present;
+            `MAX_LIVE_WINDOWS` windows are already live; or the candidate read is already past
+            `MAX_WINDOW_ROWS`, which is a silence this build cannot promise to apply.
+
+            A declaration that names no `explains` is stored **class-blind**, exactly as it was before
+            condition classes existed — that is the compatibility reading of a v1 window, and it is why
+            the HTTP door at `platform/maintenance.py` always names the list it was given (defaulting to
+            `EXPLAINED_BY_DEFAULT`) rather than leaving it out.
     """
     require(actor, 'human')
     now = clock(now)
-    unknown = set(declaration) - set(WINDOW_KEYS)
+    unknown = set(declaration) - set(WINDOW_KEYS) - set(WINDOW_ORIGIN_KEYS)
     if unknown:
         raise StateError('Unknown maintenance window field: ' + ','.join(sorted(unknown)))
     if sum(1 for key in SELECTOR_KEYS if declaration.get(key) is not None) != 1:
@@ -414,9 +493,24 @@ def declare_window(store: Store, declaration: dict[str, Any], actor: Actor, *,
         identifier(resource_id)
     if rule_id is not None:
         label(rule_id)
+    explains = _classes(declaration.get('explains'))
+    schedule_id, schedule_version = declaration.get('schedule_id'), declaration.get('schedule_version')
+    occurrence_id = declaration.get('occurrence_id')
+    origin = (schedule_id, schedule_version, occurrence_id)
+    if None in origin and any(value is not None for value in origin):
+        raise StateError('A materialized window names schedule_id, schedule_version and occurrence_id'
+                         ' together, or none of them')
+    if schedule_id is not None:
+        identifier(schedule_id)
+        identifier(occurrence_id)
+        if (isinstance(schedule_version, bool) or not isinstance(schedule_version, int)
+                or not 1 <= schedule_version <= MAINTENANCE_SCHEDULE_VERSION_LIMIT):
+            raise StateError(f'schedule_version must be 1..{MAINTENANCE_SCHEDULE_VERSION_LIMIT}')
     declared = {'id': window_id(declaration), 'resource_id': resource_id, 'rule_id': rule_id,
                 'starts_at': utc_text(start), 'ends_at': utc_text(end), 'reason': reason,
-                'author': actor.identity, 'declared_at': utc_text(now)}
+                'author': actor.identity, 'declared_at': utc_text(now), 'explains': explains,
+                'schedule_id': schedule_id, 'schedule_version': schedule_version,
+                'occurrence_id': occurrence_id}
     key = maintenance_key(declared['id'])
     with store.transaction() as connection:
         stored = connection.execute('SELECT value FROM notification_control WHERE key=?', (key,)).fetchone()
@@ -513,7 +607,9 @@ def live_windows(store: Store, *, now: dt.datetime | None = None) -> dict[str, A
         'unattested': int, 'revoked': int, 'expired': int, 'max_live_windows': int,
         'max_seconds': int, 'max_rows': int}``, ordered by (starts_at, id) so a replay of the read is
         deterministic, and each window carries `covers_now` plus the two null revoke fields until one is
-        revoked. Every count is of candidates, not of history.
+        revoked, plus the four fields a v2 declaration names (`explains`, `schedule_id`,
+        `schedule_version`, `occurrence_id`) — all four null on a v1 row, where a null `explains` is the
+        class-blind reading that row was approved under. Every count is of candidates, not of history.
     """
     now = clock(now)
     with _readonly(store) as db:
@@ -538,18 +634,128 @@ def _covering_window(connection: sqlite3.Connection, event: dict[str, Any], *,
     window on a rule covers that rule wherever it files. `_scan` has already refused the four ways the
     answer could be wrong (an unreadable row, an unattested one, a set past its bound, a scan past its
     row limit), so None here means "no window applies" and never "no window could be read".
+
+    Two further questions are asked here, and both can answer "no window applies" honestly:
+
+    * **the instant judged is the finding's own.** `_decision_instant` returns `observed_at` when the fact
+      arrived late (clamped to the clock, and abandoned back to the clock past
+      `MAX_EVENT_LOOKBACK_SECONDS`), so a boot report filed after the machine came up is still inside the
+      window that planned the outage, while a finding *observed* after a window's end matches nothing —
+      which is what "an overrun stops suppressing at the declared end" means at this door. Note which side
+      moved: candidates are read as of that instant, so the read walks *more* rows for an old fact, and a
+      set past the bound applies nothing and pages, as it always has.
+    * **the class has to be one the window named.** `condition_class` derives it from the event, and
+      `explains` asks the window. A finding about a compromise, a backup or the application's own failure
+      is not accounted for by a window that says nothing about it, so it pages inside a planned outage.
     """
-    answer = _scan(connection, clock(now))
+    at, late = _decision_instant(event, clock(now))
+    answer = _scan(connection, at)
     if answer['bound_exceeded']:
         return None
+    klass = condition_class(event)
     for window in answer['windows']:
-        if not window['covers_now']:
+        if not window['covers_now'] or not explains(window, klass):
             continue
         if window['resource_id'] is not None and window['resource_id'] == event['resource_id']:
-            return window
+            return dict(window, condition_class=klass, explained_at=utc_text(at), late_seconds=late)
         if window['rule_id'] is not None and window['rule_id'] == event['rule_id']:
-            return window
+            return dict(window, condition_class=klass, explained_at=utc_text(at), late_seconds=late)
     return None
+
+
+def windows_spanning(store: Store, *, span_from: dt.datetime, span_to: dt.datetime,
+                     limit: int | None = None) -> dict[str, Any]:
+    """Every declared window whose span overlaps ``[span_from, span_to)``, expired and revoked rows included.
+
+    `live_windows` never reads an expired row — that is what keeps a lifetime of old declarations from
+    costing the pager anything — so a *report* question ("what work was planned around this instant?",
+    "was this late fact inside a window?") needs a different door. This is that door: one bounded range
+    read over the window keys themselves, in key order so a replay of the read returns the same rows, with
+    every row it returns put through the same envelope, declaration and attestation checks the live read
+    pays. It applies nothing: it is the read behind `platform/maintenance.py`'s intervals, history and
+    outcomes, and it is a report path, not the delivery path.
+
+    The bound is the reason the answer is shaped the way it is. Past `MAX_HISTORY_ROWS` the reply says
+    `bound_exceeded: True`, and every row it did return is still a window this build verified — but the
+    set is a prefix in *id* order rather than a timeline, so a caller may report what it found and may
+    **not** conclude that nothing covered an instant. `maintenance.py` is written to honour that: an
+    answer over the bound carries the flag and refuses to say `unexplained`.
+
+    Returns:
+        ``{'windows': [...], 'count', 'scanned', 'unusable', 'unattested', 'bound_exceeded',
+        'span': {'from', 'to'}, 'max_rows'}``, ordered by (starts_at, id). Each window is `_view`'s shape
+        plus `revoked_at`/`revoked_by`, `attested`, and the two clipping flags a reader needs to tell
+        "the window began before what you asked about" from "the window began then".
+    """
+    span_from, span_to = clock(span_from), clock(span_to)
+    if not span_from < span_to:
+        raise StateError('A maintenance interval query needs an end after its start')
+    # `None` means "the module's own bound", read now rather than frozen into the signature at import:
+    # a caller that did not ask for a limit must get the limit this build publishes, not the one that
+    # happened to be in force when this file was first compiled.
+    limit = MAX_HISTORY_ROWS if limit is None else limit
+    bound = _bound('limit', limit, 1, MAX_HISTORY_ROWS)
+    with _readonly(store) as db:
+        rows = db.execute('SELECT key, value FROM notification_control'
+                          f' WHERE {MAINTENANCE_WINDOW_KEYS} ORDER BY key LIMIT ?', (bound + 1,)).fetchall()
+        found: list[dict[str, Any]] = []
+        unusable = unattested = 0
+        for row in rows:
+            document = _envelope(row['value'])
+            declared = None if document is None else _declared(document['declared'],
+                                                               document['schema_version'])
+            if declared is None:
+                unusable += 1
+                continue
+            start, end = _instant(declared['starts_at']), _instant(declared['ends_at'])
+            if end <= span_from or start >= span_to:
+                continue
+            revoke = document['revoked'] or {}
+            attested = _attested(db, declared, document['attest'])
+            if not attested:
+                unattested += 1
+            found.append(dict(_view(declared), revoked_at=revoke.get('revoked_at'),
+                              revoked_by=revoke.get('revoked_by'), attested=attested,
+                              starts_before_span=start < span_from, ends_after_span=end > span_to))
+        found.sort(key=lambda window: (window['starts_at'], window['id']))
+    return {'windows': found, 'count': len(found), 'scanned': len(rows), 'unusable': unusable,
+            'unattested': unattested, 'bound_exceeded': len(rows) > bound,
+            'span': {'from': utc_text(span_from), 'to': utc_text(span_to)}, 'max_rows': bound}
+
+
+def window_by_id(store: Store, window: str) -> dict[str, Any]:
+    """One stored window by id, whether or not it is still live, with why this build trusts it.
+
+    `live_windows` cannot answer "what was planned at 15:30?" for a window that ended at 16:49, and a
+    report that cannot name the window it is talking about is not a report. A primary-key read over the
+    control key, then the same three checks every other read pays: the envelope, the declaration, and the
+    append-only `maintenance.declared` row the document points at.
+
+    Raises:
+        StateError: The id is not canonical, no window is stored under it, or the stored document is not
+            readable enough to describe. The three answers are deliberately different sentences: "you
+            asked for nothing" is not "what you asked for is broken", and a caller that cannot tell them
+            apart will report a corrupt store every time an operator mistypes a uuid.
+    """
+    identifier(window)
+    with _readonly(store) as db:
+        row = db.execute('SELECT value FROM notification_control WHERE key=?',
+                         (maintenance_key(window),)).fetchone()
+        if row is None:
+            raise StateError('No such maintenance window')
+        document = _envelope(row['value'])
+        if document is None:
+            raise StateError('Maintenance window declaration is unreadable; it applies to nothing and'
+                             ' needs a human to reconcile it')
+        declared = _declared(document['declared'], document['schema_version'])
+        if declared is None:
+            raise StateError('Maintenance window declaration is unreadable; it applies to nothing and'
+                             ' needs a human to reconcile it')
+        revoke = document['revoked'] or {}
+        return dict(_view(declared), revoked_at=revoke.get('revoked_at'),
+                    revoked_by=revoke.get('revoked_by'),
+                    attested=_attested(db, declared, document['attest']),
+                    document_version=document['schema_version'])
 
 
 # --- dependency suppression -----------------------------------------------------------------
@@ -741,13 +947,22 @@ def _decide(connection: sqlite3.Connection, event: dict[str, Any], *, now: dt.da
     flap = _flapping(connection, event, window_seconds=window_seconds, threshold=threshold, now=now)
     window = _covering_window(connection, event, now=now)
     if window is not None:
-        reason = _limit(f'maintenance-window {window["id"]} for {_selector(window)} covers this finding'
-                        f' until {window["ends_at"]}; declared by {window["author"]}: {window["reason"]}')
+        # The sentence names the class it folded, because "the disk was down for the disk swap" and "the
+        # application error rate was up during the disk swap" are different claims, and an operator
+        # reading one line in the portal months later cannot otherwise tell them apart. `explained_at` is
+        # the instant the window was matched against rather than the instant the question was asked, so a
+        # late boot report reads as planned work on the row that recorded it.
+        reason = _limit(f'maintenance-window {window["id"]} for {_selector(window)}'
+                        f' explains {window["condition_class"]} until {window["ends_at"]};'
+                        f' declared by {window["author"]}: {window["reason"]}')
         return Decision(condition=flap['condition'], suppressed=True, cause='maintenance-window',
                         reason=reason, transitions=flap['transitions'],
                         detail={'window_id': window['id'], 'starts_at': window['starts_at'],
                                 'ends_at': window['ends_at'], 'declared_by': window['author'],
-                                'declared_at': window['declared_at']})
+                                'declared_at': window['declared_at'],
+                                'condition_class': window['condition_class'],
+                                'explained_at': window['explained_at'],
+                                'late_seconds': window['late_seconds']})
     cause = _dependency(connection, event, index_path=index_path, graph=graph, depth=depth)
     if cause is not None:
         reason = _limit(f'dependency {cause["parent"]} is firing under rule {cause["rule_id"]}'
@@ -820,8 +1035,18 @@ def file_event(store: Store, event: dict[str, Any], actor: Actor, *, now: dt.dat
             return
         folded['suppressed'] = _suppress_delivery(
             store, connection, delivery, decision.reason or '', cause=decision.cause, now=now,
-            detail={'condition': decision.condition, 'event_id': outcome['event_id'],
-                    'transition': outcome['transition'], 'producer': actor.identity})
+            detail=dict({'condition': decision.condition, 'event_id': outcome['event_id'],
+                         'transition': outcome['transition'], 'producer': actor.identity},
+                        # The window's own three fields ride along on the one append-only row that says
+                        # "this page was folded", which is what makes a *window* auditable after the fact
+                        # rather than only a cause: `platform/maintenance.py` reads them back to answer
+                        # "what did this window actually account for?", and schema v12 cuts an index on
+                        # exactly this key so that read is a seek. An unexplained or unsuppressed finding
+                        # writes none of them, which is the same fact stated the other way round.
+                        **({'window_id': decision.detail['window_id'],
+                            'condition_class': decision.detail['condition_class'],
+                            'explained_at': decision.detail['explained_at']}
+                           if decision.cause == 'maintenance-window' and decision.detail else {})))
 
     outcome = store.intake(event, actor, now=now, admission=admit)
     result: dict[str, Any] = {'intake': outcome, 'decision': folded.get('decision'),
@@ -1129,14 +1354,33 @@ def _readonly(store: Store) -> Iterator[sqlite3.Connection]:
 
 # --- the stored window document -------------------------------------------------------------
 
+def _declared_keys(version: Any) -> tuple[str, ...] | None:
+    """Return the whole field set one envelope version's declared block must hold, or None.
+
+    None answers for a version this build does not know, which is how "the file is ahead of me" and "the
+    block has the wrong fields" reach the same honest verdict in `_envelope`: the row is counted in
+    `unusable` and applies to nothing.
+    """
+    if version == 1:
+        return DECLARED_KEYS
+    if version == 2:
+        return DECLARED_KEYS_V2
+    return None
+
+
 def _envelope(value: Any) -> dict[str, Any] | None:
     """Return one stored window envelope as a mutable dict, or None when it is not one at all.
 
     This is the shallow read `revoke_window` and the duplicate answer need: it checks that the text is
-    JSON of the shape this module writes — the envelope, its version, a complete `declared` block, a
-    well-formed `revoked` pair or nothing, a positive integer attestation — and judges none of the
-    *contents*. Judgement belongs to `_scan`, on the path that applies a window, because a row whose span
-    or attestation has failed must still be revocable by the human who can see it in `windows`.
+    JSON of the shape this module writes — the envelope, a version it knows, a complete `declared` block
+    *for that version*, a well-formed `revoked` pair or nothing, a positive integer attestation — and
+    judges none of the *contents*. Judgement belongs to `_scan`, on the path that applies a window, because
+    a row whose span or attestation has failed must still be revocable by the human who can see it in
+    `windows`. Both envelope versions are readable (`WINDOW_DOCUMENT_VERSIONS`) and the field set a
+    `declared` block must hold is chosen *by* version: a v1 row that grew an `explains` field is not a v1
+    row this build wrote, and the audit row attesting it would not match it either. A version this build
+    does not know is counted in `unusable` and never applied, so a file written by a later build silences
+    nothing rather than silencing something the operator has not read the rules for.
     """
     if not isinstance(value, str):
         return None
@@ -1144,10 +1388,12 @@ def _envelope(value: Any) -> dict[str, Any] | None:
         document = json.loads(value)
     except ValueError:
         return None
+    version = document.get('schema_version') if isinstance(document, dict) else None
+    keys = _declared_keys(version)
     if (not isinstance(document, dict) or set(document) != set(WINDOW_DOCUMENT_KEYS)
-            or document['schema_version'] != WINDOW_DOCUMENT_VERSION
+            or keys is None
             or not isinstance(document['declared'], dict)
-            or set(document['declared']) != set(DECLARED_KEYS)
+            or set(document['declared']) != set(keys)
             or not (document['revoked'] is None
                     or (isinstance(document['revoked'], dict)
                         and set(document['revoked']) == set(REVOKE_KEYS)))
@@ -1157,18 +1403,22 @@ def _envelope(value: Any) -> dict[str, Any] | None:
     return document
 
 
-def _declared(block: Any) -> dict[str, Any] | None:
-    """Return one declared block this build would have written, or None.
+def _declared(block: Any, version: int = WINDOW_DOCUMENT_VERSION) -> dict[str, Any] | None:
+    """Return one declared block of one known version this build would have written, or None.
 
     The refusals are `declare_window`'s, re-applied here rather than trusted from there, because the row
     being read may have arrived by a restore or a copy from a build with different bounds: the selector
     must be exactly one of the two shapes and well-formed in itself, the author a bounded identity, the
     reason one printable bounded line, and every stamp parseable, ordered, and inside
-    `MAX_WINDOW_SECONDS`. None of that is a judgement about the *work*; it is the shape a window must
-    have before anything may be silenced on its strength, so a failure here is a row that is counted and
-    never applied — the direction that pages.
+    `MAX_WINDOW_SECONDS`. On a v2 block the class list must be drawn from `CONDITION_CLASSES` with no
+    repeat, and the three schedule fields must arrive together or not at all — a window claiming to be an
+    occurrence of a schedule it cannot name is not a window anybody approved. A v1 block names no classes
+    and stays class-blind (`explains`). None of that is a judgement about the *work*; it is the shape a
+    window must have before anything may be silenced on its strength, so a failure here is a row that is
+    counted and never applied — the direction that pages.
     """
-    if not isinstance(block, dict) or set(block) != set(DECLARED_KEYS):
+    keys = _declared_keys(version)
+    if keys is None or not isinstance(block, dict) or set(block) != set(keys):
         return None
     try:
         identifier(block['id'])
@@ -1188,9 +1438,108 @@ def _declared(block: Any) -> dict[str, Any] | None:
         _instant(block['declared_at'])
         if not 0 < (end - start).total_seconds() <= MAX_WINDOW_SECONDS:
             return None
+        if version == 1:
+            return dict(block)
+        if block['explains'] is not None and _classes(block['explains'], stored=True) is None:
+            return None
+        origin = (block['schedule_id'], block['schedule_version'], block['occurrence_id'])
+        if not any(value is not None for value in origin):
+            return dict(block)
+        if None in origin:
+            return None
+        identifier(origin[0])
+        identifier(origin[2])
+        if (isinstance(origin[1], bool) or not isinstance(origin[1], int)
+                or not 1 <= origin[1] <= MAINTENANCE_SCHEDULE_VERSION_LIMIT):
+            return None
     except (StateError, InvalidInventory, TypeError, ValueError):
         return None
     return dict(block)
+
+
+def _view(declared: dict[str, Any]) -> dict[str, Any]:
+    """Return one validated declared block in the shape every reader of this build sees.
+
+    A v1 block carries none of the four optional fields; filling them with `None` — and leaving `explains`
+    `None`, which `explains` reads as class-blind — is what lets a report print one table instead of
+    branching on the version of a row it is only describing. Nothing is invented: every value present came
+    out of `_declared`, which refused anything it could not verify.
+    """
+    view = dict(declared)
+    for key in WINDOW_ORIGIN_KEYS:
+        view.setdefault(key, None)
+    return view
+
+
+def _classes(value: Any, *, stored: bool = False) -> list[str] | None:
+    """Return a declared class list, sorted, or None meaning "no class named".
+
+    `stored` is the read path's question — a value already in a row is a fact to be judged, not a request
+    to be answered — so on that path anything malformed answers None ("not a window this build declared")
+    instead of raising. Sorting is not cosmetic: the list is an input to `window_id`, and an unsorted one
+    would make two spellings of the same decision two windows with two silences.
+    """
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or not value
+            or not all(isinstance(item, str) and item in CONDITION_CLASSES for item in value)
+            or len(set(value)) != len(value)):
+        if stored:
+            return None
+        raise StateError('A maintenance window explains each condition class once, from:'
+                         ' ' + ','.join(CONDITION_CLASSES))
+    return sorted(value) if not stored else list(value)
+
+
+def condition_class(event: dict[str, Any]) -> str:
+    """Return which class of condition this canonical event is, or `unclassified`.
+
+    Ordered rules, first match wins, and every input is a field `state.validate_event` already holds to a
+    closed vocabulary — so an unexpected value is neither a crash nor a guess: it falls through to
+    `unclassified`, which no window explains.
+
+    1. a `rule_id` or `condition` whose first dot-separated segment is `backup` → `backup-integrity`;
+    2. ``kind: security`` → `security`;
+    3. ``kind: availability`` → `restart` on the resolving edge (the machine came back) and `availability`
+       otherwise — a boot report is an availability verdict that resolved, which is the shape a host
+       coming up after planned work takes;
+    4. ``kind: coverage`` → `silence` when every evidence reference is a heartbeat probe (nothing arrived
+       at all) and `freshness` otherwise (it arrived, too late or unusable);
+    5. ``kind`` in `APPLICATION_KINDS` → `application`;
+    6. anything else → `unclassified`.
+
+    What this cannot name is what no producer ever described: the canonical envelope has no field saying
+    "this verdict is about a backup", only a rule id, so rule *labels* carry the claim and one exact
+    segment is as far as this goes. A per-rule class declaration owned by the rule document is the honest
+    next step; it is named as a follow-up rather than guessed here.
+    """
+    for name in (event.get('rule_id'), event.get('condition')):
+        if isinstance(name, str) and name.split('.')[0] == BACKUP_RULE_SEGMENT:
+            return 'backup-integrity'
+    kind = event.get('kind')
+    if kind == 'security':
+        return 'security'
+    if kind == 'availability':
+        return 'restart' if event.get('status') == 'resolved' else 'availability'
+    if kind == 'coverage':
+        evidence = [item for item in (event.get('evidence') or []) if isinstance(item, dict)]
+        if evidence and all(item.get('query_type') == HEARTBEAT_QUERY_TYPE for item in evidence):
+            return 'silence'
+        return 'freshness'
+    if kind in APPLICATION_KINDS:
+        return 'application'
+    return 'unclassified'
+
+
+def explains(window: dict[str, Any], klass: str) -> bool:
+    """Whether one readable window accounts for one condition class.
+
+    `explains` is None on a v1 document — a window approved before a window could name what it explains —
+    and None means "every finding inside the selector", which is the behaviour that row was approved
+    under. Widening is impossible from here: a v2 row's list is fixed by the declaration its audit row
+    quotes byte for byte.
+    """
+    return window.get('explains') is None or klass in window['explains']
 
 
 def _attested(connection: sqlite3.Connection, declared: dict[str, Any], attest: int) -> bool:
@@ -1239,7 +1588,10 @@ def _scan(connection: sqlite3.Connection, now: dt.datetime) -> dict[str, Any]:
         if document is None:
             unusable += 1
             continue
-        declared = _declared(document['declared'])
+        # The row's own version, not this build's: a window declared before condition classes existed
+        # carries the v1 field set, and judging it against v2 would count every restored row unusable and
+        # silently stop honouring silences an operator already made. `_declared` knows both shapes.
+        declared = _declared(document['declared'], document['schema_version'])
         if declared is None:
             unusable += 1
             continue
@@ -1253,7 +1605,7 @@ def _scan(connection: sqlite3.Connection, now: dt.datetime) -> dict[str, Any]:
         if end <= now:
             expired += 1
             continue
-        live.append(dict(declared, revoked_at=None, revoked_by=None, covers_now=start <= now))
+        live.append(dict(_view(declared), covers_now=start <= now))
     live.sort(key=lambda window: (window['starts_at'], window['id']))
     return {'windows': live, 'count': len(live), 'scanned': len(rows),
             'bound_exceeded': len(rows) > MAX_WINDOW_ROWS or len(live) > MAX_LIVE_WINDOWS,
@@ -1270,11 +1622,13 @@ def _readable_window(value: Any) -> dict[str, Any]:
     declaration would be inventing a stored fact. Reconciling it is a human act, and the sentence says so.
     """
     document = _envelope(value)
-    declared = _declared(document['declared']) if document is not None else None
+    declared = (_declared(document['declared'], document['schema_version'])
+                if document is not None else None)
     if declared is None:
         raise StateError('Maintenance window declaration is unreadable; reconcile it, never re-declare it')
     revoke = document['revoked'] or {}
-    return dict(declared, revoked_at=revoke.get('revoked_at'), revoked_by=revoke.get('revoked_by'))
+    return dict(_view(declared), revoked_at=revoke.get('revoked_at'),
+                revoked_by=revoke.get('revoked_by'))
 
 
 def _delivery_row(connection: sqlite3.Connection, event_id: str) -> str | None:
@@ -1317,6 +1671,34 @@ def _instant(value: Any) -> dt.datetime:
         return timestamp(value)
     except InvalidInventory:
         raise StateError('A maintenance window needs timezone-aware ISO timestamps') from None
+
+
+def _decision_instant(event: Any, now: dt.datetime) -> tuple[dt.datetime, int]:
+    """Return the instant a window is judged against, and how far behind the clock the fact is.
+
+    A finding that arrives while its own window is open is judged at the clock, exactly as it always was.
+    A finding that arrives *late* is judged against the window that covered **it**: a boot report an agent
+    filed at 17:30 about a machine that came up at 15:30 describes planned work, and refusing it because
+    the pager had since woken would be a claim about arrival order rather than about the estate.
+
+    Three bounds keep that from becoming a way to silence the present with the past. A future
+    `observed_at` — which `validate_event` admits up to 60 s of producer skew — is clamped to the clock
+    rather than widening a silence forward. A fact older than `MAX_EVENT_LOOKBACK_SECONDS` is judged at the
+    clock, because a queue that was down for a month must not fold tonight's page against a window nobody
+    has read since. And an `observed_at` this build cannot parse is judged at the clock: that field is not
+    the reason to refuse an event, and the pre-existing behaviour is the honest fallback.
+    """
+    observed = event.get('observed_at') if isinstance(event, dict) else None
+    try:
+        at = _instant(observed)
+    except StateError:
+        return now, 0
+    if at > now:
+        at = now
+    late = int((now - at).total_seconds())
+    if late > MAX_EVENT_LOOKBACK_SECONDS:
+        return now, late
+    return at, late
 
 
 def _selector(window: dict[str, Any]) -> str:

@@ -212,7 +212,9 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(updated.migration_backup.is_file())
             self.assertTrue(any(row['operation'] == 'fixture.kept' for row in updated.records('audit')))
             with Store(path).transaction() as db:
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 10)
+                # The version this build reaches, not the step the runner tables arrived at: a new schema
+                # step above v10 (api_idempotency at v11) moves the answer and nothing else here.
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], state.VERSION)
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM runner_requests').fetchone()[0], 0)
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM setup_plans').fetchone()[0], 0)
 

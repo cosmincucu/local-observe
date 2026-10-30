@@ -63,11 +63,14 @@ round must not cost what the tables have accumulated. What the round reads now, 
   therefore delays discovery by a bounded number of pages instead of holding it forever, and it never
   delays an incident that is already tracked. The position is a ROWID and never a timestamp: `opened_at` is
   not monotonic, and a discovery key that can go backwards loses incidents or repeats them.
-* **Acknowledgement, as two booleans per incident.** A human decision (an `actions` row bound to that
-  incident whose status is past decision) and an approval intent (an `action.approval_intent` audit row for
-  one of that incident's actions) — the same two durable facts as before, each proved by a row that stays in
-  the database forever, so a last month's decision stops the ladder over a hundred thousand unrelated later
-  rows. An incident whose *own* history is large enough to run out of its read budget is reported incomplete
+* **Acknowledgement, as three bounded answers per incident.** A disposition an operator recorded under the
+  alert-occurrence contract (`platform/dispositions.py`), a human decision (an `actions` row bound to that
+  incident whose status is past decision) and an approval intent (an `action.approval_intent` audit row for one
+  of that incident's actions) — each proved by a row that stays in the database forever, so a last month's
+  decision stops the ladder over a hundred thousand unrelated later rows. The disposition outranks the other
+  two, and is the only one that names an actor and a reason; the legacy signals stay valid reasons to hold a
+  ladder, are never promoted into an acknowledgement, and the audit row names which evidence the round acted
+  on. An incident whose *own* history is large enough to run out of its read budget is reported incomplete
   by name and held; the other incidents in the round are judged normally.
 
 Like every other unit here: the clock is injected, there are no threads and no wall-clock reads, and every
@@ -84,7 +87,8 @@ from typing import Any
 from local_observe.inventory.validation import digest, timestamp, utc_text
 from local_observe.log import get_logger
 from .detections import event
-from .state import Actor, StateError, Store, identifier, label, validate_event
+from .state import (OCCURRENCE_DISPOSITION_EVIDENCE, Actor, StateError, Store, identifier, label,
+                    validate_event)
 from . import escalation_reader, vocabulary
 
 log = get_logger(__name__)
@@ -125,6 +129,13 @@ SYNTHETIC_PREFIX = 'stage-'
 ACK_STATUSES = ('approved', 'denied', 'executing', 'succeeded', 'failed', 'unknown')
 ACK_DECISION = 'action-decided'
 ACK_INTENT = 'approval-intent'
+#: The two dispositions an operator may record, and the evidence word each one takes in
+#: `escalation.acknowledged`. A durable disposition outranks both legacy signals below — it is the only
+#: acknowledgement that names a human and a reason (`docs/api/occurrences.md` §6) — and the two words are
+#: deliberately distinct, so a reader of the audit log can tell a ladder held because somebody said "I have
+#: this" from one held because somebody said "this needs nobody". The mapping is `state`'s, beside the column
+#: CHECK that bounds the kinds, so a fourth disposition cannot appear here without joining that CHECK first.
+ACK_DISPOSITION = OCCURRENCE_DISPOSITION_EVIDENCE
 #: Audit operations this module adds. Named as a tuple so the report, the README row and a grep agree.
 OPERATIONS = ('escalation.enrolled', 'escalation.stage', 'escalation.acknowledged',
               'escalation.suppressed', 'escalation.closed')
@@ -380,14 +391,21 @@ def _chain_for(chains: Sequence[Chain], payload: Mapping[str, Any]) -> Chain | N
 
 
 def _acknowledgement(ack: escalation_reader.Ack | None) -> str | None:
-    """Turn the reader's two booleans into the kind of ack this unit counts, or None.
+    """Turn the reader's three evidence answers into the kind of ack this unit counts, or None.
 
-    A decision outranks an intent, as it always did: a person who answered the page *and* decided has
-    decided. An incomplete read answers None — which the caller reads as "hold", never as "nobody has
-    answered", because the second would send a page over an acknowledgement this round could not see.
+    A durable disposition outranks the two legacy signals, and that order is the whole point: it is the only
+    evidence naming the human who gave it and the reason they gave, which is what an operator-facing
+    "acknowledged by" line has to be allowed to mean. The legacy signals keep working exactly as they did when
+    nothing else is present — a decision outranks an intent, as it always did, because a person who answered the
+    page *and* decided has decided — and a page-link tap is never promoted into an acknowledgement.
+
+    An incomplete read answers None — which the caller reads as "hold", never as "nobody has answered",
+    because the second would send a page over an acknowledgement this round could not see.
     """
     if ack is None or not ack.complete:
         return None
+    if ack.disposition in ACK_DISPOSITION:
+        return ACK_DISPOSITION[ack.disposition]
     return ACK_DECISION if ack.decided else (ACK_INTENT if ack.intent else None)
 
 
