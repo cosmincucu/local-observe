@@ -288,6 +288,16 @@ def body_digest(body: Any) -> str:
     return hashlib.sha256(canonical(body).encode()).hexdigest()
 
 
+def request_digest(method: str, path: str, body: Any) -> str:
+    """Return the digest an idempotency key is bound to: the method, the path and the canonical body.
+
+    The path is part of the intention. Routes that carry their target in the path (an occurrence, a
+    window, a schedule) would otherwise let one key reused against a second target replay the first
+    target's answer; with the path inside the digest that reuse is `409 idempotency_conflict`.
+    """
+    return hashlib.sha256(canonical({'method': method, 'path': path, 'body': body}).encode()).hexdigest()
+
+
 def idempotency_key_from(scope: Mapping[str, Any]) -> str | None:
     """Return the key this request opts in with, or `None` when it does not opt in at all.
 
@@ -514,7 +524,8 @@ class IdempotencyGate:
     def __init__(self, store: Any) -> None:
         self.store = store
 
-    def reserve(self, context: ActorContext, body: Any, *, now: dt.datetime | None = None) -> Reservation:
+    def reserve(self, context: ActorContext, body: Any, *, now: dt.datetime | None = None,
+                target: tuple[str, str] | None = None) -> Reservation:
         """Claim the key this context carries, or hand back the answer already stored under it.
 
         Same key plus the same canonical body replays the stored answer unchanged, so a client that lost
@@ -532,7 +543,9 @@ class IdempotencyGate:
         """
         if context.idempotency_key is None:
             raise ContractError(400, 'invalid_idempotency_key', 'No idempotency key was carried for this write')
-        digest = body_digest(body)
+        # `target` is the request's (method, path); the transport always passes it. Without it the key is
+        # bound to the body alone, which only a direct library caller with no route can rely on.
+        digest = request_digest(*target, body) if target is not None else body_digest(body)
         # Bound the key to this body for the rest of its life: every later call this request makes
         # (complete or abandon) names the same digest it reserved with, so a completion can never land
         # on a row another request wrote under the same key.
@@ -624,7 +637,7 @@ def request_context(scope: Mapping[str, Any], actor: Actor) -> ActorContext:
 
 
 __all__ = ['ActorContext', 'ContractError', 'ERROR_CATALOGUE', 'IdempotencyGate', 'LEGACY_CODES',
-           'Reservation', 'actor_context', 'body_digest', 'check_revision', 'decode_cursor',
+           'Reservation', 'actor_context', 'body_digest', 'request_digest', 'check_revision', 'decode_cursor',
            'encode_cursor', 'error_envelope', 'expected_revision', 'header_values', 'idempotency_key_from',
            'legacy_error', 'new_request_id', 'page_params', 'page_payload', 'request_context',
            'request_id_from', 'assert_no_actor_claim', 'revision_tag']

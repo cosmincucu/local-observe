@@ -1012,7 +1012,8 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 key = api_contract.idempotency_key_from(scope)
                 if key is not None:
                     reservation = idempotency.reserve(api_contract.actor_context(actor, request_id,
-                                                                                idempotency_key=key), body)
+                                                                                idempotency_key=key), body,
+                                                      target=(method, path))
                     if reservation.replay is not None:
                         status, payload = reservation.replay
                         return await respond(status, payload, [(api_contract.REPLAYED_HEADER, b'true')])

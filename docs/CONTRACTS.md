@@ -784,8 +784,9 @@ ran, listed as `api_contract.LEGACY_CODES`. `X-Request-Id` is on every answer, b
 
 `Idempotency-Key` is honoured only on the POST routes `api.IDEMPOTENT_POST_ROUTES` names, and the promise is
 durable: records live in `api_idempotency` (the schema step that migration applies) and survive the process.
-Same key plus the same canonical body replays the stored answer with `X-Idempotency-Replayed: true`; same key
-plus a different body is `409 idempotency_conflict` and nothing runs; a key still in flight is `409
+A key is bound to the request's method, path and canonical body. Same key plus the same method, path and body
+replays the stored answer with `X-Idempotency-Replayed: true`; same key plus a different body or a different
+target path is `409 idempotency_conflict` and nothing runs; a key still in flight is `409
 request_in_progress`, never a queue. Only a 2xx is stored, records expire after 24 hours, and a claim older
 than the in-flight window belongs to a process that died. A route outside the list ignores the header, so no
 client that exists today changes behaviour.

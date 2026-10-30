@@ -734,31 +734,32 @@ class BoundaryTests(DispositionFixture):
         self.assertEqual(self.count('occurrence_disposition_history'), 1)
 
     def test_a_key_is_scoped_to_one_identity_and_names_one_intention(self):
-        """The key is (credential, key, body digest): the path is not in the digest.
+        """The key is bound to (credential, key, method + path + body digest).
 
-        Pinned because these two routes carry their identifier *in the path* and nowhere in the body, so a
-        console that re-used one key across two occurrences with one reason would be answered with the
-        *other* occurrence's decision. The boundary's rule is unchanged and this is what it costs here.
+        These routes carry their identifier in the path and nowhere in the body, so one key reused
+        against a second occurrence with the same reason is a second intention: it is refused as an
+        idempotency conflict, and neither the first answer is replayed nor the second write performed.
         """
         first = self.open_episode('fixture.rule.one')
         second = self.open_episode('fixture.rule.two')
         key = [(b'idempotency-key', b'fixture-ack-3')]
         answer = self.ack(first, headers=key)
         self.assertEqual(answer[0], 200)
-        replay = self.ack(second, headers=key)
-        self.assertEqual(replay[0], 200)
-        self.assertEqual(replay[2].get('x-idempotency-replayed'), 'true')
-        self.assertEqual(replay[1]['occurrence_id'], first, 'the stored answer names the first episode')
-        self.assertNotEqual(replay[1]['occurrence_id'], second,
-                           'the episode the request named is not the one the stored answer speaks about')
+        reused = self.ack(second, headers=key)
+        self.assertEqual((reused[0], reused[1]['error']['code']), (409, 'idempotency_conflict'))
+        self.assertNotEqual(reused[2].get('x-idempotency-replayed'), 'true')
         self.assertEqual(self.document(second)['state'], 'unacknowledged', 'nothing ran for the second')
+        replay = self.ack(first, headers=key)
+        self.assertEqual((replay[0], replay[2].get('x-idempotency-replayed')), (200, 'true'))
+        self.assertEqual(replay[1]['occurrence_id'], first)
 
     def test_a_key_still_in_flight_is_refused_and_releases_afterwards(self):
         occurrence = self.open_episode()
         body = {'reason': 'held elsewhere'}
         context = api_contract.actor_context(HUMAN, api_contract.new_request_id(),
                                              idempotency_key='fixture-in-flight')
-        digest = api_contract.body_digest(body)
+        digest = api_contract.request_digest(
+            'POST', f'/v1/alert-occurrences/{occurrence}/acknowledgements', body)
         # The in-flight marker goes stale against the transport's own clock, and the transport injects none
         # (`api.py` calls `reserve(...)` with no `now`), so holding a key open for this test means reserving
         # it at the instant the request will arrive at. Everything else here stays on `NOW`.
