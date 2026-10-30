@@ -406,6 +406,13 @@ def counted_connections():
     own transactions and `verification_reader`'s dedicated read-only connection alike — so this counts
     database work rather than guessing at it from timings. Callers must not open their own connections
     inside the context: the count is the claim.
+
+    One connection is scoped out, deliberately: since schema v14 the transport consults
+    `credential_revocations` once per request whose bearer matched (`Store.revoked`, decision D14 in
+    `docs/api/DECISIONS.md`), which every authenticated call in these scenarios would pay regardless of the
+    route under test. The stub answers what these fixtures' ledgers answer — nobody is revoked — so the
+    refused/admitted pairs below count the verification read they are about. The door's own behaviour,
+    including that it is consulted before any route, is `tests/test_administration_api.py`.
     """
     calls: list = []
     real = sqlite3.connect
@@ -414,7 +421,8 @@ def counted_connections():
         calls.append((args, kwargs))
         return real(*args, **kwargs)
 
-    with mock.patch('local_observe.platform.state.sqlite3.connect', new=counting):
+    with mock.patch('local_observe.platform.state.sqlite3.connect', new=counting), \
+            mock.patch('local_observe.platform.administration.revoked', return_value=False):
         yield calls
 
 

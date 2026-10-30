@@ -98,6 +98,9 @@ tags:
     description: >-
       The pure deployment functions — a draft lock, a content plan, a rendered tree, a dashboard review
       document. Bytes to read, never a change to apply.
+  - name: administration
+    description: >-
+      Credentials and their revocations, the state lifecycle, and the jobs an operator approved.
 paths:
   /v1/me:
     get:
@@ -3510,6 +3513,497 @@ paths:
           oneOf:
             - $ref: '#/components/responses/IdempotencyConflict'
             - $ref: '#/components/responses/RequestInProgress'
+  /v1/health:
+    get:
+      tags: [health]
+      operationId: platform.health.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: What this installation is wired to do, and what it was never given.
+      description: |
+        Three words per capability, because "off" and "cannot" are different answers to an installer's
+        question and one word would force a guess: `supported` (wired and reachable), `disabled` (this
+        deployment chose not to), `unavailable` (what it needs is absent and no choice of this process could
+        add it). Every entry carries the evidence that decided it.
+
+        The one judgment here is the schema: a `Store` refuses to open a file whose version this build does
+        not understand, so a served answer always means code and file agree. Nothing else gets a verdict, and
+        `not_measured` says what this endpoint cannot see — another process on the host, an operator's backup
+        schedule, whether a notification channel is reachable — rather than leaving an installer to read
+        `supported` everywhere and conclude there was a backup. Counts live in `/v1/status` and volatile
+        process counters in `/v1/runtime`; `see_also` points there instead of answering the same question twice.
+      responses:
+        '200':
+          description: The capability answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthAnswer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/boundary:
+    get:
+      tags: [health]
+      operationId: platform.boundary.read
+      x-status: implemented
+      x-required-role: [reader, proposer, human, executor]
+      summary: Which capabilities this product deliberately does not implement, and who owns each.
+      description: |
+        Call it before concluding an absent route is a missing feature. The body is the same document the
+        `component_boundary` MCP tool answers with — one source in `platform/tools.py`, two transports — so an
+        agent cannot be handed two different lists of what this product refuses to do. Nothing here was
+        inferred from a store this process cannot read.
+      responses:
+        '200':
+          description: The declared boundary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoundaryAnswer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/credentials:
+    get:
+      tags: [administration]
+      operationId: administration.credential.list
+      x-status: implemented
+      x-required-role: [human]
+      summary: Who may call this installation, and which of them it now refuses.
+      description: |
+        Identity, role and state — never token material, on any route in this family. The rows are the
+        mounted role list this process was handed (enrollment stays a file the service reads once at boot and
+        never writes) joined to the durable revocations, so `revoked` means the bearer is refused at the door
+        from the next request on. `bound_exceeded` on the revocation tally is the read saying it stopped
+        counting rather than reporting nobody.
+      responses:
+        '200':
+          description: The credential ledger.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialLedger'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/credentials/{identity}:
+    get:
+      tags: [administration]
+      operationId: administration.credential.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: One identity's row.
+      description: |
+        A `revoked` row answers 200: the row is the point of the read. An identity this installation never
+        mounted answers 404, with the same bytes as a mistyped one — the mounted list is the whole population
+        and is readable by the same credential anyway, so this route is not an oracle for whether a name is real.
+      parameters:
+        - name: identity
+          in: path
+          required: true
+          description: The identity as the mounted role file names it (`state.label`'s alphabet).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One credential row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialRow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+  /v1/credentials/{identity}/revocations:
+    post:
+      tags: [administration]
+      operationId: administration.credential.revoke
+      x-status: implemented
+      x-required-role: [human]
+      summary: Refuse one identity's bearer from the next request, durably.
+      description: |
+        A deny-list entry, not enrollment: the mounted role file stays the only statement of who may call, and
+        no route in this product can mint, widen, rename or restore a grant. Revocation is deliberately the
+        half that is reachable over HTTP, because it is the one an incident needs in the first minute — a
+        leaked agent token has to stop working before anyone can reach a host.
+
+        An identity mounted with two bearers is revoked as one unit, because the role file names no finer
+        reference than the identity; per-token control is an edit of that file, which is the offline act it
+        already is. There is no un-revoke route: a surface that could restore a revoked bearer is a surface
+        that could hand back a leaked token, and the fix for a wrong revocation is re-enrollment by whoever
+        holds the file. `reason` is required, one printable line, and stored — the record has to be readable
+        by the next shift rather than merely present.
+
+        `Idempotency-Key` is honoured: a retry of a lost response returns the first revocation with
+        `Idempotency-Replayed: true` and does not spend a second audit row.
+      parameters:
+        - name: identity
+          in: path
+          required: true
+          description: The identity as the mounted role file names it.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Why this bearer is refused, in one printable line.
+              required: [reason]
+              additionalProperties: false
+      responses:
+        '200':
+          description: The revocation as stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialRevocation'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/ContractError'
+  /v1/state:
+    get:
+      tags: [administration]
+      operationId: administration.state.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: The operator view of the operational database — its version, its booked work, its refusals.
+      description: |
+        `/v1/status` counts incidents, actions and deliveries. This counts the operator surface: the schema
+        the file is at, every job state including the zeros (`unknown: 0` is a fact worth having said out
+        loud), how many bearers are refused, the last backup this service made, and the plan digest a copy
+        request will demand — so the number an operator reads is the number they approve, from one
+        derivation, in one read. No path to a file appears anywhere in the answer.
+      responses:
+        '200':
+          description: The state surface.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StateSurface'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/state/backup-plan:
+    get:
+      tags: [administration]
+      operationId: administration.state.backup_plan.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: The plan one state backup would carry, and the digest that approves it.
+      description: |
+        Derived, never stored: there is no plan row to expire, adopt or race, and the server recomputes the
+        same binding when the write arrives. The digest covers the version the copy comes from, the version
+        the copy must open at, the artifact naming rule and the fact that an existing destination is never
+        replaced — so an upgrade makes every earlier approval fail with 412 rather than quietly meaning
+        something else. The state file's own name appears in neither the plan nor its digest.
+      responses:
+        '200':
+          description: The plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StateBackupPlan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/state/backups:
+    post:
+      tags: [administration]
+      operationId: administration.state.backup_request
+      x-status: implemented
+      x-required-role: [human]
+      summary: Book a verified copy of the operational database.
+      description: |
+        Answers `202` with a job id and no receipt, because the copy has not happened: `accepted` means the
+        platform has written down that it promised, which survives a restart, and whether it finished is a
+        question for `GET /v1/jobs/{job_id}`. `approval` must name the digest just read from
+        `/v1/state/backup-plan`, or the write is refused `412` with nothing booked.
+
+        The job runs in this process, on the thread the delivery loop already uses, after the page work of
+        each iteration — a state copy never sits in front of an alert. The copy lands beside the state file
+        under the published naming rule; the answer names the file and reports its size, its sha256 and the
+        `integrity_check` that read it back. The bytes themselves leave by the operator's own file access:
+        this transport carries no state dump, and one that did would hand any bearer a copy of every audit
+        row and approval in the deployment.
+
+        `Idempotency-Key` is honoured, so a caller that lost the `202` replays its own job id rather than
+        booking a second copy.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approval:
+                  type: string
+                  description: The 64-character plan digest this request approves.
+                  pattern: '^[0-9a-f]{64}$'
+              required: [approval]
+              additionalProperties: false
+      responses:
+        '202':
+          description: Booked; the work has not started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDocument'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/ContractError'
+        '412':
+          oneOf:
+            - $ref: '#/components/responses/StaleRevision'
+            - $ref: '#/components/responses/ContractError'
+  /v1/state/verifications:
+    post:
+      tags: [administration]
+      operationId: administration.state.verification_request
+      x-status: implemented
+      x-required-role: [human]
+      summary: Book the restore-and-read check of one backup this service made.
+      description: |
+        The question this service is actually able to answer about its own copies: does the artifact still
+        hash to what the backup reported, and does a restore of it open and read under this build. Addressed
+        by **backup job id** — never by path — so no file this service did not write is reachable through
+        this route, and the digest approved is the one in that backup's `verification` block.
+
+        The work copies the artifact into a scratch file over SQLite's backup API on a connection that
+        cannot write the artifact, opens and counts the scratch, then removes it (along with the copy a
+        migration takes of it, whose path the migrator reports rather than this service guessing). A scratch
+        file that could not be removed is reported in the receipt, not hidden. Failure is reported by reason
+        when the reason is one of this module's own sentences, and by exception class otherwise — a SQLite
+        message names files.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                backup_job:
+                  type: string
+                  format: uuid
+                  description: The succeeded `state.backup` job whose artifact is verified.
+                approval:
+                  type: string
+                  description: The 64-character verification-plan digest this request was read as.
+                  pattern: '^[0-9a-f]{64}$'
+              required: [backup_job, approval]
+              additionalProperties: false
+      responses:
+        '202':
+          description: Booked; the check has not run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDocument'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/ContractError'
+        '412':
+          oneOf:
+            - $ref: '#/components/responses/StaleRevision'
+            - $ref: '#/components/responses/ContractError'
+  /v1/jobs:
+    get:
+      tags: [administration]
+      operationId: administration.job.list
+      x-status: implemented
+      x-required-role: [human]
+      summary: One bounded page of the job ledger, newest first.
+      description: |
+        `limit` and `cursor` only, with no filters to forget enforcing — the rule `api_contract.page_params`
+        applies to every list in this API, and the reason `dispositions.page` gives for it: an operator
+        narrows the answer by paging through it. The walk is by rowid, because `admitted_at` is not unique
+        and a page key that can repeat loses rows.
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: The page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+  /v1/jobs/{job_id}:
+    get:
+      tags: [administration]
+      operationId: administration.job.read
+      x-status: implemented
+      x-required-role: [human]
+      summary: One job, its receipt, and for a backup what verifying it found.
+      description: |
+        `accepted`, `running`, `succeeded`, `failed`, `cancelled` or `unknown` — and `unknown` is a job whose
+        process died while holding it, reported as that rather than rewritten. A succeeded backup carries a
+        `verification` block so the caller does not have to walk the ledger to learn whether anyone has ever
+        read its artifact back, including the plan digest for checking it now.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: The job id the booking answered with.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDocument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+  /v1/jobs/{job_id}/cancellations:
+    post:
+      tags: [administration]
+      operationId: administration.job.cancel
+      x-status: implemented
+      x-required-role: [human]
+      summary: Withdraw a booked job that has not started.
+      description: |
+        `accepted` is the only cancellable state, and the reason is physical: the copy is a SQLite call
+        holding an open file, and this build has no way to stop one mid-flight and still claim to know what
+        its output file contains. A cancellation of a `running` job is refused `409` rather than setting a
+        flag some later code might honour — the flag would be a promise about work already happening. A
+        terminal job is refused too: a cancellation that rewrote a reported outcome would destroy the only
+        record of what ran.
+
+        Takes no body fields: withdrawing a booking that never started holds no decision to explain, and the
+        audit row beside it names the actor and the instant. `Idempotency-Key` is honoured.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: The job id the booking answered with.
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: Cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDocument'
+        '400':
+          oneOf:
+            - $ref: '#/components/responses/BadRequest'
+            - $ref: '#/components/responses/ContractError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          oneOf:
+            - $ref: '#/components/responses/SummaryOnly'
+            - $ref: '#/components/responses/ContractError'
+        '404':
+          oneOf:
+            - $ref: '#/components/responses/NotFound'
+            - $ref: '#/components/responses/ContractError'
+        '409':
+          oneOf:
+            - $ref: '#/components/responses/Conflict'
+            - $ref: '#/components/responses/ContractError'
 components:
   securitySchemes:
     bearerAuth:
@@ -7631,3 +8125,289 @@ components:
           type: object
       required: [state, id, document]
       additionalProperties: false
+    HealthAnswer:
+      type: object
+      description: |
+        What this installation can serve, as three states rather than one word. `state` is `supported` (wired
+        and reachable), `disabled` (this deployment chose not to) or `unavailable` (what it needs is absent and
+        no choice of this process could add it), and `evidence` names what decided it. The one judgment in the
+        body is `schema_version`: a `Store` refuses to open a file whose version this build does not understand,
+        so a served answer always means code and file agree. `not_measured` is the honest half — what this
+        endpoint cannot see, said rather than left to inference.
+      properties:
+        status:
+          type: string
+          description: That this process is serving; nothing more is claimed by this word.
+        schema_version:
+          type: integer
+        capabilities:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              state:
+                type: string
+                enum: [supported, disabled, unavailable]
+              evidence:
+                description: The fact that made this entry what it says; a sentence or a small object.
+            required: [state, evidence]
+        not_measured:
+          type: array
+          items:
+            type: string
+        see_also:
+          type: object
+          description: Where the counts and the volatile process counters live, instead of a second copy here.
+          additionalProperties:
+            type: string
+      required: [status, schema_version, capabilities, not_measured, see_also]
+    BoundaryAnswer:
+      type: object
+      description: |
+        The declared boundary — the same document the `component_boundary` MCP tool answers with. A capability
+        named here is not implemented here, and its absence is a decision with an owner rather than a gap.
+      properties:
+        schema_version:
+          type: integer
+        capabilities:
+          type: object
+          additionalProperties:
+            type: object
+            description: One declined capability — what it declines, and who owns the work instead.
+        rule:
+          type: string
+      required: [schema_version, capabilities, rule]
+    CredentialLedger:
+      type: object
+      description: |
+        The mounted role list joined to the durable revocations. No token material appears in this body or in
+        any other answer in this family: the bearer text is used for one constant-time comparison in the
+        transport and never leaves it.
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialRow'
+        count:
+          type: integer
+        revocations:
+          type: object
+          description: |
+            The tally of durable revocations. `bound_exceeded` means the revocation walk stopped at `limit`:
+            the revocations still listed elsewhere are whole only up to that bound, and an empty list is not
+            the same claim as a stopped count.
+          properties:
+            count:
+              type: integer
+            limit:
+              type: integer
+            bound_exceeded:
+              type: boolean
+          required: [count, limit, bound_exceeded]
+        secrets:
+          type: string
+          description: The promise, in the body itself — no route in this family returns token material.
+      required: [rows, count, revocations, secrets]
+    CredentialRow:
+      type: object
+      description: One credential this installation may or may not honour, without its secret.
+      properties:
+        identity:
+          type: string
+        role:
+          type: string
+          enum: [reader, producer, proposer, human, executor, summary]
+        state:
+          type: string
+          enum: [active, revoked]
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+        revoked_by:
+          type: [string, 'null']
+        source:
+          type: string
+          description: Where the grant came from; only one value exists today, and it is said anyway.
+      required: [identity, role, state, revoked_at, revoked_by, source]
+    CredentialRevocation:
+      type: object
+      description: The revocation as stored, which is the answer a retry of the same key reads back.
+      properties:
+        identity:
+          type: string
+        state:
+          type: string
+          enum: [revoked]
+        revoked_by:
+          type: string
+          description: The credential that signed the request — never a body field.
+        revoked_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+      required: [identity, state, revoked_by, revoked_at, reason]
+    StateSurface:
+      type: object
+      description: |
+        The administration view of one operational database. `jobs` names every state including the zeros,
+        because `unknown: 0` is a fact an operator is entitled to have stated rather than inferred. `plan` is
+        the digest a copy request will demand, so the number read here is the number approved.
+      properties:
+        schema_version:
+          type: integer
+        supported_kinds:
+          type: array
+          items:
+            type: string
+            enum: [state.backup, state.backup_verification]
+        plan:
+          $ref: '#/components/schemas/StateBackupPlan'
+        jobs:
+          type: object
+          description: One count per job state, always all six.
+          properties:
+            accepted:
+              type: integer
+            running:
+              type: integer
+            succeeded:
+              type: integer
+            failed:
+              type: integer
+            cancelled:
+              type: integer
+            unknown:
+              type: integer
+          required: [accepted, running, succeeded, failed, cancelled, unknown]
+        last_backup:
+          oneOf:
+            - $ref: '#/components/schemas/JobDocument'
+            - type: 'null'
+        revocations:
+          type: object
+          properties:
+            count:
+              type: integer
+            listed:
+              type: integer
+            limit:
+              type: integer
+            bound_exceeded:
+              type: boolean
+          required: [count, listed, limit, bound_exceeded]
+        see_also:
+          type: object
+          additionalProperties:
+            type: string
+      required: [schema_version, supported_kinds, plan, jobs, last_backup, revocations, see_also]
+    StateBackupPlan:
+      type: object
+      description: |
+        One derived plan. It is recomputed when the write arrives and compared with the `approval` the body
+        carries, so a caller cannot approve a plan read against one build and have a job run against another.
+        The state file's own name appears in neither this document nor its digest; the naming *rule* does.
+      properties:
+        application_id:
+          type: integer
+          description: The identity this product's databases carry (`state.APPLICATION_ID`).
+        kind:
+          type: string
+          enum: [state.backup]
+        schema_version:
+          type: integer
+          description: The version the copy is taken from.
+        target_version:
+          type: integer
+          description: The version the copy must open at — this build's.
+        artifact_rule:
+          type: string
+        destination:
+          type: string
+          description: Beside the operational database file. A copy beside the file it protects is recovery from a bad migration, not from a lost disk; the CLI form that names its own destination remains that one.
+        replaces_existing:
+          type: boolean
+          description: 'Always false: a destination that exists is refused, never overwritten.'
+        verified_by:
+          type: string
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+      required: [application_id, kind, schema_version, target_version, artifact_rule, destination,
+                 replaces_existing, verified_by, digest]
+    JobDocument:
+      type: object
+      description: |
+        One job, from booking to outcome. A 202 answer is this document in `accepted` state with no receipt: the
+        work has not started. `unknown` is a job whose process died holding it, reported as that; reconciling it
+        means reading the state directory or booking a fresh job, and the platform will not guess on an
+        operator's behalf. `verification` appears on a backup whatever its state, so the answer to "has anyone
+        ever read this copy back" needs no ledger walk.
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [state.backup, state.backup_verification]
+        state:
+          type: string
+          enum: [accepted, running, succeeded, failed, cancelled, unknown]
+        terminal:
+          type: boolean
+        plan_sha256:
+          type: string
+          description: The exact digest the human approval named.
+          pattern: '^[0-9a-f]{64}$'
+        subject:
+          type: string
+          description: What the job acts on — `state`, or the backup job id a verification restores. Never a path.
+        approved_by:
+          type: string
+          description: The credential that signed the approval. Never a body field.
+        admitted_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+        receipt:
+          type: object
+          description: |
+            What this job learned, when it learned anything: a backup names its artifact, size and sha256; a
+            verification names the digest match, the restored schema and whether the scratch was removed; a
+            failure names a reason this module wrote or an exception class nobody chose. Holds no path.
+        verification:
+          type: object
+          description: For a backup job, whether anyone has read its artifact back, and the plan to do so now.
+          properties:
+            state:
+              type: string
+              description: 'The state of the most recent verification of this artifact, or `unverified`.'
+            last_job:
+              type: [string, 'null']
+              format: uuid
+            plan:
+              type: [object, 'null']
+              description: The binding and its digest, or null when this row has no artifact to promise.
+          required: [state, last_job, plan]
+      required: [job_id, kind, state, terminal, plan_sha256, subject, approved_by, admitted_at, started_at,
+                 finished_at]
+    JobPage:
+      type: object
+      description: One bounded page of the job ledger, newest first. A short page means the end; there is no second answer for "I stopped looking".
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobDocument'
+        limit:
+          type: integer
+        returned:
+          type: integer
+        next_cursor:
+          type: string
+      required: [rows, limit, returned]

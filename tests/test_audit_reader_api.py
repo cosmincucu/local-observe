@@ -7,7 +7,11 @@ uvicorn — the fixture style of `tests/test_api_errors.py` and `tests/test_refu
 * **The gate.** `reader`, `human`, `proposer` and `executor` all get the same bytes for the same query;
   `summary` gets the 403 it gets on every other path, and `producer` gets the 400 the existing GET role
   gate gives it. A denial, a 401 or a parser refusal writes no audit row, and none of them opens the
-  database at all — measured by counting `sqlite3.connect`, not by trusting an ordering comment.
+  audit table to say no — measured by counting `sqlite3.connect`, not by trusting an ordering comment.
+  One pre-routing read is expected on every authenticated request since schema v14: the credential
+  deny-list at the door (`local_observe/platform/administration.py`, `docs/api/administration.md`). It is
+  scoped out of that counter where the counter is used, and spy-asserted to have run, so measuring the
+  route cannot quietly un-measure the door.
 * **The strict parser.** Exactly `limit`, `category`, `snapshot`, `before`. Unknown, duplicated, blank and
   case-changed fields, non-canonical or oversized integers (including `int()`'s pet tricks: `+5`, `007`,
   `1_0`, `' 5 '`, Arabic-Indic digits), an unpaired or inverted `snapshot`/`before`, a malformed percent
@@ -525,7 +529,8 @@ class AuditApiQueryTests(unittest.TestCase, AuditApiFixture):
 
     def assert_refused(self, query: bytes, offender: bytes = b'') -> dict:
         rows_before = len(self.raw_audit())
-        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
+        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect, \
+                patch('local_observe.platform.administration.revoked', return_value=False) as door:
             status, _, raw = self.fetch(query)
         self.assertEqual(status, 400, f'{query!r} answered {status}: {raw[:200]!r}')
         body = json.loads(raw)
@@ -538,7 +543,9 @@ class AuditApiQueryTests(unittest.TestCase, AuditApiFixture):
         self.assertNotIn(b'\xef\xbf\xbd', raw, 'a replacement character outlived a query that had one')
         if offender:
             self.assertNotIn(offender, raw, f'{query!r} was answered with its own text')
-        self.assertEqual(connect.call_count, 0, f'{query!r} opened the database to say no')
+        # The door ran and was answered by the stub, not by the audit table: the count below is the route's.
+        door.assert_called_once_with(self.store.path, READER['identity'])
+        self.assertEqual(connect.call_count, 0, f'{query!r} opened the audit database to say no')
         self.assertEqual(len(self.raw_audit()), rows_before, f'{query!r} wrote to the audit table')
         return body
 

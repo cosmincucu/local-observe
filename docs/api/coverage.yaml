@@ -31,6 +31,19 @@ vocabularies:
   # third-party surface or a browser-side render, and no OpenAPI operation is owed for it. A row with no
   # `contract` key is treated as `openapi` when its surface is http and its path is a single route.
   contract: [openapi, none]
+  # Why one capability is reachable only from a surface that is not HTTP. These four reasons are the whole
+  # vocabulary, and they are closed because "we have not got to it" is not a reason — that is `planned`.
+  # A non-http row carries exactly one of `http_via` (an operationId on the http surface that answers the
+  # same capability, so the absence of a second route is a decision already kept) or `no_http` (one reason
+  # below, plus a `notes` sentence that says which). `tests/test_api_surface_parity.py` is what makes an
+  # unexplained absence fail the suite rather than stay a footnote.
+  #   long_lived_process   — the capability *is* running a server; a route cannot start one for you.
+  #   offline_bootstrap    — it must work while the API is down, and naming a route for it would teach an
+  #                          operator to reach for the wrong tool during the one incident that matters.
+  #   unvalidated_proxy    — it would hand a bearer token somebody else's shell, SQL, DDL or backend,
+  #                          unvalidated, which §5 forbids whatever the role.
+  #   human_approval_only  — the capability's whole output is a human decision this surface may not cast.
+  exclusion_reasons: [long_lived_process, offline_bootstrap, unvalidated_proxy, human_approval_only]
 
 operations:
   # ------------------------------------------------------------------------------------------
@@ -480,7 +493,8 @@ operations:
   - {operation_id: administration.ui.shell, surface: ui, method: render, path: "/ (the four assets below)", resource: operator-session,
      module: local_observe/platform/static/ui.js, access: read, required_role: [none],
      side_effects: none, state_source: "packaged static assets", status: implemented, owner_area: administration, contract: none,
-     notes: "The browser-side render, over the four served assets below. Every request it then makes is authenticated."}
+     notes: "The browser-side render, over the four served assets below. Every request it then makes is authenticated. The click surface; every request it then makes is one of the documented reads, and the four assets are the whole thing it downloads.",
+     http_via: [operator.shell.read, operator.stylesheet.read, operator.script.read, operator.icon_script.read]}
   - {operation_id: operator.shell.read, surface: http, method: GET, path: /, resource: operator-session,
      module: local_observe/platform/operator.py, access: read, required_role: [],
      side_effects: none, state_source: "packaged static asset", status: implemented, owner_area: administration,
@@ -498,7 +512,8 @@ operations:
   - {operation_id: administration.session.sign_in, surface: ui, method: interact, path: "sign-in form → any /v1 route", resource: operator-session,
      module: local_observe/platform/static/ui.js, access: read, required_role: [none],
      side_effects: "one PBKDF2 check on a worker thread when a password account is mounted", state_source: "mounted operator account", status: implemented, owner_area: administration,
-     notes: "The substituted bearer never leaves the process; at most two checks are in flight and excess attempts answer 503."}
+     notes: "The substituted bearer never leaves the process; at most two checks are in flight and excess attempts answer 503. The browser half of sign-in. The question it asks the server is the documented `/v1/operator-auth` read, and the substituted bearer never leaves the process.",
+     http_via: [administration.authentication.read]}
   - {operation_id: administration.action.approve, surface: ui, method: interact, path: "Approve / Deny / Withdraw approval", resource: action,
      module: local_observe/platform/static/ui.js, access: write, required_role: [human],
      side_effects: "the same /v1/actions/decision write the API documents", state_source: "sqlite actions", status: implemented, owner_area: investigations-notifications-actions,
@@ -519,70 +534,101 @@ operations:
   - {operation_id: administration.credential.configure, surface: cli, method: run, path: "mount the role file named by LO_PLATFORM_CREDENTIALS", resource: credential,
      module: local_observe/platform/api.py, access: write, required_role: [local],
      side_effects: "none at runtime; the service refuses to start on a short, repeated or role-sick list", state_source: "mounted file", status: implemented, owner_area: administration,
-     notes: "The retired LO_PLATFORM_CREDENTIALS_JSON environment form is a boot refusal, not a fallback: a token in an environment value is visible in docker inspect and /proc."}
+     notes: "The retired LO_PLATFORM_CREDENTIALS_JSON environment form is a boot refusal, not a fallback: a token in an environment value is visible in docker inspect and /proc. Enrollment is the boot precondition: the service refuses to start on a short, repeated or role-sick list, so no route could be reached to fix the list it depends on. CLI equivalent: mount the role file named by LO_PLATFORM_CREDENTIALS. What the API does carry is the read of that list and a durable revocation (`GET /v1/credentials`, `POST /v1/credentials/{identity}/revocations`) — see the note on why minting stays offline.",
+     no_http: offline_bootstrap}
   - {operation_id: administration.operator_account.create, surface: cli, method: run, path: "lo-operator-setup --output <private-directory>", resource: operator-account,
      module: local_observe/deployment/operator_setup.py, access: write, required_role: [local],
-     side_effects: "one private account directory with the mounted account and its bearer", state_source: "filesystem", status: implemented, owner_area: administration}
+     side_effects: "one private account directory with the mounted account and its bearer", state_source: "filesystem", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It mints secret material and writes a private directory, which is the one thing a route must not do: the bearer would have to travel back in a response body and would land in a log, a proxy and an idempotency record on the way. CLI equivalent: lo-operator-setup --output <private-directory>."}
   - {operation_id: administration.mcp.serve, surface: mcp, method: tool, path: "platform_status|platform_overview|records|inventory|evidence_window|component_boundary", resource: platform,
      module: local_observe/platform/tools.py, access: read, required_role: [reader],
      side_effects: none, state_source: "sqlite, built index, optional ClickHouse reader", status: implemented, owner_area: administration,
-     notes: "A tool whose input the process cannot reach is not registered, so the exposed set is the registered set. reader_registry() is the four-tool v0.1 surface a single shared token keeps serving."}
+     notes: "A tool whose input the process cannot reach is not registered, so the exposed set is the registered set. reader_registry() is the four-tool v0.1 surface a single shared token keeps serving. One tool per read the HTTP surface already answers; the registered set is the exposed set, and no tool adds a capability no route has.",
+     http_via: [platform.status.read, platform.overview.read, incident.records.read, resource.inventory.read, evidence.sample.read, platform.boundary.read]}
   - {operation_id: administration.boundary.read, surface: mcp, method: tool, path: component_boundary, resource: api-contract,
      module: local_observe/platform/tools.py, access: read, required_role: [reader],
      side_effects: none, state_source: "declared exclusions", status: implemented, owner_area: foundation,
-     notes: "The machine-readable 'this absence is a decision' answer; call it before concluding an absent tool is a missing feature."}
+     notes: "The machine-readable 'this absence is a decision' answer; call it before concluding an absent tool is a missing feature.",
+     http_via: [platform.boundary.read]}
   - {operation_id: administration.state.backup, surface: cli, method: run, path: "lo-platform --database <path> backup --output <file>", resource: state,
      module: local_observe/platform/state.py, access: write, required_role: [local],
      side_effects: "one new file, integrity-checked; an existing destination is never replaced", state_source: "sqlite online backup API", status: implemented, owner_area: administration,
-     notes: "The copy a rollback restores from. `Store.backup` reads the file back through SQLite's own `integrity_check` before it reports success, and `lo-platform migrate` writes its own verified pre-migration copy beside the file it is about to change — the recovery half of a schema change is that copy, never a digest rollback."}
+     notes: "The copy a rollback restores from. `Store.backup` reads the file back through SQLite's own `integrity_check` before it reports success, and `lo-platform migrate` writes its own verified pre-migration copy beside the file it is about to change — the recovery half of a schema change is that copy, never a digest rollback. The offline form names its own destination and is the one that survives a dead volume; the HTTP job copies beside the state file and reports the name, the size and the sha256.",
+     http_via: [administration.state.backup_request]}
   - {operation_id: administration.state.migrate, surface: cli, method: run, path: "lo-platform --database <path> migrate", resource: state,
      module: local_observe/platform/cli.py, access: write, required_role: [local],
      side_effects: "the pre-migration verified copy, then one audited transaction per step", state_source: "sqlite user_version", status: implemented, owner_area: administration,
-     notes: "Offline bootstrap and recovery step one: an older file is refused until this runs, and an older binary needs the copy rather than a downgrade."}
+     notes: "Offline bootstrap and recovery step one: an older file is refused until this runs, and an older binary needs the copy rather than a downgrade. The migration is what an older file must be brought to before this build will open it, so the service that would run it is the service that refuses to start. CLI equivalent: lo-platform --database <path> migrate, after its own verified pre-migration copy.",
+     no_http: offline_bootstrap}
   - {operation_id: administration.state.status, surface: cli, method: read, path: "lo-platform --database <path> status", resource: state,
      module: local_observe/platform/cli.py, access: read, required_role: [local],
-     side_effects: none, state_source: "sqlite counts", status: implemented, owner_area: administration}
+     side_effects: none, state_source: "sqlite counts", status: implemented, owner_area: administration,
+     http_via: [platform.status.read, administration.state.read],
+     notes: "Counts are `/v1/status`; the schema version, the job ledger and the revocation tally are `/v1/state`."}
   - {operation_id: administration.event.intake_offline, surface: cli, method: run, path: "lo-platform --database <path> intake --source <id> --event <file> [--index <path>]", resource: occurrence,
      module: local_observe/platform/cli.py, access: write, required_role: [local],
      side_effects: "the same admission the HTTP route runs, including grouping when --index is given", state_source: "sqlite operational store", status: implemented, owner_area: occurrences,
      notes: "The offline path for a producer that cannot reach the service; omitting --index files the pre-grouping behaviour, which the flag leaves open rather than silently losing."}
   - {operation_id: administration.state.upgrade_rehearsal, surface: cli, method: run, path: "python3 -B scripts/upgrade_rehearsal.py", resource: state,
      module: scripts/upgrade_rehearsal.py, access: write, required_role: [local],
-     side_effects: "a migrated copy of a copy: the live file is not opened for writing", state_source: "sqlite copy", status: implemented, owner_area: administration}
+     side_effects: "a migrated copy of a copy: the live file is not opened for writing", state_source: "sqlite copy", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It mounts the copied state in a *candidate container image* and asks that image what its schema is; the serving process has no container runtime and acquiring one would be a new authority, not a new route. CLI equivalent: python3 -B scripts/upgrade_rehearsal.py. What the HTTP surface does rehearse is its own: a copy that must open and be readable (`POST /v1/state/verifications`)."}
   - {operation_id: administration.state.upgrade_drive, surface: cli, method: run, path: "python3 -B scripts/upgrade_driver.py", resource: state,
      module: scripts/upgrade_driver.py, access: write, required_role: [local],
-     side_effects: "the approved upgrade sequence against injected boundaries; no live host is implied", state_source: "version contract", status: implemented, owner_area: administration}
+     side_effects: "the approved upgrade sequence against injected boundaries; no live host is implied", state_source: "version contract", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It drives the approved release sequence against the deployment boundaries (images, units, hosts) through injected boundaries; no live host is implied and none could be reached from a bearer token. CLI equivalent: python3 -B scripts/upgrade_driver.py."}
   - {operation_id: administration.state.upgrade_accept, surface: cli, method: run, path: "python3 -B scripts/upgrade_acceptance.py", resource: state,
      module: scripts/upgrade_acceptance.py, access: write, required_role: [local],
-     side_effects: "one acceptance receipt naming schema, indexes and the reads that must still work", state_source: "candidate sqlite file", status: implemented, owner_area: administration}
+     side_effects: "one acceptance receipt naming schema, indexes and the reads that must still work", state_source: "candidate sqlite file", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It measures a candidate state *file* the deployment stage produced, on the deployment host, before anything is cut over. CLI equivalent: python3 -B scripts/upgrade_acceptance.py."}
   - {operation_id: administration.state.gate, surface: cli, method: run, path: "lo-deployment state-gate", resource: state,
      module: local_observe/deployment/live.py, access: read, required_role: [local],
-     side_effects: none, state_source: "candidate state copy", status: implemented, owner_area: administration}
+     side_effects: none, state_source: "candidate state copy", status: implemented, owner_area: administration,
+     no_http: human_approval_only,
+     notes: "A gate that could be opened by a caller on the network is not a gate: its whole output is the go/no-go an operator standing in front of the candidate is owed, and no role on this surface may cast it. CLI equivalent: lo-deployment state-gate."}
   - {operation_id: administration.state.copy, surface: cli, method: run, path: "lo-deployment check-live", resource: state,
      module: local_observe/deployment/state_copy.py, access: read, required_role: [local],
-     side_effects: none, state_source: "a running service's copied state", status: implemented, owner_area: administration}
+     side_effects: none, state_source: "a running service's copied state", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It copies the state out of a running service for staging, which is the file-level act the transport deliberately does not carry: no route streams the operational database. CLI equivalent: lo-deployment check-live."}
   - {operation_id: administration.recovery.conformance, surface: cli, method: run, path: "python3 -B scripts/conformance_recovery.py", resource: state,
      module: scripts/conformance_recovery.py, access: write, required_role: [local],
-     side_effects: "a restore into scratch, proven by reading it back", state_source: "backup artifact", status: implemented, owner_area: administration}
+     side_effects: "a restore into scratch, proven by reading it back", state_source: "backup artifact", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It restores into a scratch tree on the host and proves the read back, against a declared state manifest — the thing that must work precisely when the API is down. CLI equivalent: python3 -B scripts/conformance_recovery.py. The narrower question about one artifact this service wrote has its own job: `POST /v1/state/verifications`."}
   - {operation_id: administration.backup.conformance, surface: cli, method: run, path: "python3 -B scripts/conformance_backup.py", resource: state,
      module: scripts/conformance_backup.py, access: write, required_role: [local],
-     side_effects: "the declared state manifest's coverage answer, measured not asserted", state_source: "deployment state", status: implemented, owner_area: administration}
+     side_effects: "the declared state manifest's coverage answer, measured not asserted", state_source: "deployment state", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It measures whether the deployment's own schedule covered the declared state manifest, and the platform must not mark its own homework: an answer that a copy exists is only worth anything from outside the process that makes it. CLI equivalent: python3 -B scripts/conformance_backup.py."}
   - {operation_id: administration.migration.prepare, surface: cli, method: run, path: "python3 -B scripts/prepare_migration.py", resource: state,
      module: scripts/prepare_migration.py, access: write, required_role: [local],
-     side_effects: "the staged copy a migration is proven on", state_source: "staging host", status: implemented, owner_area: administration}
+     side_effects: "the staged copy a migration is proven on", state_source: "staging host", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It stages a copy on a host this service does not own, which is the point of staging a migration before running it. CLI equivalent: python3 -B scripts/prepare_migration.py."}
   - {operation_id: administration.migration.check, surface: cli, method: run, path: "python3 -B scripts/check_migration.py", resource: state,
      module: scripts/check_migration.py, access: read, required_role: [local],
-     side_effects: none, state_source: "staged migration", status: implemented, owner_area: administration}
+     side_effects: none, state_source: "staged migration", status: implemented, owner_area: administration,
+     no_http: offline_bootstrap,
+     notes: "It reads the staged layout the prepare step produced (a declared baseline directory), not this database. CLI equivalent: python3 -B scripts/check_migration.py."}
   - {operation_id: administration.anomaly.migrate, surface: cli, method: run, path: python -m local_observe.platform.anomaly_migrate, resource: anomaly-state,
      module: local_observe/platform/anomaly_migrate.py, access: write, required_role: [local],
      side_effects: "learned-band state carried forward, dry run by default", state_source: anomaly state file, status: excluded, owner_area: resources-queries-rules-config,
      notes: "Excluded on purpose: a one-off state migration is offline recovery work, not a request. Its own default is a dry run precisely because the real move is meant to be read by a human before it happens, and a bearer token that could rewrite what the learner has memorised would make that default decorative."}
   - {operation_id: administration.security_schema.apply, surface: cli, method: run, path: "python -m local_observe.security.cli apply-schema", resource: security-store,
      module: local_observe/security/cli.py, access: write, required_role: [local],
-     side_effects: "the owned security_events table, applied by a store administrator", state_source: "ClickHouse", status: implemented, owner_area: administration}
+     side_effects: "the owned security_events table, applied by a store administrator", state_source: "ClickHouse", status: implemented, owner_area: administration,
+     no_http: unvalidated_proxy,
+     notes: "It applies DDL to a third-party store under that store's own administrator credential. The product's ClickHouse client is read-only for queries by decision; a route that created, altered or dropped a table would be an unvalidated path into somebody else's engine, which §5 forbids whatever the role. CLI equivalent: python -m local_observe.security.cli apply-schema, run by a store administrator."}
   - {operation_id: administration.security_retention.verify, surface: cli, method: run, path: "python -m local_observe.security.cli verify-ttl|count|verify-backup|print-schema", resource: security-store,
      module: local_observe/security/cli.py, access: read, required_role: [local],
-     side_effects: none, state_source: "ClickHouse system.tables readback", status: implemented, owner_area: administration}
+     side_effects: none, state_source: "ClickHouse system.tables readback", status: implemented, owner_area: administration,
+     no_http: unvalidated_proxy,
+     notes: "Its reads are `system.tables` and TTL introspection over an administrator connection to that same store, and its `verify-backup` subcommand judges a file this service neither wrote nor holds. This platform's serving process deliberately never opens the analytics store for administration. CLI equivalent: python -m local_observe.security.cli verify-ttl|count|verify-backup."}
   - {operation_id: administration.guided_setup.plan, surface: http, method: POST, path: /v1/setup/plan, resource: setup-plan,
      module: local_observe/deployment/guided.py, access: write, required_role: [human, proposer],
      side_effects: "one durable plan document awaiting a human decision", state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
@@ -603,35 +649,95 @@ operations:
      side_effects: none, state_source: "sqlite setup_plans", status: implemented, owner_area: administration}
   - {operation_id: administration.guided_setup.cli, surface: cli, method: run, path: "lo-guided-setup plan|decision|request|apply|verify", resource: setup-plan,
      module: local_observe/deployment/guided_cli.py, access: write, required_role: [bearer],
-     side_effects: "the same five operations over HTTPS with one mounted token", state_source: "a remote platform", status: implemented, owner_area: administration}
+     side_effects: "the same five operations over HTTPS with one mounted token", state_source: "a remote platform", status: implemented, owner_area: administration,
+     http_via: [administration.guided_setup.plan, administration.guided_setup.decide, administration.guided_setup.request, administration.guided_setup.apply, administration.guided_setup.verify, administration.guided_setup.pending],
+     notes: "A client of the six routes above over HTTPS with one mounted token; it adds no capability, which is why it owes no exclusion."}
   - {operation_id: administration.runner.run, surface: cli, method: run, path: "lo-trusted-runner --config <0400 file> --once|--poll", resource: runner,
      module: local_observe/platform/runner_cli.py, access: write, required_role: [bearer],
-     side_effects: "claims and dispatches approved actions under one process ownership lock", state_source: "remote platform + the runner's own config", status: implemented, owner_area: administration}
+     side_effects: "claims and dispatches approved actions under one process ownership lock", state_source: "remote platform + the runner's own config", status: implemented, owner_area: administration,
+     no_http: unvalidated_proxy,
+     notes: "The claim and the outcome it reports are already HTTP routes (`/v1/runner/claim`, `/v1/executions/outcome`); the half that cannot be a route is the dispatch, which executes a command line on the runner host. A platform route that ran it would be the server executing actions it only just approved, which is the separation §5 exists to keep. CLI equivalent: lo-trusted-runner --config <0400 file> --once|--poll."}
   - {operation_id: administration.deadman.probe, surface: cli, method: run, path: "python -m local_observe.platform.deadman", resource: liveness,
      module: local_observe/platform/deadman.py, access: read, required_role: [bearer],
      side_effects: "one GET /v1/status and its heartbeat check-in", state_source: "remote platform", status: implemented, owner_area: administration,
-     notes: "Absence of the check-in is the verdict; the probe files nothing about what it could not reach."}
+     notes: "Absence of the check-in is the verdict; the probe files nothing about what it could not reach. The probe is that read plus a check-in to a third-party heartbeat component; absence of the check-in is the verdict, and there is no route for the platform to report itself alive to itself.",
+     http_via: [platform.status.read]}
   - {operation_id: administration.ci_failures.poll, surface: cli, method: run, path: "python -m local_observe.ci_failures", resource: ci-failure,
      module: local_observe/ci_failures/cli.py, access: write, required_role: [bearer],
-     side_effects: "polled pipeline facts, and cards only when --file-cards says so", state_source: "local store + remote CI", status: implemented, owner_area: administration}
+     side_effects: "polled pipeline facts, and cards only when --file-cards says so", state_source: "local store + remote CI", status: implemented, owner_area: administration,
+     no_http: unvalidated_proxy,
+     notes: "It polls an external CI and can file cards there, which is a forge-bound backend: `component_boundary`'s `estate-backends` row is the standing refusal, and a route would hand whatever bearer reached it a credential into a system this product does not own. CLI equivalent: python -m local_observe.ci_failures."}
   - {operation_id: administration.evaluation.report, surface: cli, method: run, path: "python -B -m local_observe.evaluation", resource: evaluation-report,
      module: local_observe/evaluation/eval.py, access: write, required_role: [local],
      side_effects: "one report document; a quality report cannot authorize notifications", state_source: "corpus + observer journal", status: implemented, owner_area: investigations-notifications-actions}
   - {operation_id: administration.component.serve, surface: cli, method: run, path: "uvicorn local_observe.platform.api:app_factory (lo-platform-api)", resource: platform,
      module: local_observe/platform/api.py, access: write, required_role: [none],
      side_effects: "opens the operational database under one exclusive owner lock and starts the delivery loop", state_source: "sqlite operational store", status: implemented, owner_area: foundation,
-     notes: "Startup refuses the retired credential environment value, a blank mode declaration, a wrong code pin, an unusable role list and an unreadable rules document before it serves a request."}
+     notes: "Startup refuses the retired credential environment value, a blank mode declaration, a wrong code pin, an unusable role list and an unreadable rules document before it serves a request. The capability is the process: `uvicorn local_observe.platform.api:app_factory` under one exclusive owner lock. A route cannot start the thing that answers it, and `GET /v1/health` is the read that says whether it did.",
+     no_http: long_lived_process}
   - {operation_id: administration.component.serve_operator, surface: cli, method: run, path: "uvicorn local_observe.platform.operator:app_factory", resource: operator-session,
      module: local_observe/platform/operator.py, access: read, required_role: [none],
-     side_effects: "the same service behind the static shell", state_source: "sqlite operational store", status: implemented, owner_area: administration}
+     side_effects: "the same service behind the static shell", state_source: "sqlite operational store", status: implemented, owner_area: administration,
+     no_http: long_lived_process,
+     notes: "The same service behind the static shell, and the same answer: a server is started by an operator, not by a request."}
   - {operation_id: administration.component.serve_inventory, surface: cli, method: run, path: "uvicorn local_observe.inventory.api:app_factory", resource: component,
      module: local_observe/inventory/api.py, access: read, required_role: [bearer],
      side_effects: none; the index is opened immutable, state_source: built inventory index, status: excluded, owner_area: resources-queries-rules-config,
      notes: "Excluded on purpose: this is the long-lived server process itself. A transport cannot start, stop or reconfigure the process answering the request that asked, the deployable form is the container image, and what this surface can honestly report is `GET /v1/runtime` and `GET /v1/capabilities`."}
   - {operation_id: administration.audit.read, surface: ui, method: interact, path: "audit view", resource: audit,
      module: local_observe/platform/static/ui.js, access: read, required_role: [reader],
-     side_effects: none, state_source: "sqlite audit", status: implemented, owner_area: administration}
+     side_effects: none, state_source: "sqlite audit", status: implemented, owner_area: administration,
+     http_via: [platform.audit.read],
+     notes: "The audit view is the paged read, rendered; it asks nothing the API does not document."}
   - {operation_id: administration.write_via_summary, surface: http, method: POST, path: "/v1/actions, /v1/actions/decision, /v1/actions/claim, /v1/executions/outcome", resource: action,
      module: local_observe/platform/api.py, access: write, required_role: [summary],
      side_effects: "one audited refusal attempt, counted whether or not a row was admitted", state_source: "sqlite audit + in-process counters", status: implemented, owner_area: administration, contract: none,
      notes: "The gate runs before the body is read, so a summary credential is answered identically for valid and invalid bytes. It is the role rule over four documented routes, not a route of its own."}
+  - {operation_id: platform.health.read, surface: http, method: GET, path: /v1/health, resource: platform,
+     module: local_observe/platform/administration_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "the seams this process was handed at startup, plus the store's schema version", status: implemented, owner_area: foundation,
+     notes: "What is wired, what is off by choice, and what is absent because nothing could add it — the three answers an installer needs and /v1/runtime does not give. It reports no verdict on anything it cannot see, and names those absences instead."}
+  - {operation_id: platform.boundary.read, surface: http, method: GET, path: /v1/boundary, resource: api-contract,
+     module: local_observe/platform/administration_api.py, access: read, required_role: [reader, proposer, human, executor],
+     side_effects: none, state_source: "declared exclusions (tools.COMPONENT_BOUNDARY)", status: implemented, owner_area: foundation,
+     notes: "The same document the component_boundary MCP tool answers with, so an agent on either surface reads one list of what this product refuses to do."}
+  - {operation_id: administration.credential.list, surface: http, method: GET, path: /v1/credentials, resource: credential,
+     module: local_observe/platform/administration_api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "mounted role file (in this process's memory), sqlite: credential_revocations (schema v14)", status: implemented, owner_area: administration,
+     notes: "Identity, role and state — never token material. The mounted list is projected from the rows this request was authenticated against rather than re-read from disk, so this route is not a second place that opens a mounted secret file."}
+  - {operation_id: administration.credential.read, surface: http, method: GET, path: "/v1/credentials/{identity}", resource: credential,
+     module: local_observe/platform/administration_api.py, access: read, required_role: [human],
+     side_effects: none, state_source: "as the list above", status: implemented, owner_area: administration,
+     notes: "One identity's row. An id this installation never mounted answers 404 with the same bytes as a typo of one it did, and the list above is readable by the same credential anyway, so nothing here is an oracle."}
+  - {operation_id: administration.credential.revoke, surface: http, method: POST, path: "/v1/credentials/{identity}/revocations", resource: credential,
+     module: local_observe/platform/administration.py, access: write, required_role: [human],
+     side_effects: "one durable revocation row, one audit row; the bearer is refused from the next request", state_source: "sqlite: credential_revocations (schema v14)", status: implemented, owner_area: administration,
+     notes: "Honours Idempotency-Key: a retry of a lost response returns the same revocation and does not spend a second audit row. It is a deny-list, not enrollment: the mounted role file stays the only statement of who may call, an identity with two mounted bearers is revoked as one unit because the mount names no finer reference, and there is no un-revoke route — restoring a revoked bearer would be a route that can hand back a leaked token."}
+  - {operation_id: administration.state.read, surface: http, method: GET, path: /v1/state, resource: state,
+     module: local_observe/platform/administration.py, access: read, required_role: [human],
+     side_effects: none, state_source: "sqlite: schema version, platform_jobs tallies, credential_revocations count (schema v14)", status: implemented, owner_area: administration,
+     notes: "The operator view of the file rather than the record counts /v1/status gives: what schema it is at, every job state including the zeros, how many bearers are refused, and the digest a copy request will demand. No path appears in the answer."}
+  - {operation_id: administration.state.backup_plan.read, surface: http, method: GET, path: /v1/state/backup-plan, resource: state,
+     module: local_observe/platform/administration.py, access: read, required_role: [human],
+     side_effects: none, state_source: "derived from the store's schema version and this build's migration table", status: implemented, owner_area: administration,
+     notes: "The plan is derived, not stored: there is no plan row to expire, adopt or race. The digest is over the version the copy comes from, the version it must open at and the naming rule, so an approval stops meaning one thing after an upgrade and quietly starting to mean another."}
+  - {operation_id: administration.state.backup_request, surface: http, method: POST, path: /v1/state/backups, resource: state,
+     module: local_observe/platform/administration.py, access: write, required_role: [human],
+     side_effects: "one durable job row now; the verified copy, its audit rows and one new file when the delivery loop runs it", state_source: "sqlite: platform_jobs (schema v14), then the sqlite online backup API", status: implemented, owner_area: administration,
+     notes: "Answers 202 with a job id and no receipt, because the copy has not happened. `approval` must name the digest just read from /v1/state/backup-plan or the write is 412. Honours Idempotency-Key, so a caller that lost the 202 replays its own job id instead of booking a second file. The copy lands beside the state file and the answer names it; the bytes leave by the operator's own file access, because this transport carries no state dump."}
+  - {operation_id: administration.state.verification_request, surface: http, method: POST, path: /v1/state/verifications, resource: state,
+     module: local_observe/platform/administration.py, access: write, required_role: [human],
+     side_effects: "one durable job row now; a scratch copy, its integrity check and its removal when the delivery loop runs it", state_source: "sqlite: platform_jobs (schema v14), the artifact file, a scratch file this job deletes", status: implemented, owner_area: administration,
+     notes: "The question this service can answer about its own backup: does the artifact still hash to what the copy reported, and does a restore of it open and read under this build. Addressed by backup job id, never by path, so no file this service did not write is reachable. The scratch is removed; a leftover is reported rather than hidden."}
+  - {operation_id: administration.job.list, surface: http, method: GET, path: /v1/jobs, resource: job,
+     module: local_observe/platform/administration.py, access: read, required_role: [human],
+     side_effects: none, state_source: "sqlite: platform_jobs (schema v14)", status: implemented, owner_area: administration,
+     notes: "Bounded page, newest first, walked by rowid. No filters: `limit` and `cursor` only, the rule the occurrence list applies for the same reason — a filter nobody has to parse is a filter that can be forgotten."}
+  - {operation_id: administration.job.read, surface: http, method: GET, path: "/v1/jobs/{job_id}", resource: job,
+     module: local_observe/platform/administration.py, access: read, required_role: [human],
+     side_effects: none, state_source: "sqlite: platform_jobs (schema v14)", status: implemented, owner_area: administration,
+     notes: "accepted, running, succeeded, failed, cancelled or unknown — and the receipt when there is one. `unknown` is a job a dead process was holding: reported as that, never rewritten into either outcome."}
+  - {operation_id: administration.job.cancel, surface: http, method: POST, path: "/v1/jobs/{job_id}/cancellations", resource: job,
+     module: local_observe/platform/administration.py, access: write, required_role: [human],
+     side_effects: "one durable cancelled state on a job that had not started, and its audit row", state_source: "sqlite: platform_jobs (schema v14)", status: implemented, owner_area: administration,
+     notes: "Honours Idempotency-Key. Only a booked job can be withdrawn: a copy already running is not interruptible, and this build says 409 rather than setting a flag some later code might honour."}

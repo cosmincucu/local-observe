@@ -1188,7 +1188,13 @@ class ConfigurationPreviewTests(ResourceFixture):
 
     def test_a_rendering_returns_the_file_map_without_writing_a_bundle(self):
         app = self.app()
-        before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*'))
+        # SQLite's -wal/-shm side files appear when any request reads the state file (the credential
+        # revocation check does, on every authenticated call); they are the database's bookkeeping,
+        # not something the render wrote.
+        def tree():
+            return sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*')
+                          if not path.name.endswith(('-wal', '-shm')))
+        before = tree()
         lock = http(app, 'POST', '/v1/deployment/locks', 'proposer',
                     {'packages': self.packages()})[1]
         status, body, _headers = http(app, 'POST', '/v1/deployment/renderings', 'proposer',
@@ -1203,7 +1209,7 @@ class ConfigurationPreviewTests(ResourceFixture):
         self.assertIn('homepage/services.yaml', body['files'])
         self.assertEqual(len(body['deployment_sha256']), 64)
         self.assertIn('no deployment', body['scope'])
-        self.assertEqual(sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*')), before,
+        self.assertEqual(tree(), before,
                          'a render wrote nothing: the tree under the mount is what it was before the call')
 
     def test_a_lock_that_no_longer_matches_the_packages_is_a_conflict_not_a_typo(self):

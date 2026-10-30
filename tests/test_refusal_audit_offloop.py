@@ -64,6 +64,7 @@ from local_observe.platform.api import REFUSAL_POST_ROUTES, create_app
 from local_observe.platform.notification_safety import NotificationPolicy
 from local_observe.platform.policy import action_policy
 from local_observe.platform.state import Actor, Store
+from test_refusal_audit import door_stub
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = timestamp('2026-09-08T12:00:00Z')
@@ -863,7 +864,10 @@ class DispatcherObservationTests(unittest.TestCase, OffLoopFixture):
         be measuring a broken counter rather than a database-free path.
         """
         app = self.shared_app()
-        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
+        # The deny-list read at the door (`Store.revoked`, schema v14) is stubbed to the answer the fixture
+        # would give — nobody is revoked — so the counter below measures the route, not the door. The control
+        # inside the same patch keeps the zero honest.
+        with door_stub(), patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
             reply = self.drive_async(exchange(app, 'GET', '/v1/runtime', headers=bearer(READER)))
             self.assertEqual((reply.status, 'refusal_audit_dispatch' in reply.payload), (200, True))
             self.assertEqual(connect.call_count, 0, 'a memory-only runtime read opened the database')
@@ -1029,7 +1033,7 @@ class DispatcherObservationTests(unittest.TestCase, OffLoopFixture):
             self.assertEqual((reply.status, reply.payload), (403, {'error': 'summary_only'}))
             self.assert_counters(await self.dispatch(app), admitted=0, overloaded=0, in_flight=0)
 
-        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
+        with door_stub(), patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
             self.drive_async(scenario())
         self.assertEqual(connect.call_count, 0, 'a request the dispatcher must not see opened state')
         self.assertEqual(self.refusal_rows(), [])
@@ -1189,8 +1193,8 @@ class DispatcherCapacityTests(unittest.TestCase, OffLoopFixture):
             admitted = asyncio.create_task(self.refuse(app, '/v1/actions/claim', label='parked-write'))
             try:
                 await wait_until(lambda: seam.starts >= 1, what='one admitted audit attempt')
-                with patch('local_observe.platform.state.sqlite3.connect',
-                           wraps=sqlite3.connect) as connect:
+                with door_stub(), patch('local_observe.platform.state.sqlite3.connect',
+                                        wraps=sqlite3.connect) as connect:
                     flood = [asyncio.create_task(
                         self.refuse(app, '/v1/executions/outcome', label=f'shed-{slot}',
                                     forbid_body=True)) for slot in range(8)]
@@ -1334,8 +1338,9 @@ class DispatcherCapacityTests(unittest.TestCase, OffLoopFixture):
         app = self.shared_app()
         seam = self.seam(AuditSeam.EXPLODE)
         collector = LogCollector()
-        with collector.captured(), patch('local_observe.platform.state.sqlite3.connect',
-                                         wraps=sqlite3.connect) as connect:
+        with collector.captured(), door_stub(), \
+                patch('local_observe.platform.state.sqlite3.connect',
+                      wraps=sqlite3.connect) as connect:
             first = self.drive_async(self.refuse(app, '/v1/actions/decision', label='failed-1'))
             second = self.drive_async(self.refuse(app, '/v1/actions/claim', label='failed-2'))
             block = self.drive_async(self.dispatch(app))
@@ -1592,8 +1597,8 @@ class DispatcherLifecycleTests(unittest.TestCase, OffLoopFixture):
                 lifespan.begin_shutdown()
                 await lifespan.finish_shutdown()
                 closed = await self.dispatch(app)
-                with patch('local_observe.platform.state.sqlite3.connect',
-                           wraps=sqlite3.connect) as connect:
+                with door_stub(), patch('local_observe.platform.state.sqlite3.connect',
+                                        wraps=sqlite3.connect) as connect:
                     reply = await self.refuse(app, '/v1/executions/outcome', label='after-shutdown',
                                               forbid_body=True)
                     after = await self.dispatch(app)

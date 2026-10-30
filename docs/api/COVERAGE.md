@@ -10,9 +10,10 @@ Four artifacts describe the same surface, and a test refuses the moment they dis
 | `local_observe/platform/api_contract.py` | The rules themselves: envelope, request id, idempotency, revision, paging, actor. | The next route handler, instead of a copy of the previous one. |
 
 `tests/test_api_openapi_conformance.py` checks each pair — census against contract, contract against the
-source that answers a socket, contract against the running app — and `tests/test_api_contract.py` checks
-the behaviour the contract promises. Neither is a documentation linter: each can fail in ways the other
-cannot see.
+source that answers a socket, contract against the running app — `tests/test_api_contract.py` checks the
+behaviour the contract promises, and `tests/test_api_surface_parity.py` checks the absences: a capability on
+a non-HTTP surface must say *why* in one of the four words the census defines. None of them is a
+documentation linter: each can fail in ways the others cannot see.
 
 A capability with rules a table cannot carry gets its own page beside these four:
 [`maintenance.md`](maintenance.md) states the planned-maintenance family in prose — which credential may
@@ -22,6 +23,8 @@ can reach, and what a bounded historical read may and may not claim.
 artifact has to be mounted for an answer, what the two planes refuse to merge, which routes are dry runs and
 what they therefore never touch. The census row and the OpenAPI operation still decide what exists; the page
 says what they mean.
+[`administration.md`](administration.md) does the same for the operator surface — health and the
+declared boundary, the credential ledger and revocation, and the two state jobs an approval can book.
 
 ## Reading a row
 
@@ -41,6 +44,8 @@ where the operation happens today, not where it should happen.
 | `side_effects` | What exists afterwards that did not before — rows, files, messages sent. `none` is a claim, and `state_source` is what backs it. |
 | `state_source` | Which store or file answers the operation. `sqlite: api_idempotency (schema v11)` is checkable; "the database" is not. |
 | `status` | `implemented`, `planned` or `excluded`. `excluded` needs a reason in `notes`, because "nobody thought of it" and "we refused it" must not look the same in five years. |
+| `http_via` | On a non-HTTP row: the HTTP operations that already answer this capability, so the absence of a second route is a decision already kept rather than an unfinished one. Carries existing `operation_id`s, each of which must be `implemented` on both sides. |
+| `no_http` | On a non-HTTP row, and instead of `http_via`: one reason from `vocabularies.exclusion_reasons` why no route may answer this. A row carries exactly one of the two fields, and the reason travels with a `notes` sentence saying what an operator does instead. See "Why a capability stays off HTTP". |
 | `owner_area` | One of the six areas below — the unit a reviewer can hold in their head. |
 | `contract` | `openapi` (this row owes an OpenAPI operation) or `none`. Omitted means `openapi` when the row is an HTTP row with a single addressable path. |
 | `notes` | The judgement a schema cannot carry: bounds, why a refusal is worded that way, what would break. |
@@ -60,18 +65,10 @@ Counted from the file, so this table cannot drift from it silently:
 
 | Owner area | Rows | Implemented | Planned | Excluded |
 | --- | --- | --- | --- | --- |
-| `foundation` — identity, health, the transport boundary | 9 | 8 | 1 | 0 |
+| `foundation` — identity, health, the transport boundary | 11 | 10 | 1 | 0 |
 | `occurrences` — events, incidents, escalation, acknowledgement | 17 | 14 | 2 | 1 |
 | `maintenance` — declared windows, suppression, flap accounting | 17 | 16 | 0 | 1 |
-| `resources-queries-rules-config` — inventory, queries, rules, deployment config | 33 | 24 | 0 | 9 |
-| `investigations-notifications-actions` — bounded investigations, delivery, the approval lifecycle | 46 | 45 | 0 | 1 |
-| `administration` — credentials, sessions, state, migration, backup, setup, runner | 38 | 38 | 0 | 0 |
-| **Total** | **160** | **145** | **3** | **12** |
-
-By surface: 89 HTTP, 56 CLI, 7 MCP, 8 UI. The OpenAPI document describes 79 paths and 85 operations, all of
-them `implemented` — which is the 89 HTTP census rows minus the four `contract: none` HTTP rows above. The
-three `planned` rows are also `contract: none` (they propose a path, not a spoken operation), so nothing in
-the document carries `x-status: proposed`.
+COUNTS_TABLE_PLACEHOLDER
 
 ### Why so many CLI rows
 
@@ -87,6 +84,29 @@ Nine rows. Every one of them reads, proposes or executes; none approves. `action
 `excluded` with its reason attached, and `occurrence.acknowledge.mcp` is excluded for the same reason:
 `docs/CONTRACTS.md` §5 says a payload field cannot make an agent into a human, and a bearer token minted
 for an agent is a payload field with extra steps.
+
+## Why a capability stays off HTTP
+
+Twenty-seven of the rows in `foundation` and `administration` are not routes. Each carries exactly one of two
+fields, and `tests/test_api_surface_parity.py` fails the file if one is missing, if both are present, or if
+the reason is a word the census does not define. The two fields answer two different questions, and the
+difference is the point: `http_via` says *the absence of a second route has already been decided, and here is
+the route that answers it*, while `no_http` says *no route may answer this*.
+
+| Reason | What it rules out, and why a route cannot |
+| --- | --- |
+| `long_lived_process` | The capability *is* running a server. `administration.component.serve` and `.serve_operator` are this row: a route cannot start the process that answers it, and `GET /v1/health` is the read that says whether it did. |
+| `offline_bootstrap` | It must work while the API is down — migration, staged upgrades, conformance, credential files for a machine that has never run this. Naming a route for it would teach an operator to reach for the wrong tool during the one incident where the right one matters. |
+| `unvalidated_proxy` | It would hand a bearer token somebody else's shell, SQL, DDL or CI backend, unvalidated, which `docs/CONTRACTS.md` §5 forbids whatever the role. `administration.security_schema.apply` and `.runner.run` are this row. |
+| `human_approval_only` | The capability's whole output is a human decision this surface may not cast. `administration.state.gate` is this row: a release gate reachable by a caller on the network is not a gate. |
+
+Where the capability *is* reachable, `http_via` names the operations, and this is most of the surface: the
+MCP tools each name the HTTP read they mirror, the operator UI rows name the static and session routes behind
+them, and `administration.state.backup` — the CLI copy an operator names a destination for — now also names
+`administration.state.backup_request`, the job an operator approves by digest. Two rows for one capability
+with two address shapes is not duplication: the CLI form writes where it is told and needs no credential, and
+the HTTP form writes beside the state file under a published naming rule and needs a human bearer. The plan
+page spells out what each half is for: [`administration.md`](administration.md).
 
 ## Offline bootstrap and recovery
 
@@ -112,6 +132,14 @@ the same sentence. Nothing in this list is reachable over HTTP — a recovery pa
 up is not a recovery path — and the census records the operation, not the operator's own schedule: which
 of these run on a timer is a deployment fact and lives in the deployment overlay, not in this repository.
 
+One thing in the list above is now partly reachable, and the split is worth stating exactly. `POST
+/v1/state/backups` and `POST /v1/state/verifications` book the two jobs a *serving* process can perform with
+its own privileges on its own file: a verified copy, and the restore-and-read proof of a copy this service
+made (`administration.state.backup` carries `http_via` for both). What stays on the command line is every act
+that needs a container runtime, a second host, another store's administrator credentials, secret material, or
+a destination the caller names — and *restoring* a copy over the operational database, which is the step that
+cannot be taken while the process holding the file is serving.
+
 ## The HTTP surface, read from the contract
 
 * **Auth.** One opaque bearer token, `Authorization` exactly once, compared with `secrets.compare_digest`.
@@ -123,7 +151,7 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
   read, so the refusal cannot be a parser or size verdict wearing a 403.
 * **Two verbs.** `GET` reads, `POST` writes. Anything else is `405`.
 * **Six transport refusals.** `401`, `403`, `404`, `405`, `413`, `500` are stated once in
-  `x-transport-errors` rather than repeated under all 85 operations, because they are produced by the
+  `x-transport-errors` rather than repeated under all OPERATION_COUNT operations, because they are produced by the
   dispatcher before any handler runs. Each one is proved answerable by
   `test_the_six_transport_refusals_are_all_answerable`, so the shared list cannot accrete a code this app
   never returns.
@@ -168,6 +196,10 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
 * **The contract is a shipped file, not a route.** `platform.openapi.read` is `planned`: publishing the
   route table to every caller that can reach the port is a decision of its own, with a size and a
   cache-invalidity question attached.
+* **A booked copy is verified, not restored.** The two state jobs answer "does the artifact still hash to what
+  the backup reported, and does a restore of it open and read under this build". They do not answer "is the
+  deployment's own schedule covering this database" — that measurement needs the deployment's schedule, which
+  is `administration.backup.conformance` and stays a `cli` row with `no_http: offline_bootstrap`.
 * **A POST whose body matches no branch answers `404`, not `400`.** `action.decide`, `action.claim`,
   `action.execute`, `action.runner.claim`, `notification.retry`, `notification.callback.record` and the
   setup writes all fall through to `not_found` when the body does not carry the fields that branch tests
@@ -196,7 +228,10 @@ of these run on a timer is a deployment fact and lives in the deployment overlay
 ## Adding an operation
 
 1. Add the census row first. If it does not fit the vocabularies, that is the finding — extend
-   `vocabularies` in `coverage.yaml` and say why in `DECISIONS.md`.
+   `vocabularies` in `coverage.yaml` and say why in `DECISIONS.md`. If the row is not an HTTP one and the
+   capability is reachable over a route that already exists, say so with `http_via`; if it is not, pick a
+   reason from `exclusion_reasons` and write the sentence that goes with it. An unannotated absence fails
+   `tests/test_api_surface_parity.py`.
 2. Give the OpenAPI operation the same `operationId`, path, method, `x-status` and role list. Roles are
    compared as sets and must match exactly.
 3. Use `api_contract` for the answer: `ContractError` for a refusal, `page_params`/`page_payload` for a

@@ -35,7 +35,7 @@ import ast
 import asyncio
 import datetime as dt
 import json
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -108,6 +108,24 @@ MATRIX_CASES = (
     ('outcome', 'execution-not-reportable', 'outcome_after_terminal', MUTATING),
     ('claim', 'incident-recovered', 'claim_incident_recovered', MUTATING),
 )
+
+
+def door_stub():
+    """One patcher for the tests that count or break *every* database connection in the process.
+
+    Since schema v14 a request whose bearer matched is checked once against `credential_revocations` before a
+    route is chosen (`local_observe/platform/administration.py`, `docs/api/administration.md`, decision D14 in
+    `docs/api/DECISIONS.md`). That lookup is a read of one table by primary key, on a read-only connection —
+    never the audit table, the outbox or the action row these tests are about — and `patch('….state.sqlite3.connect')`
+    reaches it too, because it patches the shared `sqlite3` module rather than one importer.
+
+    None of these fixtures holds a revocation, so the stub answers what the real lookup answers and the
+    behaviour under test is byte-identical; what it buys is that "this refusal opened no connection" measures
+    the refusal. The door is not untested: `tests/test_administration_api.py` proves it bites on the next
+    request, on every process over the same file, and never for an unmatched bearer.
+    """
+    return patch('local_observe.platform.administration.revoked', return_value=False)
+
 
 
 class FakeMonotonic:
@@ -1289,14 +1307,22 @@ class RefusalAuditApiTests(unittest.TestCase, LifecycleFixture):
         self.assertEqual((self.counters()['written'], self.counters()['dropped']),
                          (refusals.CAPACITY, 0))
         self.assertEqual(len(self.refusal_rows()), refusals.CAPACITY)
-        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
+        # The counter measures the refusal path, not the door. Since schema v14 every request whose bearer
+        # matched consults `credential_revocations` once, read-only (`docs/api/administration.md`); the stub
+        # answers what the real lookup answers for this fixture — nobody is revoked here — so the six
+        # refusals below are the same six refusals, and the spy assertion after the block keeps the door in
+        # the picture rather than patched out of it.
+        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect, \
+                door_stub() as door:
             for _ in range(6):
                 status, payload = asyncio.run(request(app, 'POST', '/v1/actions/claim',
                                                       json.dumps({'anything': SENTINEL}).encode(),
                                                       bearer(SUMMARY.identity)))
                 self.assertEqual((status, payload), (403, {'error': 'summary_only'}),
                                  'an empty budget must not become a 500 or an acceptance')
-            self.assertEqual(connect.call_count, 0, 'an over-quota refusal opened the database anyway')
+            self.assertEqual(connect.call_count, 0,
+                             'an over-quota refusal opened the operational database anyway')
+        self.assertEqual(door.call_count, 6, 'the deny-list at the door stopped being consulted')
         status, runtime = self.get('/v1/runtime')
         self.assertEqual((runtime['refusal_audit']['written'], runtime['refusal_audit']['dropped'],
                           runtime['refusal_audit']['tokens_available']), (refusals.CAPACITY, 6, 0))
@@ -1314,7 +1340,7 @@ class RefusalAuditApiTests(unittest.TestCase, LifecycleFixture):
         with closing(sqlite3.connect(self.store.path)) as db:
             db.execute('CREATE TRIGGER audit_refuse BEFORE INSERT ON audit BEGIN '
                        f"SELECT RAISE(ABORT,'{SENTINEL}'); END")
-        with self.assertLogs(STATE_LOGGER, level='WARNING') as logs:
+        with door_stub(), self.assertLogs(STATE_LOGGER, level='WARNING') as logs:
             status, payload, reads = asyncio.run(request_counting_reads(
                 self.app(), 'POST', '/v1/actions/decision', b'{broken', bearer(SUMMARY.identity)))
         self.assertEqual((status, payload), (403, {'error': 'summary_only'}))
@@ -1328,8 +1354,8 @@ class RefusalAuditApiTests(unittest.TestCase, LifecycleFixture):
         self.assertNotIn(SENTINEL, str(logs.output), 'the driver message reached the log')
 
         self.clock.set_to(refusals.FAILURE_LOG_INTERVAL_SECONDS)
-        with patch('local_observe.platform.state.sqlite3.connect',
-                   side_effect=sqlite3.OperationalError(f'{SENTINEL}: cannot open')):
+        with door_stub(), patch('local_observe.platform.state.sqlite3.connect',
+                                side_effect=sqlite3.OperationalError(f'{SENTINEL}: cannot open')):
             with self.assertLogs(STATE_LOGGER, level='WARNING') as second:
                 status, payload = asyncio.run(request(self.app(), 'POST', '/v1/executions/outcome',
                                                       b'{"execution_id": "not-a-uuid"}',
@@ -1340,8 +1366,8 @@ class RefusalAuditApiTests(unittest.TestCase, LifecycleFixture):
         self.assertNotIn(SENTINEL, str(second.output))
         self.assertEqual(self.refusal_rows(), [])
 
-        with patch('local_observe.platform.state.sqlite3.connect',
-                   side_effect=sqlite3.OperationalError('database is locked')):
+        with door_stub(), patch('local_observe.platform.state.sqlite3.connect',
+                                side_effect=sqlite3.OperationalError('database is locked')):
             with self.assertNoLogs(STATE_LOGGER, level='WARNING'):
                 status, payload = asyncio.run(request(self.app(), 'POST', '/v1/actions', b'{}',
                                                       bearer(SUMMARY.identity)))
@@ -1418,7 +1444,13 @@ class RefusalAuditApiTests(unittest.TestCase, LifecycleFixture):
                      b'{"' + SENTINEL.encode() + b'": ,', good, 400),
                     ('array body', '/v1/actions/decision', b'[' + SENTINEL.encode() + b']', good, 400),
                     ('wrong method', '/v1/actions/decision', b'', good, 405))
-        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect:
+        # Same scoping as the budget test above: a bearer that matched is checked against the durable
+        # deny-list before routing (schema v14), and that one read-only lookup is stubbed here at the answer
+        # it would have given — nobody is revoked in this fixture. What must stay at zero is every
+        # *operational* connection the refusal could have opened, and the four 401 cases prove the door is
+        # not consulted for a bearer that never matched, because they carry the stub too and never call it.
+        with patch('local_observe.platform.state.sqlite3.connect', wraps=sqlite3.connect) as connect, \
+                door_stub():
             for name, path, raw, headers, status in attempts:
                 with self.subTest(case=name):
                     connect.reset_mock()

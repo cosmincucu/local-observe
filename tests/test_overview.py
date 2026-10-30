@@ -24,12 +24,27 @@ class Store:
 
     from local_observe.platform.notification_safety import NotificationPolicy
     notification_policy = NotificationPolicy()
+    # The two facts `GET /v1/health` reports about a store it was handed (schema docs/api/administration.md):
+    # nothing is mounted here, and that is the honest answer this double gives, rather than an attribute the
+    # transport would have to guess at.
+    verification_policy = None
+    channel_policies: dict = {}
 
     def __init__(self):
         self.refusals = []
 
     def record_refusal(self, attempt, actor, reason, subject=None, *, now=None):
         self.refusals.append((attempt, getattr(actor, 'identity', None), reason, subject))
+
+    def revoked(self, identity):
+        """The door's one question about a bearer, answered as an empty ledger answers it.
+
+        Named here the way `record_refusal` is, because the transport asks it of the store on every
+        authenticated request (`docs/api/administration.md`). The durability of a revocation, its ordering
+        ahead of routing and the read-only connection are `tests/test_administration_api.py`'s; this double has
+        no revocations to report and says so rather than letting the request discover a missing attribute.
+        """
+        return False
 
     def status(self):
         return {'incidents': {'open': 2}, 'actions': {'pending': 1}, 'notifications': {'pending': 3, 'sending': 1, 'dead': 2}}

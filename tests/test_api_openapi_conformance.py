@@ -53,7 +53,8 @@ SERVED_TRANSPORTS = ('local_observe/platform/api.py', 'local_observe/platform/ve
                      # The resources/queries/rules/configuration seam. It lives in its own module and is
                      # imported here the same way, so a document drift names the family it belongs to instead
                      # of a 1 300-line dispatcher.
-                     'local_observe/platform/resources_api.py')
+                     'local_observe/platform/resources_api.py',
+                     'local_observe/platform/administration_api.py')
 
 READER = {'identity': 'reader', 'role': 'reader', 'token': 'r' * 32}
 PRODUCER = {'identity': 'test-detector', 'role': 'producer', 'token': 'p' * 32}
@@ -112,7 +113,15 @@ CONCRETE = {'/v1/records/{table}': ('/v1/records/events', b''),
             # bound before it looks anything up, and a probe that only exercised that refusal would prove
             # less than the 404 it replaces.
             '/v1/resources/{id}/dependents': (f'/v1/resources/{UNKNOWN_WINDOW}/dependents', b'limit=10'),
-            '/v1/resource-proposals/{id}': ('/v1/resource-proposals/' + '0' * 64, b'')}
+            '/v1/resource-proposals/{id}': ('/v1/resource-proposals/' + '0' * 64, b''),
+            # An identity no role file mounts and a job id nothing booked: both are well-formed, so the probe
+            # reaches the read and hears "no such thing" rather than being turned away by a parser. Naming a
+            # live credential or a live job here would test the fixture instead of the transport, and for the
+            # revocation route it would spend a real revocation on a documentation check.
+            '/v1/credentials/{identity}': ('/v1/credentials/never-mounted', b''),
+            '/v1/credentials/{identity}/revocations': ('/v1/credentials/never-mounted/revocations', b''),
+            '/v1/jobs/{job_id}': (f'/v1/jobs/{UNKNOWN_WINDOW}', b''),
+            '/v1/jobs/{job_id}/cancellations': (f'/v1/jobs/{UNKNOWN_WINDOW}/cancellations', b'')}
 
 #: Implemented read routes a plain app serves without an optional seam mounted, and the credential each
 #: needs. Their 200 bodies are validated against the schema the document claims for them.
@@ -128,6 +137,12 @@ ANSWERABLE_READS = {
     # the variable to mount, and the capability document that separates an absent mount from a refusal.
     '/v1/resources': 'reader',
     '/v1/capabilities': 'reader',
+    # The administration family's reads, all six of which answer 200 over a plain app with no optional seam
+    # mounted: `GET /v1/health` says what is absent rather than 503-ing for it, and the ledger reads answer
+    # an honest empty. Their bodies are where the capability vocabulary, the job-state vocabulary and the
+    # "no token material anywhere" promise can be checked against what the code returns.
+    '/v1/health': 'reader', '/v1/boundary': 'reader', '/v1/credentials': 'human', '/v1/state': 'human',
+    '/v1/state/backup-plan': 'human', '/v1/jobs': 'human',
 }
 
 REQUIRED_ROW_FIELDS = ('operation_id', 'surface', 'method', 'path', 'resource', 'module', 'access',

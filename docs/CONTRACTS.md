@@ -551,7 +551,7 @@ and durable volume are mandatory. Use database transactions for related state
 changes and an outbox for notifications and analytical copies. The derived
 inventory database is separate and is never used to store approvals.
 
-The platform schema is v13. The v11-to-v12 step adds the four occurrence-disposition tables (`docs/api/occurrences.md`); the v12-to-v13 step adds `maintenance_schedules` — one append-only row per
+The platform schema is v14. The v11-to-v12 step adds the four occurrence-disposition tables (`docs/api/occurrences.md`); the v12-to-v13 step adds `maintenance_schedules` — one append-only row per
 schedule *version*, with `UPDATE`/`DELETE` triggers, because an edit that restated an older version would
 destroy the only answer to "what did this plan say in October?" — plus the two indexes an outcome read needs
 (`maintenance_outcome_evidence` over `incidents(resource_id, opened_at)`, `maintenance_attribution` over the
@@ -561,6 +561,22 @@ still readable, still honoured, and still class-blind as it was approved. Neithe
 `INDEXED BY`, because both reads have an honest zero to report and a missing index must not turn a report
 into an error. See [planned maintenance](api/maintenance.md) for the routes, the bounds and the migration
 checklist this step moves.
+
+The v13-to-v14 step adds two tables and changes no existing row. `platform_jobs` is the ledger behind the two
+state jobs a serving process can perform with its own privileges on its own file — a verified copy, and the
+restore-and-read proof of a copy it made earlier — with its state machine (`accepted`, `running`, `succeeded`,
+`failed`, `cancelled`, `unknown`), the plan digest a human approval named, and CHECK bounds on the timestamps
+and the receipt. `credential_revocations` is a deny-list keyed on identity, with who signed the revocation,
+when, and a required one-line reason. Both are typed tables rather than `notification_control` keys for the
+reason v11 was: a job is a ledger with a state machine and a page boundary, and a revocation must be answered
+on the way in, so each needs a column a caller can index and a CHECK a bad row cannot violate. Neither carries
+an index, and that is a measurement rather than an oversight — a deployment has tens of rows and the two reads
+that matter (one lookup by identity per authenticated request, one newest-first walk of the ledger) are
+bounded by the table's own size; `maintenance`'s indexes arrived with a read that had an honest zero to
+report and a scan that did not. The step rewrites no incident, action, audit or window row: an installation
+that never uses the new surface pays two empty tables. See
+[the state lifecycle and the credential ledger](api/administration.md) for the routes, the approval digests and
+what each job refuses to do.
 
 The v10-to-v11 step adds `api_idempotency` and one index, and changes no existing row: it is where a caller
 that lost the response can ask "did this write already happen?", and its rules are in

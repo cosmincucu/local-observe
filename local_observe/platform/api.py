@@ -178,18 +178,19 @@ IDEMPOTENT_POST_ROUTES = frozenset({'/v1/events', '/v1/evidence', '/v1/actions/c
 
 
 def idempotency_enabled(path: str) -> bool:
-    """Whether one write route honours `Idempotency-Key`, as the lists above and the two seams decided.
+    """Whether one write route honours `Idempotency-Key`, as the lists above and the three seams decided.
 
     The disposition writes are in **by shape** (`occurrence_write`, the same test the dispatcher routes
-    by) and the maintenance family through `maintenance_api.writes`, matched by prefix, because both
+    by) and the maintenance and administration families through `maintenance_api.writes` and
+    `administration_api.writes`, matched by prefix, because both
     families address their writes with an identifier that is caller data, which a list of exact paths
     cannot name. A GET under those prefixes also reads as guarded, and never claims a key, because the
     claim lives in the write branch.
     """
-    from . import maintenance_api, resources_api  # the seams own their prefixes; see `create_app`
+    from . import administration_api, maintenance_api, resources_api  # the seams own their prefixes; see `create_app`
     return (path in IDEMPOTENT_POST_ROUTES or path.startswith(INTAKE_PREFIX)
             or occurrence_write(path) is not None or maintenance_api.writes(path)
-            or resources_api.writes(path))
+            or resources_api.writes(path) or administration_api.writes(path))
 
 
 def _retrieve_execution(future: Any) -> None:
@@ -422,6 +423,16 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     resources = resources_routes.ResourcesAPI(index_path=index_path, observed_path=observed_path,
                                              proposals_path=proposals_path, reader=store_reader)
 
+    # The administration route family: twelve paths and twelve operations over `administration.py`, the
+    # mounted role list this function was handed, and the two optional seams (`guided_setup`,
+    # `observer_review`) whose presence or absence this family *reports* rather than owns. Imported here for
+    # the reason `verification_api`, `runtime` and `maintenance_api` are: a sibling transport module must not
+    # be able to fail an `api` import on its own account. `seams` is one snapshot of what this process was
+    # handed, taken here because it is the only place that knows — `GET /v1/health` reads it and invents
+    # nothing, so a capability can never be reported as supported by a process that was not given it.
+    from . import administration as administration_jobs
+    from . import administration_api as administration_routes
+
     # The optional observer review seam: three routes over the observer's own private journal, built only
     # when this installation names one (`observer_review.py` owns the rules, the bounds and the refusals).
     # `None` is the off switch and costs nothing — no import, no path touched, and the three paths keep
@@ -432,6 +443,18 @@ def create_app(store: Store, credentials: list[dict[str, str]],
     if observer_review is not None:
         from .observer_review import ObserverReview
         review_api = ObserverReview(observer_review)
+
+    # One snapshot of what this process was handed, taken here because this is the only place that knows. The
+    # administration family reports these as capabilities (`GET /v1/health`) and invents nothing: a capability
+    # can never be reported as supported by a process that was not given it, and nothing here is re-read from
+    # the environment later, so the answer cannot drift from the process that is answering.
+    seams: dict[str, Any] = {'delivery_mode': mode,
+                             'sender_configured': sender_configured(notification_client),
+                             'inventory_index': index_path is not None,
+                             'verification_policy': store.verification_policy is not None,
+                             'runner_handoff': runner_handoff is not None,
+                             'guided_setup': guided_setup is not None,
+                             'observer_review': review_api is not None}
 
     def note_delivery_failure() -> int:
         """Count one failed delivery-loop iteration, stamp when it happened, return the tally."""
@@ -611,6 +634,22 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                         await run_to_completion(store.expire_actions)
                         if notification_client is not None:
                             await run_to_completion(lambda: deliver_one(store, notification_client))
+                        # The administration job ledger, last in the iteration and deliberately so. Same terms
+                        # as the two calls above it: one blocking SQLite call, on this loop's own executor
+                        # thread, at most one item outstanding. Same order every iteration — expire, deliver,
+                        # then the copy — because a state backup must never sit in front of a page: the cost
+                        # of running the copy inside the process that owns the file is that a long one delays
+                        # the next delivery attempt by its own duration, and putting the pager second would
+                        # turn an operator's convenience into a missed alert. A deployment that cannot pay
+                        # that cost takes its copies with the CLI form, off-service.
+                        #
+                        # There is no scheduler outside a request, and this loop is the one task in this
+                        # process that is already started, ticked, counted when it faults, and waited for by
+                        # `drain` before the owner lock goes back. A job left `accepted` therefore means "this
+                        # process has not reached it yet", which is what the state word says; a job left
+                        # `running` after a death means something else, and `recover` at startup is what says
+                        # so.
+                        await run_to_completion(lambda: administration_jobs.drain(store))
                     except Exception as exc:
                         # Failed transport/state remains in the outbox; never invent acknowledgement.
                         # The loop survives, but a swallowed failure is a silent one: count it, say
@@ -742,6 +781,10 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                         ownership = holder
                         store.start_notification_mode()
                         store.recover_executions()
+                        # A `running` job row belongs to a process that is gone: this one did not start it, and
+                        # cannot say what its output file holds. `unknown` is the word, and it is reported by
+                        # `GET /v1/jobs` rather than guessed at here.
+                        administration_jobs.recover(store)
                         worker = asyncio.create_task(delivery_loop())
                         await send({'type': 'lifespan.startup.complete'})
                     elif message['type'] == 'lifespan.shutdown':
@@ -813,6 +856,21 @@ def create_app(store: Store, credentials: list[dict[str, str]],
             return await respond(401, {'error': 'authentication_required'})
         path, method = scope['path'], scope['method']
         try:
+            # The durable revocation ledger, consulted ahead of routing and after the bearer matched. Two
+            # orderings are load-bearing. It runs *after* the constant-time comparison, so a caller with no
+            # credential still opens no database connection (`docs/CONTRACTS.md` §5's rule about an
+            # unauthenticated request), and it runs *before* any route is chosen, so a revoked bearer cannot
+            # reach a single-tenant path, a verification read or an audit write — the door is one door. The
+            # answer is the same bytes an unknown token gets: a revoked credential is not a credential, and
+            # distinguishing the two would let this route become an oracle for which identities somebody has
+            # cut off. `administration.revoked` raises rather than answering False when the file cannot be
+            # read: falling open would make a locked database a way to use a revoked bearer, and the branch
+            # below turns the raise into the transport's usual 500, where no action is taken and nothing is
+            # pretended. The cost is one indexed lookup on a read-only connection per authenticated request,
+            # and it is asked of `store` rather than of a path, so the transport holds no second view of the
+            # file (`state.Store.revoked` delegates here, the way it delegates `audit_page`).
+            if store.revoked(actor.identity):
+                return await respond(401, {'error': 'authentication_required'})
             if verification_service.owns(path):
                 # The verification paths are handed over whole, after authentication and before every
                 # gate this handler already had. The role test a verification read answers to is
@@ -967,6 +1025,17 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                     return await respond(*maintenance_routes.read(store, path,
                                                                   scope.get('query_string', b''), actor,
                                                                   index_path=index_path))
+                if administration_routes.owns(path):
+                    # The administration reads, on the same terms and for the same reasons: raw query bytes to
+                    # the boundary's own page parser, the credential-derived actor, and this app's `Store`. The
+                    # mounted role list goes over as *the list this request was authenticated against* and is
+                    # never re-read from disk here — `GET /v1/credentials` would otherwise be a second place
+                    # that opens a mounted secret file, and a second reader of a secret is a second way to
+                    # leak it. The optional seams travel as the `seams` snapshot taken at startup, so a
+                    # capability can only ever be reported by the process that was actually handed it.
+                    return await respond(*administration_routes.read(store, path,
+                                                                     scope.get('query_string', b''), actor,
+                                                                     credentials=credentials, seams=seams))
                 return await respond(404, {'error': 'not_found'})
             if method not in ('POST', 'PATCH') or (method == 'PATCH'
                                                    and not maintenance_routes.edits(path)):
@@ -1133,6 +1202,14 @@ def create_app(store: Store, credentials: list[dict[str, str]],
                 # sees it and every `author`/`declared_by` in the answer came from the credential.
                 return await respond(*maintenance_routes.write(store, path, body, actor, method=method,
                                                               index_path=index_path))
+            elif administration_routes.writes(path):
+                # The administration writes, in the same position and for the same two reasons: a retried
+                # approval must not book a second copy of one state, and every `approved_by`/`revoked_by` in an
+                # answer is the bearer this server authenticated. The 202 a job request answers is settled into
+                # the idempotency record like any other 2xx here, so a caller that lost the response reads back
+                # the same job id rather than booking a second copy of the file.
+                return await respond(*administration_routes.write(store, path, body, actor,
+                                                                 credentials=credentials))
             else:
                 return await respond(404, {'error': 'not_found'})
             return await respond(200, result)

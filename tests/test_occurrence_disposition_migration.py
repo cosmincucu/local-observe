@@ -250,6 +250,8 @@ class UpgradeFromV11Tests(unittest.TestCase):
                 connection.execute(f'DROP TABLE IF EXISTS {table}')
             # A real v11 file also lacks the later steps' objects (v13 maintenance schedules).
             connection.execute(f'DROP TABLE IF EXISTS {state.MAINTENANCE_SCHEDULE_TABLE}')
+            for table in (state.PLATFORM_JOB_TABLE, state.CREDENTIAL_REVOCATION_TABLE):
+                connection.execute(f'DROP TABLE IF EXISTS {table}')
             connection.execute(f'DROP INDEX IF EXISTS {state.MAINTENANCE_OUTCOME_INDEX}')
             connection.execute(f'DROP INDEX IF EXISTS {state.MAINTENANCE_ATTRIBUTION_INDEX}')
             connection.execute('PRAGMA user_version=11')
