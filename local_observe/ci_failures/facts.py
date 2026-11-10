@@ -13,10 +13,21 @@ Two identities, deliberately different, because they answer different questions:
   never arrived, the fingerprint degrades to a named **coarse** class and `CardIdentity.coarse` says
   which input was missing. A coarse fingerprint is a wider bucket, not a guess: it is the honest
   identity available from what was actually read.
+* **Incident key** (`incident_key`) answers "how wide is the incident this build belongs to?" and is
+  `(repository, workflow file, plane)` -- deliberately *coarser* than the card fingerprint and
+  `head_sha`-free: a workflow that is red on main is one incident however many jobs, steps and SHAs
+  contributed, and a second failing commit must not open a second incident. It carries no error text,
+  because an incident whose identity moved when the log changed could not be closed by the run that
+  made it green.
 
 Parsing is fail-closed in a specific way: a *malformed* value (wrong type, over the bound, an
 unmapped status word, a SHA that is not hex, a job list that is not a list) raises `MalformedSource`
-naming the field, and nothing about that run is admitted. A *missing* value that the source is
+naming the field, and nothing about that run is admitted -- but the gaps this poller's own reads had
+already found travel on the raised `RefusedRunRead`, including the two the parser had not reached yet
+(`_unread_notes`), because they are statements about this pipeline's reads and survive the row they were
+read alongside. What the refusal must not do is hand back a *complete* read: a carrier is marked
+`read_complete=False`, so it can hold a gap open and can never be the read that reports one healed. A
+*missing* value that the source is
 entitled to omit (no job list, no log, no steps) becomes a `CoverageNote` on the fact, which travels
 into the card body as "not captured" and into the event stream as a `coverage` event. That is the
 pair `platform/detections.py` emits -- coverage first, then the verdict the coverage says is judgeable
@@ -35,11 +46,12 @@ from typing import Any
 from collections.abc import Mapping, Sequence
 
 from local_observe.inventory.validation import digest, timestamp
-from .transports import MalformedSource
+from .transports import CiFailureError, MalformedSource
 
 __all__ = ['CardIdentity', 'CoverageNote', 'DEFAULT_MAIN_BRANCHES', 'EPOCH_SENTINEL',
-           'FAILING_CONCLUSIONS', 'RunFact', 'RunRoute', 'card_identity', 'error_hash',
-           'event_identity', 'is_failure', 'parse_run', 'parse_run_path', 'plane_of', 'scrub_excerpt']
+           'FAILING_CONCLUSIONS', 'RefusedRunRead', 'RunFact', 'RunRoute', 'card_identity',
+           'coverage_only_fact', 'error_hash', 'event_identity', 'incident_key', 'is_failure',
+           'parse_run', 'parse_run_path', 'plane_of', 'scrub_excerpt', 'workflow_identity']
 
 #: Gitea's Actions task statuses. `waiting`/`blocked`/`queued` are the starved-runner class the card
 #: calls `ci.run.stuck`; anything outside this set is a version drift and is refused, not guessed at.
@@ -81,6 +93,15 @@ MAX_SHA_CHARS = 40
 EXCERPT_HASH_CHARS = 12
 FINGERPRINT_CHARS = 16
 EVENT_KEY_CHARS = 32
+#: The incident key's two halves. `KEY_SLUG_CHARS` keeps the readable part short enough that the
+#: `KEY_DIGEST_CHARS`-hex stability tail still lands inside `platform/state.label`'s 128-character
+#: class, and the tail is what makes the folding of disallowed characters collision-free: `ac.me/w1`
+#: and `ac/me.w1` both fold to `ac.me.w1`, so a key that dropped the tail would put two repositories'
+#: workflows on one incident. The digest is taken over `canonical([repository, workflow, plane])`, so
+#: no separator inside a name can fake the boundary between the three parts.
+KEY_SLUG_CHARS = 96
+KEY_DIGEST_CHARS = 12
+_DISALLOWED_IN_KEY = re.compile(r'[^a-zA-Z0-9_.:-]+')
 
 _SHA = re.compile(r'^[0-9a-f]{7,40}$')
 # The real Actions API answers a run object with `path` (`ci.yml@refs/heads/main`,
@@ -191,6 +212,12 @@ class RunFact:
     completed_at: dt.datetime | None = None
     pr_number: int | None = None
     workflow_source: str = 'fields'
+    #: Whether this fact is the whole read. `parse_run` always answers True; the only thing that answers
+    #: False is `coverage_only_fact`, the notes of a row this poll refused to turn into a verdict. The flag
+    #: exists because "is this gap still here?" and "did this gap heal?" are asked of the *same* list of
+    #: reads, and a refused row is entitled to answer the first and not the second: it can hold a gap open,
+    #: and it must never be the read that reports one closed. See `adapter.plan_incident_keys`.
+    read_complete: bool = True
 
     @property
     def is_failure(self) -> bool:
@@ -462,6 +489,26 @@ def _jobs(payload: Mapping[str, Any]) -> tuple[JobFact, ...]:
     return tuple(jobs)
 
 
+class RefusedRunRead(MalformedSource):
+    """A run row that could not be turned into a fact, carrying the gaps its read *did* collect.
+
+    `parse_run` is fail-closed about the verdict, and that is right: a run whose `head_sha` is not hex is
+    not evidence about anybody's build, and no partial fact may be filed for it. What the refusal must not
+    do is throw away the reads that happened on the way to it. The job list and the log are asked for
+    *first*, so by the time a row is refused this poll already knows the job list never arrived -- which is
+    the same gap it filed on the last run, and exactly the kind of thing it may not report as recovered.
+    Attaching the notes here is what lets the caller keep that knowledge without keeping a verdict.
+
+    It is a `MalformedSource`, so every existing `except MalformedSource` refusal site keeps working
+    unchanged; the attribute is an addition, and a plain `MalformedSource` (a jobs endpoint that answered
+    garbage, say) simply carries none.
+    """
+
+    def __init__(self, message: str, coverage: Sequence[CoverageNote] | CoverageNote = ()) -> None:
+        super().__init__(message)
+        self.coverage = (coverage,) if isinstance(coverage, CoverageNote) else tuple(coverage)
+
+
 def parse_run(repository: str, payload: Any, *, jobs: Sequence[Mapping[str, Any]] = (),
               log: str | None = None, coverage: Sequence[CoverageNote] = (),
               main_branches: Sequence[str] = DEFAULT_MAIN_BRANCHES) -> RunFact:
@@ -478,9 +525,72 @@ def parse_run(repository: str, payload: Any, *, jobs: Sequence[Mapping[str, Any]
             inferred from the payload.
 
     Raises:
-        MalformedSource: Any field this function cannot read without inventing something. The caller
-            records the refusal against that run and moves on -- never a partial fact.
+        RefusedRunRead: Any field this function cannot read without inventing something -- a
+            `MalformedSource` carrying every note collected before that field, including the ones this
+            function derived itself *and* the read-level ones the refusal skipped past
+            (`_unread_notes`). The caller records the refusal against that run and moves on; it is never a
+            partial fact.
     """
+    notes: list[CoverageNote] = list(coverage)
+    try:
+        return _parse_run(repository, payload, jobs=jobs, log=log, notes=notes,
+                          main_branches=main_branches)
+    except MalformedSource as exc:
+        # The verdict is refused; the reads are not. `notes` holds what the caller handed over
+        # (`job-list-unavailable`, `job-logs-not-wired`) *and* what this parser derived (`job-list-absent`,
+        # `job-log-absent`) up to the field it could not read, and each of those is a statement about this
+        # poller's own reads. Dropping them at the refusal is what let a poll that could not parse a run
+        # report the gap that run carried as recovered.
+        raise RefusedRunRead(str(exc), _unread_notes(notes, payload, jobs=jobs, log=log)) from exc
+
+
+def _unread_notes(notes: list[CoverageNote], payload: Any, *, jobs: Sequence[Mapping[str, Any]],
+                  log: str | None) -> list[CoverageNote]:
+    """The read-level gaps a refusal skipped past, derived from the arguments and not from the parse.
+
+    `_parse_run` appends `job-list-absent` and `job-log-absent` *after* the status, conclusion, branch,
+    event, path and workflow-identity checks -- and those are exactly the checks a version drift trips. A
+    row refused at its first check therefore hands back a note list missing the two gaps that describe this
+    poller's own reads, and the closure rule, which reads "not carried" as "came back clean", resolves them
+    in the same tick. Neither condition needs the parse: `jobs` and `log` are what the parser was handed,
+    and whether a job object or any log text arrived is answerable at the refusal.
+
+    The `reason not in reasons` guards make this a no-op on the notes a completed parse produced, so the
+    order of `fact.coverage` -- which feeds the `MAX_COVERAGE_EVENTS` filing slice -- never changes here.
+    """
+    reasons = {note.reason for note in notes}
+    out = list(notes)
+    if 'job-list-absent' not in reasons and not jobs and not _job_objects_offered(payload):
+        out.append(CoverageNote('job-list-absent', 'no job objects reached this parser'))
+    if ('job-log-absent' not in reasons and not (isinstance(log, str) and log.strip())
+            and 'job-logs-not-wired' not in reasons):
+        out.append(CoverageNote('job-log-absent'))
+    return out
+
+
+def _job_objects_offered(payload: Any) -> bool:
+    """Whether the run object itself carries job objects, asked the way `_jobs` reads them, without raising.
+
+    Mirrors `_jobs` (the same two keys, the same nested-object unwrap, the first array wins) so "no job
+    objects reached this parser" means the same thing here as it does on the parse path. An array that is
+    present but unreadable is refused by `_jobs` before this is reached, and a *non-array* is reported here
+    as nothing offered -- which is true: nothing arrived for the parser to read.
+    """
+    if not isinstance(payload, Mapping):
+        return False
+    for key in ('workflow_jobs', 'jobs'):
+        candidate = payload.get(key)
+        if isinstance(candidate, Mapping) and isinstance(candidate.get('jobs'), list):
+            candidate = candidate['jobs']
+        if isinstance(candidate, list):
+            return bool(candidate)
+    return False
+
+
+def _parse_run(repository: str, payload: Any, *, jobs: Sequence[Mapping[str, Any]],
+               log: str | None, notes: list[CoverageNote],
+               main_branches: Sequence[str]) -> RunFact:
+    """The parse itself, on a caller-owned `notes` list so a refusal can hand it back. See `parse_run`."""
     if not isinstance(payload, Mapping):
         raise MalformedSource('run payload is not an object')
     status = _text(payload.get('status'), 'run status', maximum=32)
@@ -491,7 +601,6 @@ def parse_run(repository: str, payload: Any, *, jobs: Sequence[Mapping[str, Any]
         raise MalformedSource('run carries an unknown conclusion')
     if status == TERMINAL_STATUS and not conclusion:
         raise MalformedSource('a completed run must carry a conclusion')
-    notes = list(coverage)
     branch = _text(payload.get('head_branch'), 'head_branch')
     event = _text(payload.get('event'), 'run event')
     route = parse_run_path(payload.get('path'))
@@ -501,7 +610,12 @@ def parse_run(repository: str, payload: Any, *, jobs: Sequence[Mapping[str, Any]
     source = 'fields'
     if route is not None:
         source = 'path'
-        workflow_id = workflow_id or route.workflow
+        # The file the `path` names is the identity; the numeric field is only a fallback for a payload
+        # that carries an id and no path. A forge version that answers `workflow_id` as a number (or as a
+        # ref-qualified string) beside a `path` would otherwise key the same workflow under two subjects --
+        # and a starvation fired under one key can never be closed by the verdict that arrives under the
+        # other, because closure is keyed, not looked up.
+        workflow_id = route.workflow or workflow_id
         workflow_name = workflow_name or route.workflow
     if not (workflow_id or workflow_name):
         raise MalformedSource('workflow identity is unavailable: no path, name or workflow_id')
@@ -540,6 +654,32 @@ def parse_run(repository: str, payload: Any, *, jobs: Sequence[Mapping[str, Any]
                    plane=plane, created_at=created_at, updated_at=updated_at,
                    started_waiting_at=waiting, started_at=started_at, completed_at=completed_at,
                    pr_number=pr_number, workflow_source=source)
+
+
+def coverage_only_fact(repository: str, run_id: int,
+                       coverage: Sequence[CoverageNote]) -> RunFact:
+    """The notes one refused run carried, shaped as a fact: this poll's knowledge, nobody's verdict.
+
+    Built for the case `RefusedRunRead` describes, and for nothing else. Every field a *verdict* would
+    read is `unknown` by construction -- the status is not `completed` and the conclusion is not a failing
+    one -- and `read_complete` says False, which is the property the planner enforces rather than a promise
+    in prose: the fact may be handed to `plan_incident_keys`'s `read_facts` (the list that answers "is this
+    gap still here?", which is a question about this poller's reads) and handing it to its `facts` list --
+    the list that answers "what does this build owe somebody?" -- raises. Handed over as a verdict it would
+    read as a starved run under a fabricated workflow identity, and file an incident no green run could
+    ever close.
+
+    Raises:
+        CiFailureError: Asked for a run id nothing can be attributed to, which would produce a fact the
+            planner refuses outright. A note this caller cannot attribute is a note it must not carry.
+    """
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+        raise CiFailureError('A coverage carrier needs a positive run id')
+    if not tuple(coverage):
+        raise CiFailureError('A coverage carrier needs at least one note')
+    return RunFact(repository=repository, run_id=run_id, head_sha=UNKNOWN, head_branch=UNKNOWN,
+                   event=UNKNOWN, status=UNKNOWN, conclusion=UNKNOWN, workflow_id=UNKNOWN,
+                   workflow_name=UNKNOWN, coverage=tuple(coverage), read_complete=False)
 
 
 def _route(route: RunRoute | None, branch: str, event: str,
@@ -633,6 +773,44 @@ def event_identity(fact: RunFact) -> str:
                    fact.head_sha, 'main' if fact.plane == MAIN else 'work',
                    'failed' if fact.is_failure else fact.conclusion,
                    'stuck' if fact.status != TERMINAL_STATUS else 'finished'])[:EVENT_KEY_CHARS]
+
+
+def workflow_identity(fact: RunFact) -> str:
+    """The workflow half of the incident key: the same projection `card_identity` uses.
+
+    `workflow_id` first (the file name a `path` carries, or -- only when nothing named a file -- the
+    forge's id as text), then the display name. The two are never concatenated: a run that reports both
+    must key the same whether it arrived from the path-bearing Actions list or the field-bearing detail
+    endpoint, and `parse_run` enforces the order that claim rests on -- a payload carrying a `path` *and*
+    a numeric `workflow_id` keys under the file, because the file is what a developer and the workflow's
+    own `run.started_at` agree on and the id is what one forge version happens to mint.
+    """
+    return fact.workflow_id or fact.workflow_name or UNKNOWN
+
+
+def incident_key(fact: RunFact) -> str:
+    """`(repository, workflow file, plane)` as one bounded, stable, label-shaped key.
+
+    This is the width of an incident: one key is one incident per rule (`ci.run.failed`,
+    `ci.run.stuck`), so every failing run of one workflow on one plane of one repository lands on the
+    same incident -- and the run that makes it green closes that same incident. Nothing that moves
+    during an outage is in it: no SHA, no job, no step, no error text, no run id.
+
+    The shape is `<folded slug>.<digest>` (`acme.widgets.ci.yml.main:1a2b3c4d5e6f`). Disallowed
+    characters -- `/`, space, anything outside `platform/state.label`'s class -- fold to `.`, runs
+    collapse, and the digest tail of the *unfolded* triple is what keeps two different inputs from
+    sharing a key after folding or after the slug is truncated to `KEY_SLUG_CHARS`.
+    """
+    return _incident_key(fact.repository, workflow_identity(fact), fact.plane)
+
+
+def _incident_key(repository: str, workflow: str, plane: str) -> str:
+    folded = _DISALLOWED_IN_KEY.sub('.', f'{repository}.{workflow}.{plane}')
+    while '..' in folded:
+        folded = folded.replace('..', '.')
+    folded = folded.strip('._-:') or 'workflow'
+    tail = digest([repository, workflow, plane])[:KEY_DIGEST_CHARS]
+    return f'{folded[:KEY_SLUG_CHARS]}:{tail}'
 
 
 def card_identity(fact: RunFact) -> CardIdentity:

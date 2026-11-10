@@ -148,7 +148,8 @@ Success output is the server's document: no field is added, renamed, defaulted o
 synthesised — stored-document reads (`created: false` replays, `unbound` bindings, `unknown` verdicts) print
 exactly as the service answered. Failure bodies carry a class name and, for an HTTP failure, the status: never
 a raw server body, a driver message, a traceback or exception cause, a token, a request/response document or a
-local path. `JsonClient` discards HTTP error bodies by design, so **this client cannot tell
+local path. `JsonClient` discards HTTP error bodies by design — a caller has to ask for one
+(`error_body=True`, a bounded read; this command does not) — so **this client cannot tell
 `verification_busy` from `verification_unavailable` when both are `503`** and must not be documented or tested
 as if it could. It likewise makes no claim of strict duplicate-key rejection of a *response* — that bound
 belongs to the request-side parser only, and the client's decoder does not provide it. Nothing from this group

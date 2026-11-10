@@ -25,7 +25,7 @@ One tick, in the order the code runs it:
 
 What a tick does *not* do is sweep its own heartbeat. `check_heartbeat` is read-only and is driven by a
 different process (`--check-heartbeat`, its own scheduler entry): a monitor that runs inside the thing
-it monitors cannot observe that the thing stopped, which is exactly the defect the review named.
+it monitors cannot observe that the thing stopped.
 """
 from __future__ import annotations
 
@@ -36,8 +36,11 @@ from typing import Any
 from collections.abc import Mapping, Sequence
 
 from local_observe.log import get_logger
-from .adapter import AdmissionReceipt, PlatformAdmission, build_events
-from .facts import (CoverageNote, DEFAULT_MAIN_BRANCHES, RunFact, card_identity, parse_run)
+from .adapter import (COVERAGE_SUBJECT, GREEN_CONCLUSION, AdmissionReceipt, EventClaim, IncidentKeyPlan,
+                      KeyTransition, PULL_STATUS, PlatformAdmission, PollRead, RULE_STUCK,
+                      claim_transitions, claimed_coverage_moves, plan_incident_keys)
+from .facts import (CoverageNote, DEFAULT_MAIN_BRANCHES, RunFact, card_identity, coverage_only_fact,
+                    incident_key, parse_run)
 from .outlet import BoardOutlet, DrainReport, OutletConfig, ReconcileReport, Thresholds
 from .store import FAILING_OUTCOMES, CiFailureStore
 from .transports import (ActionsSource, BoardClient, CiFailureError, HttpJsonTransport, MalformedSource,
@@ -47,7 +50,7 @@ log = get_logger(__name__)
 
 __all__ = ['Pipeline', 'PipelineConfig', 'Service', 'TickReport', 'build_service', 'environment_config',
            'COVERAGE_SOURCE', 'DEFAULT_HEARTBEAT_DEADLINE_SECONDS', 'DEFAULT_STUCK_AFTER_SECONDS']
-#: The starved-runner class the card names (2026-08-21): a run that has not started for 20 minutes.
+#: The starved-runner class: a run queued or waiting, unstarted, for at least this long.
 DEFAULT_STUCK_AFTER_SECONDS = 1200
 #: How long the poller may be silent before an independent monitor calls it a lapse. Two and a half
 #: times a default five-minute interval: one missed tick is a slow API, two misses is a process problem.
@@ -106,7 +109,71 @@ class PipelineConfig:
 
 @dataclass(frozen=True)
 class TickReport:
-    """One tick's answer, in a shape a log line, a report or a test can read."""
+    """One tick's answer, in a shape a log line, a report or a test can read.
+
+    `events` counts what the boundary was offered and `receipts` carries the platform's own word on each,
+    so the incident claims stay separable from the send claims. Three of the fields exist because an
+    event count alone cannot describe this poller's output any more:
+
+    * `keys` is how many incident subjects the poll spoke about -- one per (repository, workflow, plane).
+      Two runs of one workflow are one key, which is the coalescing rule made readable from outside. A
+      coverage gap is not one of these subjects and is not counted here; it is its own condition, and its
+      events show up in `events` and `resolved`.
+    * `resolved` is how many of those events closed something as far as this poller knows -- a workflow
+      verdict or a coverage gap that a later poll read back. They are not new incidents, and
+      `platform_admission: admitted` on a tick that fixed nothing would otherwise look like a tick that
+      opened two.
+    * `superseded` names the failing runs the poll did *not* fire, because the same workflow had a newer
+      green run in the same page walk. They are recorded, counted and (if a board is wired) filed; they
+      just do not open an incident, and an empty-looking event count should say so.
+
+    `recovered` names the runs this store had already reported as starved and that now arrived with a
+    verdict which is not a failure. Each entry's `incident_statement` says what was actually handed to the
+    platform about the incident that starvation opened: `sent: True` means a `resolved` event was offered
+    for that key -- whether the platform closed anything is the receipt's answer, not this one. The four
+    answers are `resolved-offered`, `recorded-not-opened`, `open-not-closed` (this source's own marker
+    still says the key is open and this poll closed nothing, which is what a refused closure and an
+    incident closed by hand both look like from here) and `nothing-known-open`.
+
+    `recorded` is the count of new facts and `events` the count of canonical events this poll offered.
+    One event per (repository, workflow, plane) per rule is the *verdict* half; the other half is one
+    coverage event per gap reason this poll carried or closed. So `events` is not bounded by `recorded`
+    and can be smaller or larger than it: a poll of three starved runs with three gaps each is nine
+    coverage verdicts and three workflow verdicts over three new facts, and a poll that only re-offers a
+    stored verdict can report events with nothing recorded at all. A tick that filed nine verdicts for
+    nine runs of one workflow is the old shape this report no longer produces.
+
+    `pending_verdicts` counts the verdicts this store decided that the platform never took -- kept in the
+    `verdicts_pending` table and re-offered until something answers. It is the number that says "the
+    incident you can see on the board is not everything that happened". It is also a number with a ceiling:
+    the table keeps `store.PENDING_VERDICTS_BOUND` rows, so on a backlog bigger than that the count reads
+    steady at the bound and the rows above it are in `abandoned` with the bound as their reason. Whoever
+    wants "how many verdicts did this source decide" adds the two.
+
+    `abandoned` names the owed verdicts this tick gave up on, and it is the counterparty of that claim: a
+    row leaves the table only when re-offering it cannot work, and each route says which -- one of the two
+    ceilings `store.expire_pending_verdicts` applies (offered too many times, or citing evidence older than
+    the lifetime the event itself claims), the row-count bound above, or this poll's own judgement that a
+    stored *coverage closure* has nothing true left to say (see `_admit`: the gap it closed is being read
+    again). Every drop is listed here rather than disappearing from `pending_verdicts` alone.
+    An entry is `{'key', 'rule_id', 'reason', 'attempts', 'decided_at', 'event_status', 'reoffered',
+    'withdrawn'}`. Those last two are the second half of the sentence, and they are the planner's answer
+    rather than the store's, read off the *status* this poll spoke about that same `(key, rule_id)`:
+
+    * **Neither.** This poll said nothing about the pair -- a verdict about a run this store has already
+      passed cannot be re-decided -- so the page really is gone and the exit code that row held at "the
+      platform refused" frees.
+    * **`reoffered`.** This poll files the *same condition* again as a `firing`, with a fresh window: a gap
+      it is still reading, where the row it just deleted was the only thing telling the planner the
+      condition had already been said. The page the retired row stood for is cancelled; the condition is not.
+    * **`withdrawn`.** This poll spoke the *other direction* -- a `resolved`, or a pull-plane `unknown`,
+      which opens nothing. The owed firing is not repeated and not merely dropped: a newer verdict replaced
+      it, and calling that `reoffered` would report a page on the tick that cancelled one.
+
+    `receipts` travels in the printed report next to the counts, because "the platform has these events"
+    is a claim about an answer this process received: when it comes back `refused`, the operator has to
+    be able to read which event and with what reason without a second run against a live store.
+    """
     scanned: int = 0
     recorded: int = 0
     refusals: int = 0
@@ -116,7 +183,13 @@ class TickReport:
     planned: tuple[str, ...] = ()
     drained: DrainReport | None = None
     events: int = 0
+    keys: int = 0
+    resolved: int = 0
+    superseded: tuple[int, ...] = ()
     receipts: tuple[AdmissionReceipt, ...] = ()
+    recovered: tuple[dict[str, Any], ...] = ()
+    pending_verdicts: int = 0
+    abandoned: tuple[dict[str, Any], ...] = ()
     lapse: dict[str, Any] | None = None
     heartbeat: dict[str, Any] | None = None
     error: str | None = None
@@ -124,6 +197,21 @@ class TickReport:
     @property
     def admitted(self) -> int:
         return sum(1 for receipt in self.receipts if receipt.admitted)
+
+    @property
+    def refused_receipts(self) -> int:
+        """How many receipts came back an answer that was not admission.
+
+        This is not the printed `refused` count, and the difference is the whole point of having both:
+        printed `refused` is `events - admitted`, which counts an event nobody was wired to receive,
+        because a ramp-up deployment that has not connected the platform really did have every event
+        refused by the absence of a destination. This property counts only receipts carrying an answer --
+        `refused`, not `not_configured` -- and it is what the CLI exits on, because "the platform said
+        no" and "there is no platform" need different actions and one exit code would hide one behind
+        the other.
+        """
+        return sum(1 for receipt in self.receipts
+                   if not receipt.admitted and receipt.status != 'not_configured')
 
     @property
     def platform_admission(self) -> str:
@@ -140,11 +228,18 @@ class TickReport:
     def as_dict(self) -> dict[str, Any]:
         return {'scanned': self.scanned, 'recorded': self.recorded, 'refusals': self.refusals,
                 'cursor': self.cursor, 'complete': self.complete,
-                'planned': list(self.planned), 'events': self.events,
+                'planned': list(self.planned), 'events': self.events, 'keys': self.keys,
+                'resolved': self.resolved, 'superseded': list(self.superseded),
                 'platform_admission': self.platform_admission,
                 'admitted': self.admitted, 'refused': self.events - self.admitted,
+                'refused_answered': self.refused_receipts,
+                'receipts': [receipt.as_dict() for receipt in self.receipts],
                 'reconciled': None if self.reconciled is None else self.reconciled.as_dict(),
                 'drained': None if self.drained is None else self.drained.as_dict(),
+                'recovered': [dict(item) for item in self.recovered],
+                'pending_verdicts': self.pending_verdicts,
+                'abandoned': [dict(item) for item in self.abandoned],
+                'abandoned_verdicts': len(self.abandoned),
                 'lapse': self.lapse, 'heartbeat': self.heartbeat, 'error': self.error}
 
 
@@ -163,6 +258,15 @@ class Pipeline:
                 raise ScopeRefused('The board outlet must not share the Actions transport')
             if outlet.board.repo != config.repository:
                 raise ScopeRefused('The board outlet and the Actions reader name different repositories')
+        shared = _admitter_transport(admission) if admission is not None else None
+        if shared is not None and shared is actions.transport:
+            # The third outlet is the one that POSTs, and a transport in two scopes means the platform's
+            # own intake route is asked of the forge: the same refusal `board`/`actions` already makes,
+            # extended to the pair that actually moves verdicts. It can only see the transport a
+            # `PlatformIntake` holds -- an admitter that is a bare callable or a host object of some other
+            # shape is opaque here and passes unjudged, which is why this is one `is` comparison and not a
+            # claim that no two outlets can ever share a socket.
+            raise ScopeRefused('The platform intake must not share the Actions transport')
         self.store = store
         self.actions = actions
         self.outlet = outlet
@@ -195,13 +299,31 @@ class Pipeline:
             if target is None:
                 coverage.append(CoverageNote('job-id-absent', 'no job object to ask about'))
             else:
-                read = self.actions.job_log(run_id, target)
-                log_text = read.excerpt
-                if read.coverage:
-                    coverage.append(CoverageNote(read.coverage,
-                                                 'truncated' if read.truncated else 'not-read'))
+                try:
+                    read = self.actions.job_log(run_id, target)
+                except ScopeRefused:
+                    raise
+                except Exception as exc:  # the seam is any callable a caller hands over
+                    # A reader that raises rather than answering with a coverage sentence is a seam this
+                    # pipeline does not control: `ActionsSource.job_log` swallows what its own reader
+                    # raises, but a caller may hand over any callable, and the injected reader is the
+                    # documented shape a caller hands over next. A failed log read is a gap in what this
+                    # poller knows -- it must not end the tick that found a broken build, and it must not
+                    # reach an operator as a traceback instead of an exit code. `ScopeRefused` is
+                    # re-raised on purpose: a reader asked to fetch outside its allowlist is a caller bug,
+                    # not a gap, and the CLI's refusal exit is the sentence for that.
+                    coverage.append(CoverageNote('job-log-unreachable', type(exc).__name__))
+                    read = None
+                if read is not None:
+                    log_text = read.excerpt
+                    if read.coverage:
+                        coverage.append(CoverageNote(read.coverage,
+                                                     'truncated' if read.truncated else 'not-read'))
         elif self.actions.log_reader is None:
             coverage.append(CoverageNote('job-logs-not-wired'))
+        # A row this parser refuses raises `RefusedRunRead`, which carries `coverage` plus whatever the
+        # parser derived before it gave up: the reads happened, and the caller carries those notes even
+        # though no verdict is filed here.
         return parse_run(self.config.repository, run, jobs=jobs, log=log_text, coverage=coverage,
                          main_branches=self.config.main_branches)
 
@@ -211,7 +333,7 @@ class Pipeline:
         `stuck` is derived from a *stored* first-seen time, so the 20-minute clock survives a restart:
         `track_open_run` returns the original `waiting_since` rather than a fresh one. Reporting it once
         per run (the `stuck_reported` flag) is what keeps a starved runner at one occurrence instead of
-        one per poll -- the fold the card's storm clause asks for.
+        one per poll -- a queue of forty builds behind one dead runner is one report, not forty.
         """
         if fact.status == 'completed':
             return fact.conclusion or 'unknown'
@@ -243,6 +365,21 @@ class Pipeline:
             self.store.set_cursor(int(self.config.seed_cursor), moment)
         pairs: list[tuple[RunFact, Any]] = []
         outcomes: list[str] = []
+        # Every run this poll parsed, new to the store or not. `pairs` is the *novel* subset (that is what
+        # the filing and the board journal are for), but "is this gap still open?" is a question about this
+        # poller's reads, and a run that has been sitting in the queue for an hour is re-read on every
+        # tick while answering nothing new -- leave it out and the poll that reads a clean build next door
+        # reports the gap it can still see as recovered. A row this poll refused to parse is in here too,
+        # as a carrier with no verdict on it (`facts.coverage_only_fact`): the reads that came before the
+        # refusal happened, and a gap this process met does not become unread because the run carrying it
+        # was unparseable.
+        read: list[RunFact] = []
+        recovered: list[dict[str, Any]] = []
+        # Run ids this poll asked about and did not get an answer for (the bounded refresh of the runs it
+        # still calls in flight). They do not stop the walk from being `complete` -- the page came back --
+        # but they do stop this poll from claiming it read everything it knows about, which is the licence a
+        # gap closure runs on. See `adapter.PollRead`.
+        unread: list[int] = []
         scanned = refusals = 0
         complete = True
         error: str | None = None
@@ -277,15 +414,26 @@ class Pipeline:
                     refusals += 1
                     self.store.refusal(self.config.repository, 'run-malformed', str(exc)[:200],
                                        run_id=run_id)
+                    carrier = _coverage_carrier(exc, self.config.repository, run_id)
+                    if carrier is not None:
+                        read.append(carrier)
                     continue
                 page_facts.append(fact)
-                page_labels.append(self._outcome(fact, moment))
+                label = self._outcome(fact, moment)
+                page_labels.append(label)
                 if fact.status == 'completed':
                     settled.append(run_id)
+                    # Read before the row goes: `drop_open_run` deletes the only record of what this run
+                    # was reported as while it was waiting, and after it there is nothing to attribute a
+                    # recovery to.
+                    back = self._recovery(fact, label)
+                    if back is not None:
+                        recovered.append(back)
                     # The run has its verdict in hand, so it leaves the refresh set: a row left behind
                     # here would be asked about by GET on every later tick for nothing.
                     self.store.drop_open_run(self.config.repository, run_id)
             if page_facts:
+                read.extend(page_facts)
                 for fact, label_outcome in self.store.record_facts(page_facts, cursor=cursor,
                                                                    now=moment, outcomes=page_labels):
                     pairs.append((fact, card_identity(fact)))
@@ -311,8 +459,9 @@ class Pipeline:
         # The runs the walk can no longer reach are the ones this store itself remembers as open. Their
         # verdicts are fetched one bounded GET each, so a low-id run that was queued when the cursor passed
         # it still reaches the board when it fails.
-        refresh = self._refresh_open_runs(moment, cursor)
+        refresh = self._refresh_open_runs(moment, cursor, recovered, read, unread)
         if refresh:
+            read.extend(fact for fact, _label in refresh)
             labels = [label for _fact, label in refresh]
             for fact, label_outcome in self.store.record_facts([fact for fact, _label in refresh],
                                                               cursor=cursor, now=moment,
@@ -321,7 +470,20 @@ class Pipeline:
                 outcomes.append(label_outcome)
         report_pairs = [(fact, identity) for (fact, identity), label in zip(pairs, outcomes, strict=True)
                         if label in FAILING_OUTCOMES]
-        receipts, events = self._admit(report_pairs, moment)
+        # Read once, before anything this tick can send moves it: the planner decides against these
+        # markers, and `recovered[]` has to report the same instant the plan was built against rather than
+        # a second read taken after this tick's own claims landed.
+        markers = self.store.incident_key_states()
+        # What this poll's own reading says, as opposed to what the runs it read say: whether the whole of
+        # it came back, and which gaps are true of the wiring rather than of a build. `job-logs-not-wired`
+        # is carried on every poll -- including one that read no runs at all, which is the tick that would
+        # otherwise close a configuration gap it has no power to re-check.
+        poll_read = PollRead(complete=error is None and complete and not unread,
+                             coverage=() if self.actions.log_reader is not None
+                             else (CoverageNote('job-logs-not-wired'),))
+        receipts, plan, owed, abandoned = self._admit(pairs, outcomes, moment, markers, read,
+                                                     poll_read=poll_read)
+        self._state_recoveries(recovered, plan, markers)
         planned: tuple[str, ...] = ()
         drained: DrainReport | None = None
         if self.outlet is not None and report_pairs:
@@ -341,14 +503,19 @@ class Pipeline:
                 deadline_seconds=self.config.heartbeat_deadline_seconds)
         return TickReport(scanned=scanned, recorded=len(pairs), refusals=refusals, cursor=cursor,
                           complete=complete, reconciled=reconciled, planned=planned, drained=drained,
-                          events=len(events), receipts=receipts, lapse=lapse,
+                          events=len(plan.events), keys=len(plan.keys),
+                          resolved=sum(1 for event in plan.events if event['status'] == 'resolved'),
+                          superseded=plan.superseded, receipts=receipts, lapse=lapse,
+                          pending_verdicts=owed, abandoned=abandoned,
+                          recovered=tuple(recovered),
                           heartbeat=self.store.check_heartbeat(
                               now=moment,
                               deadline_seconds=self.config.heartbeat_deadline_seconds).as_dict(),
                           error=error)
 
-    def _refresh_open_runs(self, now: dt.datetime,
-                           cursor: int) -> list[tuple[RunFact, str]]:
+    def _refresh_open_runs(self, now: dt.datetime, cursor: int,
+                           recovered: list[dict[str, Any]],
+                           read: list[RunFact], unread: list[int]) -> list[tuple[RunFact, str]]:
         """Re-read the unfinished runs the page walk has left behind -- at most N GETs, newest first.
 
         `poll_once` advances the cursor only over runs whose verdict arrived, but a run that is *newer
@@ -365,6 +532,18 @@ class Pipeline:
 
         A vanished run (404) is dropped from `open_runs` with a coverage note, so the budget is not spent
         on it every tick forever; an unreadable one keeps its row and is asked again next tick.
+
+        `recovered` and `read` are the two lists this walk contributes to in place: the recoveries it can
+        attribute, and every fact (or refused row's notes) it read, which is what the gap-closure question
+        is asked of. A row here that this parser refused carries its notes and no verdict -- see
+        `_coverage_carrier`.
+
+        `unread` is the third: the runs this poll *asked* about and got no answer for -- a GET that failed,
+        an answer that named a different run. A vanished run is not in it (404 is an answer, and the row is
+        dropped), and a refused row is not in it either, because that one arrives as a `read_complete=False`
+        carrier and the planner counts it there. What the list says is "this poll does not know what it did
+        not read", and that is enough to withhold the licence a run-less poll would otherwise use to close a
+        gap it never re-checked.
         """
         reader = getattr(self.actions, 'run', None)
         if not callable(reader):
@@ -378,6 +557,7 @@ class Pipeline:
             except (SourceUnavailable, MalformedSource, PaginationBudget) as exc:
                 self.store.coverage(COVERAGE_SOURCE, CoverageNote(
                     'open-run-refresh-failed', f'{run_id}:{type(exc).__name__}'))
+                unread.append(run_id)
                 continue
             if run is None:
                 self.store.coverage(COVERAGE_SOURCE,
@@ -388,26 +568,276 @@ class Pipeline:
                 fact = self._fact_for(run, now)
             except MalformedSource as exc:
                 self.store.refusal(self.config.repository, 'run-malformed', str(exc)[:200], run_id=run_id)
+                carrier = _coverage_carrier(exc, self.config.repository, run_id)
+                if carrier is not None:
+                    read.append(carrier)
                 continue
             if fact.run_id != run_id:
                 self.store.coverage(COVERAGE_SOURCE,
                                     CoverageNote('open-run-id-mismatch', f'{run_id}:{fact.run_id}'))
+                unread.append(run_id)
                 continue
             label = self._outcome(fact, now)
             if fact.status == 'completed':
+                back = self._recovery(fact, label)
+                if back is not None:
+                    recovered.append(back)
                 self.store.drop_open_run(self.config.repository, run_id)
             facts.append((fact, label))
         return facts
 
-    def _admit(self, pairs: Sequence[tuple[RunFact, Any]],
-               now: dt.datetime) -> tuple[tuple[AdmissionReceipt, ...], list[dict[str, Any]]]:
-        """Build the canonical events and hand them over. Never decides anything itself."""
-        events: list[dict[str, Any]] = []
-        for fact, identity in pairs:
-            events.extend(build_events(fact, identity, now=now))
-        if not events:
-            return (), []
-        return tuple(self.admission.admit(events)), events
+    def _recovery(self, fact: RunFact, outcome: str) -> dict[str, Any] | None:
+        """One run this store had told somebody about as starved, arriving with a non-failing verdict.
+
+        The `open_runs` row is what knows: `stuck_reported` is the flag that folded a starved-runner storm
+        into one report, and the row is deleted the moment a run settles, so this call -- made before the
+        drop -- is the one instant at which the recovery can still be attributed to the report that opened
+        it. A run that was merely `waiting` never opened anything, so it recovers quietly and is not
+        named here; a run that was starved and then *failed* is not a recovery either, and says so by
+        staying out of this list.
+
+        It sends nothing and writes nothing. The `incident_key` it carries is what `poll_once` matches
+        against the plan's closures once the events exist, so the `incident_statement` below reports an
+        offer this tick really made rather than a hope; until then it says the plain thing.
+        """
+        if fact.status != 'completed' or outcome in FAILING_OUTCOMES:
+            return None
+        if not self.store.stuck_reported(fact.repository, fact.run_id):
+            return None
+        return {'repository': fact.repository, 'run_id': fact.run_id, 'was_reported': 'stuck',
+                'outcome': outcome or 'unknown', 'incident_key': incident_key(fact),
+                'incident_statement': {'sent': False, 'reason': 'not-yet-offered'}}
+
+    @staticmethod
+    def _state_recoveries(recovered: Sequence[dict[str, Any]], plan: IncidentKeyPlan,
+                          markers: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None) -> None:
+        """Say, per recovery, what the plan actually handed the platform about that incident.
+
+        Four answers, each read off something that exists: a `resolved` was offered for this key
+        (`sent: True`, and whether the platform closed anything is the receipt's answer, not this one);
+        the starvation was recorded under `unknown` because it happened on a pull request, so there was
+        never an incident to close; the marker this source kept still says the key is open but this poll
+        closed nothing (`open-not-closed`, which is what a refused closure and a hand-closed incident
+        look like from here); or no marker under this key says anything is open at all (`nothing-known-open`
+        -- a run whose starvation was never offered to the platform, which after the receipt-driven claim
+        is a state that can actually happen again).
+        """
+        held = markers or {}
+        for entry in recovered:
+            key = str(entry.get('incident_key') or '')
+            pair = (key, RULE_STUCK)
+            if pair in plan.resolved_rules:
+                entry['incident_statement'] = {'sent': True, 'reason': 'resolved-offered'}
+            elif pair in plan.recorded_rules:
+                entry['incident_statement'] = {'sent': False, 'reason': 'recorded-not-opened'}
+            elif int(((held.get(key) or {}).get(RULE_STUCK) or {}).get('open') or 0) > 0:
+                entry['incident_statement'] = {'sent': False, 'reason': 'open-not-closed'}
+            else:
+                entry['incident_statement'] = {'sent': False, 'reason': 'nothing-known-open'}
+
+    def _admit(self, pairs: Sequence[tuple[RunFact, Any]], outcomes: Sequence[str],
+               now: dt.datetime, markers: Mapping[str, Mapping[str, Mapping[str, int]]],
+               read: Sequence[RunFact] = (),
+               poll_read: PollRead | None = None
+               ) -> tuple[tuple[AdmissionReceipt, ...], IncidentKeyPlan, int, tuple[dict[str, Any], ...]]:
+        """Offer this tick's verdicts plus whatever is still owed, and move markers only on an answer.
+
+        The candidates are the facts that speak about a key at all: a failing or starved one (which may
+        open an incident) and a completed-green one (which may close one). Everything else -- a run still
+        in flight under its waiting label, say -- is deliberately absent, because handing the planner a
+        fact nobody paged on and never resolved would have it fire on load. `read` is the wider set: every
+        run this poll parsed, which is what the *coverage* question is asked of, because a gap in this
+        poller's own reads is not a verdict about anybody's build.
+
+        The markers are read from the store and recomputed here, so the plan stays a pure function of
+        (these facts, those markers, what is owed): a re-run of the same tick with the same state
+        recomputes the same events. What it writes back is decided *after* the send, from the receipts --
+        `claim_transitions` returns the marker moves the platform actually took. A verdict it never took
+        is kept in `verdicts_pending` and offered again on a later tick, because the fact behind it is
+        behind the cursor by then and nothing else would ever say it again. That table, not this object's
+        memory, is what makes "the platform has this" mean the platform has it.
+
+        Three writes, in this order, and the order is the durability argument: retire what can no longer
+        converge, write the owed row for everything about to be offered, send, then claim the markers and
+        retire those rows in one commit. See the notes in the body.
+
+        Two kinds of verdict are never owed, for opposite reasons: a pull-plane `unknown`, because it opens
+        nothing and so owes nobody a page, and a *coverage closure*, because unlike a workflow verdict it is
+        re-derivable -- see `_is_coverage_closure`. What `poll_read` licenses is what makes that safe on a
+        repository that stops building: a poll that read its source cleanly and no longer carries the reason
+        says so again on every tick until something answers, and one that could not read its source says
+        nothing -- which is the sentence that used to be true only while somebody kept pushing.
+
+        Returns the receipts, the plan including anything re-offered from the pending table, how many
+        verdicts are still owed after this tick, and the rows this tick gave up on.
+        """
+        candidates = [fact for (fact, _identity), label in zip(pairs, outcomes, strict=True)
+                      if label in FAILING_OUTCOMES
+                      or (fact.status == 'completed' and fact.conclusion == GREEN_CONCLUSION)]
+        abandoned = [dict(entry) for entry in self.store.expire_pending_verdicts(now=now)]
+        waiting = self.store.pending_verdicts()
+        open_gaps = {rule_id for rule_id, rung in (markers.get(COVERAGE_SUBJECT) or {}).items()
+                     if int(rung.get('open') or 0)}
+        # A tick with nothing to judge, nothing owed and nothing read has nothing to say -- except about an
+        # open coverage marker on a repository that has gone quiet. There the closure cannot be re-derived
+        # from a run, because there is no new run to read, and the poll's own clean read is the only
+        # evidence available (`adapter.PollRead`). Skipping the plan here is what left such a gap open
+        # forever with the exit code clean and nothing owed.
+        if (not candidates and not waiting and not read
+                and not (open_gaps and poll_read is not None and poll_read.complete)):
+            # `_mark_reoffered` reads the plan, and this plan is empty by construction: a poll that emitted
+            # no events at all neither re-filed nor withdrew anything, so both words are false on every row
+            # the ceilings retired above. That is the answer, not an oversight -- hence the plan object
+            # rather than a bare `frozenset()` at the call.
+            return (), IncidentKeyPlan(), 0, _mark_reoffered(abandoned, IncidentKeyPlan())
+        plan = plan_incident_keys(candidates, markers, now=now, read_facts=tuple(read),
+                                  pending={key: {rule_id: int(row.get('open_run') or 0)
+                                                 for rule_id, row in rules.items()}
+                                           for key, rules in waiting.items()},
+                                  poll_read=poll_read)
+        # A stored verdict the plan has just spoken about again is superseded by that newer word, so only
+        # what the plan left alone travels a second time. Rows the plan cannot speak about are judged here
+        # rather than in a comprehension, because one shape is judged by what this poll read rather than
+        # replayed: a coverage *closure* in the table says "this poller's reads came back", and only this
+        # poll can say whether that is still true.
+        replay: list[tuple[str, str, dict[str, Any]]] = []
+        retired: list[dict[str, Any]] = []
+        refused_rows = any(not fact.read_complete for fact in read)
+        for subject, rules in sorted(waiting.items()):
+            for rule_id, row in sorted(rules.items()):
+                if (subject, rule_id) in plan.spoken or not isinstance(row.get('event'), Mapping):
+                    continue
+                if _is_coverage_closure(subject, row['event']):
+                    if rule_id in plan.carried:
+                        # The gap is back in this poll's hands, so the stored word about it is a lie: this
+                        # is the shape round 3 graded a blocker for -- a `resolved` the platform books for a
+                        # gap the source is reading. The row is retired, never sent.
+                        retired.append(_retired_row(subject, rule_id, row,
+                                                    'a coverage closure for a gap this poll is reading'))
+                    elif poll_read is None or not poll_read.complete or refused_rows:
+                        # This poll could not read its whole source, or left a row unparsed: it neither
+                        # knows the gap healed nor knows the closure lies, so it neither sends the row nor
+                        # gives up on it. An offer this poll cannot stand behind is not worth an attempt
+                        # counter, and the two ceilings still bound the wait.
+                        continue
+                    else:
+                        # Nothing this poll read carries the gap and the read came back, so the closure is
+                        # true. When the marker still says open the plan spoke it above and this row is
+                        # gone; reaching here means the marker is not there -- an older build's row, or one
+                        # left behind by the upgrade recipe -- and this row is the only true statement
+                        # available about an incident the platform may still be holding.
+                        replay.append((subject, rule_id, row))
+                    continue
+                replay.append((subject, rule_id, row))
+        abandoned.extend(retired)
+        # The owed row is written *before* the send, for every verdict the poll is about to offer, not only
+        # for the ones that come back refused. A row created after a refused answer is a promise made in the
+        # same breath as the failure that breaks it: anything that stops this process between the send and
+        # that write -- a store that raises on the way back from a platform that already took the event, a
+        # SIGKILL, a filesystem full at the wrong instant -- leaves the platform holding an incident this
+        # source has no record of owing, while the fact behind it sits behind the cursor and will never be
+        # re-read. Written first, the worst case is a row that is replayed and answered `duplicate`, which
+        # is an answer and converges. The reason on the row is the placeholder the send has not yet earned.
+        offered: dict[tuple[str, str], dict[str, Any]] = {}
+        for claim in plan.claims:
+            # A pull-request build is filed under `PULL_STATUS` and opens nothing, so a refusal there costs
+            # a row in the platform's own event table and not a page nobody would be sent. It is not owed,
+            # and neither is a coverage closure: `poll_read` re-derives that on every poll whose own read
+            # came back -- a poll that read a clean run, or a poll the quiet repository left nothing to
+            # read -- so a row would add nothing except the risk of being said on a tick that cannot stand
+            # behind it.
+            if (plan.events[claim.index].get('status') == PULL_STATUS
+                    or _is_coverage_closure(claim.key, plan.events[claim.index])):
+                continue
+            offered[(claim.key, claim.rule_id)] = _owed_row(claim.key, claim.rule_id,
+                                                            plan.events[claim.index], claim.open_run,
+                                                            claim.closed_run, UNANSWERED)
+        for subject, rule_id, row in replay:
+            offered[(subject, rule_id)] = _owed_row(subject, rule_id, row['event'], row.get('open_run'),
+                                                    row.get('closed_run'), UNANSWERED)
+        if offered:
+            # `attempts` counts offers a platform could have answered, not polls this process ran. With no
+            # platform wired the row is still written -- `--status` has to say what is owed, and a row that
+            # exists before the send is the durability argument above -- but it is written uncounted, so an
+            # unwired poller keeps its backlog for the ramp-up the docs recommend instead of abandoning an
+            # hour of breaks as "offered twelve times and never taken" to a platform that never existed.
+            # The evidence-lifetime ceiling still applies: that one is about the event, not about wiring.
+            #
+            # A backlog bigger than the table bound is decided here, in this transaction, on rows this poll
+            # did not hand over -- so the write answers with them and they are reported, not subtracted from
+            # a count that then reads steady at the bound while pages leave.
+            abandoned.extend(self.store.record_pending_verdicts(
+                list(offered.values()), now=now, counted=self.admission.configured).evicted)
+        receipts = tuple(self.admission.admit(plan.events + tuple(row['event']
+                                                                  for _s, _r, row in replay)))
+        owed: list[dict[str, Any]] = []
+        settled: set[tuple[str, str]] = set()
+        claims = list(claim_transitions(plan, receipts)) + list(claimed_coverage_moves(plan, receipts))
+        for claim in plan.claims:
+            pair = (claim.key, claim.rule_id)
+            answered = claim.index < len(receipts) and receipts[claim.index].admitted
+            if answered:
+                settled.add(pair)
+            elif _is_coverage_closure(claim.key, plan.events[claim.index]):
+                # The closure was refused, so nothing is kept: the marker still says the gap is open (the
+                # claim that would have cleared it is driven by this receipt), and the next poll whose own
+                # read came back -- a poll that reads a clean run, or a poll the quiet repository leaves
+                # nothing to read -- says the same thing again with a window that is true of *that* poll.
+                # Keeping the row would make the next poll owe a recovery it may not be entitled to speak
+                # (the gap may be back), which is the harm `_is_coverage_closure` spells out. Retiring the
+                # pair also clears whatever firing row it held, which this closure superseded.
+                settled.add(pair)
+            elif plan.events[claim.index].get('status') != PULL_STATUS:
+                reason = (receipts[claim.index].reason if claim.index < len(receipts)
+                          else 'the platform never answered')
+                owed.append(_owed_row(claim.key, claim.rule_id, plan.events[claim.index],
+                                      claim.open_run, claim.closed_run, reason))
+            else:
+                settled.add(pair)
+        replayed = receipts[len(plan.events):]
+        for (subject, rule_id, row), receipt in zip(replay, replayed, strict=True):
+            if receipt.admitted:
+                settled.add((subject, rule_id))
+                claims.append(KeyTransition(subject, rule_id, row.get('open_run'),
+                                            row.get('closed_run')))
+            else:
+                owed.append(_owed_row(subject, rule_id, row['event'], row.get('open_run'),
+                                      row.get('closed_run'), receipt.reason))
+        # One commit for both halves of the same answer: the markers the receipts justified, and the owed
+        # rows those same receipts retired. Split across two transactions, a failure in between claims an
+        # incident the table still says is owed (and the next tick offers it a second time to a platform
+        # that has it), or retires a row whose marker never landed (and then no green run can ever close
+        # the incident, because the closure rule reads `open` and finds nothing open).
+        # The stale closures ride the same commit: they are owed rows this poll has decided to retire, and
+        # a row that is neither offered nor dropped would pin `pending_verdicts` until its evidence expired.
+        settled.update((str(entry['key']), str(entry['rule_id'])) for entry in retired)
+        if claims or settled:
+            self.store.record_incident_keys(claims, now=now, drop=sorted(settled))
+        if owed:
+            # The rows are already on disk -- the pre-send write offered them, and `attempts` counted that.
+            # This pass only replaces the placeholder with the answer the platform actually gave, so it must
+            # not count as a second offer to a platform that was asked once. The restatement can push the
+            # table over its bound too (a refused backlog that grew this tick), and the rows it evicts are
+            # named in the same report field.
+            abandoned.extend(self.store.record_pending_verdicts(owed, now=now, counted=False).evicted)
+        if replay:
+            base = len(plan.events)
+            # `spoken` names every pair this poll emitted an event about, and a replayed row is one: the
+            # returned plan carries its own events, so the field is recomputed rather than left at the
+            # planner's answer, which no longer describes `events`/`claims`.
+            plan = replace(plan, events=plan.events + tuple(row['event'] for _s, _r, row in replay),
+                           claims=plan.claims + tuple(EventClaim(base + index, subject, rule_id,
+                                                                 open_run=row.get('open_run'),
+                                                                 closed_run=row.get('closed_run'))
+                                                      for index, (subject, rule_id, row)
+                                                      in enumerate(replay)),
+                           spoken=plan.spoken | {(subject, rule_id) for subject, rule_id, _row in replay})
+        # A row retired above cannot be replayed this tick (it was deleted before `waiting` was read), so
+        # "will this poll say it anyway?" is exactly "did the planner speak about that pair, and which way?":
+        # a gap this poll still reads is filed again as a fresh firing, a pair it just resolved is withdrawn,
+        # and a verdict about a run behind the cursor is gone. Say which of the three happened rather than
+        # let the report claim a page on a tick that was cancelling one.
+        return (receipts, plan, self.store.pending_verdict_count(), _mark_reoffered(abandoned, plan))
 
     # ---- liveness -----------------------------------------------------------
 
@@ -430,6 +860,135 @@ class Service:
 
     def close(self) -> None:
         self.store.close()
+
+
+def _admitter_transport(admission: PlatformAdmission) -> Any:
+    """The transport behind an admitter, when there is one to see, or None.
+
+    `PlatformAdmission` is deliberately callable-shaped -- the host hands it any `admit` callable -- so the
+    only admitter whose transport can be named is this package's own `PlatformIntake`, reached through the
+    bound method's `__self__`. Anything else returns None and is left unjudged: a check that cannot see a
+    shared transport must not claim to have looked.
+    """
+    admitter = getattr(admission, 'admitter', None)
+    intake = getattr(admitter, '__self__', None)
+    return getattr(intake, 'transport', None)
+
+
+#: The reason an owed row carries between the write that offered it and the answer that came back. It is
+#: never a refusal, and it is what an operator reads if the process died with a send in flight.
+UNANSWERED = 'offered, no answer read back'
+
+
+def _owed_row(key: str, rule_id: str, event: Mapping[str, Any], open_run: Any, closed_run: Any,
+              reason: str) -> dict[str, Any]:
+    """The pending-table row for one verdict the platform never took.
+
+    It carries the event verbatim plus the marker move that event was going to make, because a later poll
+    has to be able to both re-offer the verdict and honour the claim it carries -- and it carries `reason`
+    so an operator reading the table back can see why it is still there.
+    """
+    return {'key': key, 'rule_id': rule_id, 'event': dict(event),
+            'open_run': None if open_run is None else int(open_run),
+            'closed_run': None if closed_run is None else int(closed_run),
+            'reason': str(reason or '')[:200]}
+
+
+def _is_coverage_closure(subject: str, event: Mapping[str, Any]) -> bool:
+    """Whether one verdict is the *closure* of a gap in this poller's own reads.
+
+    A workflow verdict is owed until it lands: the fact behind it is behind the cursor, so a poll that
+    decided "main is red" and lost the answer has no other way to ever say it again. A coverage closure
+    is the opposite case. It is derived every poll from two things that keep their own state -- the marker
+    that says the gap is open, and this poll's reads saying the gap is gone -- so a refused closure is
+    *re-derived* by the next poll whose own read came back, with a window that is true of that poll: the
+    licence is `adapter.PollRead`, which a poll that found no new run to read still holds (and which a poll
+    whose fetch failed, or whose rows were all refused, does not).
+
+    Owing the row for the *closure this poll just spoke* is what is wrong, because the plan says nothing
+    about a gap the poll is carrying (filing it would churn an open condition, closing it would lie) and a
+    stored `resolved` replayed on that tick would travel as "read again" for a gap this poll has in hand --
+    the platform books a recovery that did not happen, the operator is re-paged when the gap re-fires, and
+    the marker is cleared from the replayed receipt, so this source forgets a gap it is still reading.
+    `_admit` therefore judges a stored closure against this poll's own read: carried, and the row is retired
+    and named in the report; not readable, and the row waits; otherwise it travels, which is the only way a
+    closure left behind by an older build -- or one whose marker the upgrade recipe deleted -- reaches the
+    platform at all.
+
+    `COVERAGE_SUBJECT` is the reserved subject a gap marker lives under (`adapter.py`), and a coverage
+    *firing* stays owed: a firing refused by the platform has no marker, and if the gap then heals the
+    closure this poll speaks retires that pair -- see `_admit`.
+    """
+    return subject == COVERAGE_SUBJECT and str(event.get('status') or '') == 'resolved'
+
+
+def _retired_row(subject: str, rule_id: str, row: Mapping[str, Any],
+                 reason: str) -> dict[str, Any]:
+    """One owed row this poll took off the table without sending it, in `abandoned[]`'s shape.
+
+    `store.expire_pending_verdicts` builds this shape for the rows its ceilings retire; this is the same
+    promise for the rows *this poll* retired, for the same reason: a row that leaves the owed table is a
+    page this source will not send, and it has to be named in the report rather than subtracted from a
+    count. `decided_at` is the poll that decided the verdict, which is the one a reader should look at.
+    """
+    return {'key': subject, 'rule_id': rule_id, 'reason': reason,
+            'attempts': int(row.get('attempts') or 1), 'decided_at': str(row.get('at') or ''),
+            'event_status': str(row['event'].get('status') or '')}
+
+
+def _mark_reoffered(entries: list[dict[str, Any]],
+                    plan: IncidentKeyPlan) -> tuple[dict[str, Any], ...]:
+    """Put the honest word on each row this tick gave up on, and hand the tuple to the report.
+
+    `abandoned` is the counterparty of "we still owe it", and the retirement is written before the plan
+    exists. Three different things can have happened to a pair, and the reader cannot tell them from the
+    row alone, so this says which -- by looking up the *status* this poll emitted for the same
+    `(key, rule_id)`:
+
+    * nothing spoken -- the row is gone and the page with it (`reoffered` and `withdrawn` both false);
+    * a `firing` -- the condition is being said again right now, which is what a gap this poll is still
+      reading looks like: the bound deleted the row that was telling the planner it had already been said,
+      so the report would otherwise say "a page that will not be sent" on a tick that is sending it;
+    * a `resolved` (or a pull-plane `unknown`, which opens nothing) -- the owed verdict is *withdrawn*: a
+      newer word about that pair left this process, so the firing will not travel, but calling that
+      `reoffered` would report a repeat of a page the same poll cancelled.
+
+    Matching on the pair alone is what made the old field read wrong in that last case, which is why this
+    takes the plan and not its `spoken` set.
+
+    One entry per `(key, rule_id)`: the table bound can drop a row in the write made before the send and
+    drop the same pair again in the restatement made after it, and a report that named the verdict twice
+    would read like two pages were lost.
+    """
+    statuses: dict[tuple[str, str], str] = {}
+    for claim in plan.claims:
+        if 0 <= claim.index < len(plan.events):
+            statuses[(claim.key, claim.rule_id)] = str(plan.events[claim.index].get('status') or '')
+    reported: dict[tuple[str, str], dict[str, Any]] = {}
+    for entry in entries:
+        pair = (str(entry.get('key') or ''), str(entry.get('rule_id') or ''))
+        status = statuses.get(pair)
+        entry['reoffered'] = status == 'firing'
+        entry['withdrawn'] = status in ('resolved', PULL_STATUS)
+        reported.setdefault(pair, entry)
+    return tuple(reported.values())
+
+
+def _coverage_carrier(exc: BaseException, repository: str, run_id: Any) -> RunFact | None:
+    """The notes a refused run carried, as a carrier for this poll's read set -- or None.
+
+    Two cases answer "nothing to carry": a `MalformedSource` raised by a read that never got as far as
+    `parse_run` (it names no gaps), and a row this poll could not attribute to a positive run id -- a
+    note with nothing to attribute it to is not knowledge a later tick can act on. Either way the refusal
+    row is written and the walk continues; this is only about what the closure rule is allowed to forget.
+    """
+    notes = tuple(getattr(exc, 'coverage', ()) or ())
+    if not notes:
+        return None
+    try:
+        return coverage_only_fact(repository, run_id, notes)
+    except CiFailureError:
+        return None
 
 
 def _integer(environ: Mapping[str, str], name: str, default: int, *, low: int, high: int) -> int:
