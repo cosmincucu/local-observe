@@ -28,6 +28,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import datetime as dt
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -41,8 +42,9 @@ from .transports import CiFailureError
 log = get_logger(__name__)
 
 __all__ = ['CiFailureStore', 'Delivery', 'DeliveryBlocked', 'FAILING_OUTCOMES', 'HeartbeatVerdict',
-           'StoreError', 'WindowStats', 'DEFAULT_RETENTION_DAYS', 'DEFAULT_WINDOW_DAYS',
-           'DELIVERY_STATES', 'STATE_ADOPTED', 'STATE_DELIVERED', 'STATE_PENDING', 'STATE_SUPERSEDED']
+           'PendingWrite', 'StoreError', 'WindowStats', 'DEFAULT_RETENTION_DAYS',
+           'DEFAULT_WINDOW_DAYS', 'DELIVERY_STATES', 'KEY_MARKER_PREFIX', 'STATE_ADOPTED',
+           'STATE_DELIVERED', 'STATE_PENDING', 'STATE_SUPERSEDED']
 
 SCHEMA_VERSION = 1
 MAX_REASON_CHARS = 300
@@ -66,6 +68,116 @@ DELIVERY_STATES = (STATE_PENDING, STATE_DELIVERED, STATE_ADOPTED, STATE_SUPERSED
 #: which occurrence rows exist and `pipeline` decides which facts to hand it -- two copies of that
 #: list is how a card silently stops counting one class of failure.
 FAILING_OUTCOMES = ('failure', 'cancelled', 'timed_out', 'action_required', 'stuck')
+
+#: The `meta` key prefix naming one incident key's marker row, and the character class that key must
+#: stay inside -- `platform/state.label`'s own. A key that left the class could not have come from
+#: `facts.incident_key`, and a marker written under a key the platform could never be told about would
+#: be a claim about an incident that cannot exist, so `record_incident_keys` refuses it outright.
+KEY_MARKER_PREFIX = 'incident-key:'
+_KEY_UNSAFE = re.compile(r'[^a-zA-Z0-9_.:-]')
+
+#: How many verdicts may wait for a platform at once. The bound is on *conditions*, not on runs: a
+#: refused send is kept as one row per `(subject, rule id)`, so a workflow that stays red across a long
+#: outage waits in one row and not in one row per build. At the bound the oldest rows are dropped rather
+#: than the newest, because the newest is the one a green run can still act on.
+PENDING_VERDICTS_BOUND = 200
+
+#: How many times one owed verdict may be offered before this source gives up on it. The bound is what
+#: stops a row that the platform will always refuse -- an event whose window ends in the future is
+#: refused by `platform/state.validate_event` on every retry, and a producer whose clock is skewed
+#: produces exactly that shape forever -- from holding this poller's exit code at "the platform refused"
+#: for as long as the state file lives. Twelve offers is a full hour of a five-minute timer. An *offer*
+#: is a poll that had a platform to answer it: `pipeline._admit` writes the row uncounted while nothing is
+#: wired, because `not-configured` is not a refusal and a deployment following the documented ramp-up
+#: order (no board, no platform, then the platform) must not abandon the breaks it decided while it waited.
+#: The evidence-lifetime ceiling below is what bounds an unwired wait instead.
+PENDING_MAX_ATTEMPTS = 12
+
+#: The reason a row the table bound dropped gives up with. It is one fixed sentence because there is only
+#: one thing that can be true of such a row: the table is full, and this is the row that came off it. The
+#: eviction order (oldest `decided_at` first, key name to break a tie) is stated on `PENDING_VERDICTS_BOUND`.
+PENDING_BOUND_REASON = f'the pending-verdicts table holds at most {PENDING_VERDICTS_BOUND} rows'
+
+#: How long owed evidence may wait, in the lifetime the events themselves claim. `detections.event`
+#: stamps every reference it builds with `expires_at` = window end + 15 days, so an event older than that
+#: is a claim the platform would answer by looking at evidence it has already expired: re-offering it is
+#: worse than saying it was never delivered, because it pages about a window nobody can check any more.
+PENDING_EVIDENCE_LIFETIME_DAYS = 15
+
+
+def _marker(value: Any) -> dict[str, dict[str, int]]:
+    """Decode one marker row into `{rule id: {'open': run, 'closed': run}}`, refusing the unreadable.
+
+    A row that is not JSON, not an object, or holds something that is not a count comes back empty --
+    which reads as "nothing is known to be open", the quiet direction that costs a closure and never
+    fabricates one. The `at` stamp is this store's own and is not a rule, so it is skipped by name.
+    """
+    try:
+        document = json.loads(value) if isinstance(value, str) else None
+    except ValueError:
+        return {}
+    if not isinstance(document, Mapping):
+        return {}
+    decoded: dict[str, dict[str, int]] = {}
+    for rule, rung in document.items():
+        if rule == 'at' or not isinstance(rung, Mapping):
+            continue
+        try:
+            decoded[str(rule)] = {'open': max(0, int(rung.get('open') or 0)),
+                                  'closed': max(0, int(rung.get('closed') or 0))}
+        except (TypeError, ValueError):
+            continue
+    return decoded
+
+
+def _field(carrier: Any, name: str) -> Any:
+    """Read one field off a transition object or its dict form, so a caller may hand over either."""
+    if isinstance(carrier, Mapping):
+        return carrier.get(name)
+    return getattr(carrier, name, None)
+
+
+def _evidence_deadline(event: Any, lifetime_days: int) -> dt.datetime | None:
+    """When the evidence one owed event cites stops being readable, as that event itself claims.
+
+    The ``expires_at`` stamps are the event's own (``detections.event`` derives them from the window end),
+    so a row written by a build that used a different lifetime is judged by the lifetime it asserts -- and
+    the newest reference in the event is the one that still counts as readable. An event naming no
+    ``expires_at`` falls back to its window end plus ``lifetime_days``; an event whose times cannot be
+    read at all answers ``None``, which means "not expired", because the attempts ceiling is the honest
+    way to retire a row this store cannot interpret. Dropping a page because a date field did not parse
+    would be the store destroying the one thing it promised to keep.
+    """
+    if not isinstance(event, Mapping):
+        return None
+    stamps: list[dt.datetime] = []
+    for reference in event.get('evidence') or ():
+        if isinstance(reference, Mapping) and isinstance(reference.get('expires_at'), str):
+            try:
+                stamps.append(timestamp(reference['expires_at']))
+            except ValueError:
+                continue
+    if stamps:
+        return max(stamps)
+    window = event.get('window')
+    if isinstance(window, Mapping) and isinstance(window.get('end'), str):
+        try:
+            return timestamp(window['end']) + dt.timedelta(days=int(lifetime_days))
+        except ValueError:
+            return None
+    return None
+
+
+def _why_unreachable(row: Mapping[str, Any], *, now: dt.datetime, max_attempts: int,
+                     lifetime_days: int) -> str | None:
+    """Why one owed verdict can no longer be offered usefully, or None when it still should be."""
+    attempts = int(row.get('attempts') or 0)
+    if attempts >= int(max_attempts):
+        return f'offered {attempts} times and never taken'
+    deadline = _evidence_deadline(row.get('event'), lifetime_days)
+    if deadline is not None and now > deadline:
+        return 'the evidence it cites is older than the lifetime that event claims'
+    return None
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -97,6 +209,10 @@ CREATE TABLE IF NOT EXISTS heartbeat (key TEXT PRIMARY KEY, last_success_at TEXT
 CREATE TABLE IF NOT EXISTS lapses (id TEXT PRIMARY KEY, started_at TEXT NOT NULL,
     ended_at TEXT NOT NULL, gap_seconds REAL NOT NULL, source TEXT NOT NULL,
     judged_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS verdicts_pending (key TEXT NOT NULL, rule_id TEXT NOT NULL,
+    event TEXT NOT NULL, open_run INTEGER, closed_run INTEGER, reason TEXT NOT NULL,
+    decided_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (key, rule_id));
 CREATE INDEX IF NOT EXISTS occurrences_time ON occurrences(observed_at);
 CREATE INDEX IF NOT EXISTS deliveries_state ON deliveries(state, created_at);
 CREATE INDEX IF NOT EXISTS coverage_time ON coverage(observed_at);
@@ -201,6 +317,26 @@ class Delivery:
         return {'id': self.id, 'fingerprint': self.fingerprint, 'action': self.action,
                 'state': self.state, 'attempts': self.attempts, 'issue_number': self.issue_number,
                 'run_ids': list(self.run_ids), 'reason': self.reason, 'blocked': self.blocked}
+
+
+class PendingWrite:
+    """What one owed-verdict write did: how many rows it kept, and which the bound threw away.
+
+    `written` counts the rows the call handed over. `evicted` names the rows that were on the table and
+    are no longer, because `PENDING_VERDICTS_BOUND` caps the table and the oldest go first. Those rows are
+    *returned* rather than quietly deleted for the same reason `expire_pending_verdicts` returns its own: an
+    evicted row is a page this source will not send, and the one number an operator is told to read --
+    `pending_verdicts` -- sits pinned at the bound while they leave, so the count alone cannot tell
+    "200 verdicts wait" from "200 of 261 verdicts were decided". Each entry is `abandoned[]`-shaped
+    (`key`, `rule_id`, `reason`, `attempts`, `decided_at`, `event_status`) so the caller can put it in the
+    tick report beside the rows the two ceilings retired.
+    """
+
+    __slots__ = ('written', 'evicted')
+
+    def __init__(self, written: int = 0, evicted: Sequence[Mapping[str, Any]] = ()) -> None:
+        self.written = int(written)
+        self.evicted = tuple(dict(row) for row in evicted)
 
 
 class CiFailureStore:
@@ -400,6 +536,251 @@ class CiFailureStore:
     def recorded_runs(self, repository: str) -> set[int]:
         rows = self.connection.execute('SELECT run_id FROM runs WHERE repository=?', (repository,)).fetchall()
         return {int(row['run_id']) for row in rows}
+
+    # ---- incident-key markers -----------------------------------------------
+
+    def incident_key_states(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Which verdicts the platform took from this source, and at which run.
+
+        The marker answers one question and nothing else: *did this source offer a firing verdict for this
+        subject that no newer green run has closed, and did the platform take it?* `{'open': run}` is the
+        newest run id filed `firing` under that rule, `{'closed': run}` the newest resolved. Only
+        `record_incident_keys` writes it, and only from an admitted receipt, so a row is a copy of an
+        answer the platform gave rather than a note about an intention. It is still a marker and not the
+        platform's state: an operator who closed the incident by hand leaves this row behind, and the
+        next green run then sends a `resolved` that `Store.intake` answers as a harmless no-op (no
+        incident, no transition, no delivery). Nothing here reads the platform back.
+
+        The rows live in `meta` under one prefix, so no schema version moved for them: there are as many
+        as this repository has workflow files times planes, and `prune` never touches them for the same
+        reason `filings` survive -- deleting the answer to "did I already close this?" is how a restart
+        re-closes it.
+
+        One subject is reserved and is not an incident key: `adapter.COVERAGE_SUBJECT`
+        (`ci.intake.coverage`) carries this source's open *gap* reasons, keyed by their rule id, with
+        `open` holding the newest run that carried the gap. A gap belongs to the poller and not to a
+        workflow, so it has no workflow to be keyed by -- and it is the reason a coverage condition can be
+        closed at all, since the poll that reads the runs back is never the poll that saw the gap.
+        """
+        rows = self.connection.execute("SELECT key, value FROM meta WHERE key LIKE ?",
+                                       (KEY_MARKER_PREFIX + '%',)).fetchall()
+        states: dict[str, dict[str, dict[str, int]]] = {}
+        for row in rows:
+            decoded = _marker(row['value'])
+            if decoded:
+                states[row['key'][len(KEY_MARKER_PREFIX):]] = decoded
+        return states
+
+    def incident_key_state(self, key: str) -> dict[str, dict[str, int]]:
+        """One key's marker, or `{}` when nothing has ever been filed under it."""
+        row = self.connection.execute('SELECT value FROM meta WHERE key=?',
+                                      (KEY_MARKER_PREFIX + str(key),)).fetchone()
+        return _marker(row['value']) if row is not None else {}
+
+    def record_incident_keys(self, transitions: Sequence[Any], *, now: dt.datetime,
+                            drop: Sequence[tuple[str, str]] = ()) -> int:
+        """Apply the marker moves a poll's *receipts* justified, and retire the rows they answered for.
+
+        One commit, deliberately: the markers and the owed rows are two views of the same answer, and a
+        poll that claimed one and lost the other has neither. Claiming a marker without retiring the owed
+        row re-offers a verdict the platform already took; retiring the row without claiming the marker
+        loses the closure the green run depends on, because the closure rule reads `open` and finds
+        nothing open to close. The row is dropped *after* the send for the same reason the marker is
+        written after it: a failure anywhere between the send and this call leaves the verdict owed, and
+        the replay converges (the platform answers `duplicate` for identical bytes, which is an answer).
+
+        Called after the send, with only the transitions whose event came back admitted
+        (`adapter.claim_transitions`). It used to be called before, at the moment the event was offered,
+        and that made an incident losable: a marker written for a verdict the platform never took says
+        "this is open" to a platform that has never heard of it, so a later green run sends a `resolved`
+        for a condition that does not exist, and the failure itself is behind the cursor and will never
+        be offered again. A marker is now only ever a copy of an answer the platform gave.
+
+        A marker never moves backwards except to zero, which is what a closure means. A replayed old
+        verdict (the pending table) may arrive after a newer one was admitted, and `open` may not then be
+        set to the older run id: the closure rule compares a green run against `open`, and a marker
+        dragged back to 800 would let a run 850 close an incident opened at 900. The one writer that may
+        lower `open` is the closure itself, which says so by handing over `open_run=0`; a caller that
+        names both halves (`open_run=800, closed_run=900`) is firing and closing at once, and the
+        `open`-half of that claim must still obey the rule.
+        """
+        written = 0
+        with self.transaction() as connection:
+            for transition in transitions:
+                key = str(_field(transition, 'key') or '')
+                rule_id = str(_field(transition, 'rule_id') or '')
+                if not key or not rule_id or _KEY_UNSAFE.search(key):
+                    raise StoreError('An incident-key marker needs the key and rule it belongs to')
+                path = KEY_MARKER_PREFIX + key
+                row = connection.execute('SELECT value FROM meta WHERE key=?', (path,)).fetchone()
+                marker = _marker(row['value']) if row is not None else {}
+                rung = dict(marker.get(rule_id) or {})
+                open_run = _field(transition, 'open_run')
+                closed_run = _field(transition, 'closed_run')
+                if open_run is not None:
+                    opened = max(0, int(open_run))
+                    rung['open'] = opened if opened == 0 else max(int(rung.get('open') or 0), opened)
+                if closed_run is not None:
+                    rung['closed'] = max(int(rung.get('closed') or 0), max(0, int(closed_run)))
+                rung.setdefault('open', 0)
+                rung.setdefault('closed', 0)
+                marker[rule_id] = rung
+                connection.execute('INSERT INTO meta(key, value) VALUES(?,?) ON CONFLICT(key)'
+                                   ' DO UPDATE SET value=excluded.value',
+                                   (path, canonical({**marker, 'at': utc_text(now)})))
+                written += 1
+            for key, rule_id in drop:
+                connection.execute('DELETE FROM verdicts_pending WHERE key=? AND rule_id=?',
+                                   (str(key), str(rule_id)))
+        return written
+
+    # ---- verdicts the platform never took --------------------------------------------
+
+    def pending_verdicts(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Every verdict this source decided that no receipt admitted, as `{subject: {rule: row}}`.
+
+        The row is `{'event': the canonical event, 'open_run', 'closed_run', 'reason', 'at',
+        'attempts'}`. It exists because the *fact* behind a verdict is gone by the next tick -- the
+        cursor has moved past the run and `record_facts` will not return it as new again -- so a verdict
+        that was never offered or never admitted cannot be rebuilt from the run and must be kept as the
+        event itself. It is bounded by `PENDING_VERDICTS_BOUND` and it is the only table here that
+        survives `prune` for a reason other than being a marker: dropping it is how an outage silently
+        loses the page that was owed.
+
+        An unreadable row is skipped, not fatal: a verdict that cannot be re-offered is a verdict this
+        source cannot honour, and the honest answer to that is to keep the rest working and say nothing
+        was known (`reason` says where it came from).
+        """
+        pending: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in self.connection.execute('SELECT key, rule_id, event, open_run, closed_run, reason,'
+                                           ' decided_at, attempts FROM verdicts_pending'
+                                           ' ORDER BY decided_at, key, rule_id').fetchall():
+            try:
+                event = json.loads(row['event'])
+            except ValueError:
+                continue
+            if not isinstance(event, Mapping):
+                continue
+            pending.setdefault(str(row['key']), {})[str(row['rule_id'])] = {
+                'event': dict(event),
+                'open_run': None if row['open_run'] is None else int(row['open_run']),
+                'closed_run': None if row['closed_run'] is None else int(row['closed_run']),
+                'reason': str(row['reason']), 'at': str(row['decided_at']),
+                'attempts': int(row['attempts'] or 1)}
+        return pending
+
+    def record_pending_verdicts(self, rows: Sequence[Mapping[str, Any]], *, now: dt.datetime,
+                                counted: bool = True) -> PendingWrite:
+        """Keep the verdicts no receipt admitted. One row per `(subject, rule id)`, oldest stamp kept.
+
+        Re-offering a stored event has to send *the same bytes*: `Store.intake` answers a retry whose
+        contents changed with `Event retry changed contents`, so the event is written as `canonical`
+        JSON and read back unchanged. `decided_at` stays the first poll that decided the verdict -- that
+        is the instant the event's window claims, and a row that has waited three days should look like
+        one that has waited three days when somebody reads it back.
+
+        `counted` separates the two moments one poll touches a row. The write that happens *before* the
+        send is the offer, and it is what `attempts` counts; the write that happens after it, which only
+        restates the row with the answer the platform actually gave, must not count as a second offer to
+        a platform that was never asked twice. Pass `counted=False` for the restatement -- and for the
+        whole row while no platform is wired, because a counter that ticks on polls nobody could answer
+        retires a deliverable backlog as "offered twelve times and never taken".
+
+        The answer is a `PendingWrite` and not a count: the eviction the table bound performs happens in
+        this transaction, on rows this call never handed over, and nothing else can say which verdicts left.
+        """
+        written = 0
+        evicted: list[dict[str, Any]] = []
+        with self.transaction() as connection:
+            for row in rows:
+                key = str(_field(row, 'key') or '')
+                rule_id = str(_field(row, 'rule_id') or '')
+                event = _field(row, 'event')
+                if not key or not rule_id or _KEY_UNSAFE.search(key) or not isinstance(event, Mapping):
+                    raise StoreError('A pending verdict needs its subject, rule and event')
+                connection.execute(
+                    'INSERT INTO verdicts_pending(key, rule_id, event, open_run, closed_run, reason,'
+                    ' decided_at, attempts) VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(key, rule_id) DO UPDATE'
+                    ' SET event=excluded.event, open_run=excluded.open_run,'
+                    ' closed_run=excluded.closed_run, reason=excluded.reason,'
+                    + (' attempts=verdicts_pending.attempts + 1' if counted is True
+                       else ' attempts=verdicts_pending.attempts'),
+                    (key, rule_id, canonical(dict(event)), _field(row, 'open_run'),
+                     _field(row, 'closed_run'), str(_field(row, 'reason') or '')[:MAX_REASON_CHARS],
+                     utc_text(now)))
+                written += 1
+            overflow = connection.execute('SELECT key, rule_id, event, attempts, decided_at FROM'
+                                          ' verdicts_pending ORDER BY decided_at DESC, key, rule_id'
+                                          ' LIMIT -1 OFFSET ?', (PENDING_VERDICTS_BOUND,)).fetchall()
+            for row in overflow:
+                connection.execute('DELETE FROM verdicts_pending WHERE key=? AND rule_id=?',
+                                   (row['key'], row['rule_id']))
+                try:
+                    status = str(json.loads(row['event']).get('status') or '')
+                except (ValueError, TypeError, AttributeError):
+                    status = ''
+                evicted.append({'key': str(row['key']), 'rule_id': str(row['rule_id']),
+                                'reason': PENDING_BOUND_REASON,
+                                'attempts': int(row['attempts'] or 1),
+                                'decided_at': str(row['decided_at'] or ''),
+                                'event_status': status})
+        return PendingWrite(written=written, evicted=tuple(evicted))
+
+    def drop_pending_verdicts(self, pairs: Sequence[tuple[str, str]]) -> int:
+        """Forget the verdicts something else has now said, or that the platform finally took."""
+        dropped = 0
+        with self.transaction() as connection:
+            for key, rule_id in pairs:
+                dropped += connection.execute('DELETE FROM verdicts_pending WHERE key=? AND rule_id=?',
+                                              (str(key), str(rule_id))).rowcount
+        return dropped
+
+    def expire_pending_verdicts(self, *, now: dt.datetime, max_attempts: int = PENDING_MAX_ATTEMPTS,
+                                lifetime_days: int = PENDING_EVIDENCE_LIFETIME_DAYS
+                                ) -> list[dict[str, Any]]:
+        """Retire the owed verdicts that can no longer be offered usefully, and return which they were.
+
+        Two ceilings, and both are about a row that will never converge:
+
+        * ``max_attempts`` -- an event the platform refuses on a rule (a window ending in the future from
+          a skewed clock, a resource it cannot resolve) is refused identically on every retry, so a row
+          offered this many times has been *proved* unwanted rather than merely delayed. Leaving it in
+          place holds every later tick's exit code at "the platform refused something", including the
+          ticks where nothing else went wrong, which is how one unsendable event becomes a permanent
+          alarm about a pipeline that is working.
+        * ``lifetime_days`` -- the evidence an owed event cites carries its own ``expires_at``
+          (``platform/detections.event`` stamps ``window end + 15 days``). Past that instant the platform
+          would be paging about a window whose proof it has already discarded, and re-offering the event
+          is worse than reporting that it was never delivered.
+
+        A row retired here is a page this source will not offer again, which is why it is *returned* and not
+        quietly deleted: the caller puts it in the tick report, where a human reads it, and annotates it with
+        whether this same poll is saying the condition anyway (`reoffered`, which the planner can answer and
+        this store cannot -- a gap this poller is still reading is filed afresh on the tick its owed row is
+        retired, and the report must not claim the page is gone while offering it). Nothing files a coverage
+        note about it instead, because these events describe a platform this source cannot reach and
+        coverage of that belongs in this source's report, not in a page.
+
+        The bounds are arguments so a caller can see them; the defaults are the policy, and
+        ``tests/test_ci_failures.py`` reads them off this module rather than repeating numbers.
+        """
+        given_up: list[dict[str, Any]] = []
+        for subject, rules in sorted(self.pending_verdicts().items()):
+            for rule_id, row in sorted(rules.items()):
+                why = _why_unreachable(row, now=now, max_attempts=max_attempts,
+                                       lifetime_days=lifetime_days)
+                if why is None:
+                    continue
+                given_up.append({'key': subject, 'rule_id': rule_id, 'reason': why,
+                                 'attempts': int(row['attempts']), 'decided_at': str(row['at']),
+                                 'event_status': str(row['event'].get('status') or '')})
+        if given_up:
+            self.drop_pending_verdicts([(str(item['key']), str(item['rule_id'])) for item in given_up])
+        return given_up
+
+    def pending_verdict_count(self) -> int:
+        """How many verdicts are still waiting, for a report that has to say so out loud."""
+        return int(self.connection.execute('SELECT COUNT(*) FROM verdicts_pending').fetchone()[0])
 
     def refusal(self, repository: str, reason: str, detail: str, *, run_id: int | None = None,
                 now: dt.datetime | None = None) -> None:
@@ -759,7 +1140,9 @@ class CiFailureStore:
 
         `deliveries` and `filings` are excluded on purpose: they are the answer to "have I already
         filed this?", and a retention job that deletes the answer turns tomorrow's restart into a
-        duplicate card. What gets pruned is history nobody re-reads: old facts, their occurrences, and
+        duplicate card. `verdicts_pending` is excluded for the same kind of reason: it is the promise
+        that a verdict the platform never took is still owed, and dropping it cancels a page nobody
+        declined. What gets pruned is history nobody re-reads: old facts, their occurrences, and
         coverage that has since been overtaken.
         """
         floor = utc_text(now - dt.timedelta(days=self.retention_days))
@@ -778,7 +1161,7 @@ class CiFailureStore:
         """One report-shaped dict: cursor, counts, heartbeat verdict, newest coverage and refusals."""
         counts = {table: int(self.connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0])
                   for table in ('runs', 'occurrences', 'deliveries', 'filings', 'coverage', 'refusals',
-                                'lapses')}
+                                'lapses', 'verdicts_pending')}
         pending = self.pending_deliveries()
         return {'schema_version': SCHEMA_VERSION, 'cursor': self.cursor(),
                 'counts': counts, 'heartbeat': self.check_heartbeat(now=now,

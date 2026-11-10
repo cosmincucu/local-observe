@@ -27,6 +27,12 @@ class ResultTooLarge(TransportError):
 
 _HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.0-9A-Za-z^_`|~]{1,64}")
 
+#: How much of an error answer `JsonClient` will look at, for a caller that asked for it
+#: (`error_body=True`). A refusal from a JSON API is one short object; anything bigger is a page, and a
+#: page is not an answer this client can put in front of an operator. Read before the bound is applied,
+#: so an endpoint that streams an unbounded error body cannot make this read unbounded either.
+MAX_ERROR_BODY_BYTES = 8192
+
 
 class ResponseHeader:
     """Per-attempt slot for exactly one named response header; no other header can land in it.
@@ -76,10 +82,20 @@ class JsonClient:
     answers a successful post with the plain text ``ok``; without this option the parse failure arrives
     as `TransportError`, which would tell the operator the endpoint was unreachable when it answered
     perfectly well. It is honoured for a 2xx only: an error status keeps the one answer it always had.
+
+    `error_body` is the other half of the same question, and it is opt-in for a reason. An error status
+    used to answer ``(code, None)`` here whatever the endpoint said, which is fine for a caller that only
+    asks "did it work?" and wasteful for one that has to say *what* was refused: the JSON APIs in this
+    repository answer a refusal with a small object carrying a stable code (`platform/api.py` writes
+    ``{"error": "run_reference_unknown", "detail": "..."}``), and a caller that cannot see the code can
+    report nothing better than "status 400". Turning it on returns that object -- bounded to
+    `MAX_ERROR_BODY_BYTES`, parsed as JSON or not at all, and never logged -- and it is off by default so
+    every existing caller keeps the answer it was written against. A caller that reads an error body has
+    to be able to say what it does with it: the code travels, the prose does not.
     """
 
     def __init__(self, base, token, *, scheme='Bearer', allow_http=False, timeout=10, ca_file=None,
-                 accept_non_json=False, max_timeout=20):
+                 accept_non_json=False, max_timeout=20, error_body=False):
         parsed = urllib.parse.urlsplit(base)
         if (parsed.scheme not in (('https', 'http') if allow_http else ('https',))
                 or not parsed.hostname or parsed.username or parsed.password or parsed.query
@@ -90,6 +106,8 @@ class JsonClient:
             raise TransportError('A separate bounded credential is required')
         if accept_non_json not in (False, True):
             raise TransportError('accept_non_json must be a boolean')
+        if not isinstance(error_body, bool):
+            raise TransportError('error_body must be a boolean')
         if type(max_timeout) is not int or not 1 <= max_timeout <= 120:
             raise TransportError('Invalid HTTP timeout ceiling')
         if type(timeout) is not int or not 1 <= timeout <= max_timeout:
@@ -97,6 +115,7 @@ class JsonClient:
         self.base, self.token, self.scheme, self.timeout = base.rstrip('/'), token, scheme, timeout
         self.max_timeout = max_timeout
         self.accept_non_json = accept_non_json is True
+        self.error_body = error_body is True
         handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
         if ca_file is not None:
             if parsed.scheme != 'https':
@@ -157,10 +176,32 @@ class JsonClient:
                     raise
                 return status, None
         except urllib.error.HTTPError as exc:
+            body = self._error_body(exc) if self.error_body else None
             exc.close()
             log.debug('HTTP endpoint returned an error status', extra={'method': method, 'path': path.split('?', 1)[0],
                                                                       'status_code': exc.code})
-            return exc.code, None
+            return exc.code, body
         except (OSError, ValueError) as exc:
             raise _refused(method, path, TransportError('Endpoint unavailable or invalid JSON response'),
                            exc) from exc
+
+    def _error_body(self, exc: urllib.error.HTTPError) -> Any:
+        """What an error status answered, when its owner asked for it: bounded, JSON or nothing.
+
+        Read *before* the close, because a closed response has no body to hand over. The bound is far
+        below the 4 MiB a 2xx may use: this body exists to carry one short object, and an endpoint that
+        answers a refusal with a page of HTML is answered with `None` rather than with a large object
+        that then travels into a report, a log line or a state file. Nothing here logs any of it -- the
+        `detail` field of such a body is a rendered exception message, and dropping prose that must not
+        travel is the caller's job (`ci_failures/platform_client._error_code` is that caller).
+        """
+        try:
+            raw = exc.read(MAX_ERROR_BODY_BYTES + 1)
+        except (OSError, ValueError, http.client.HTTPException):
+            return None
+        if not raw or len(raw) > MAX_ERROR_BODY_BYTES:
+            return None
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return None

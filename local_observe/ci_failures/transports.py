@@ -1,9 +1,12 @@
-"""The two scoped HTTP seams: a GET-only Actions reader and a separately scoped board writer.
+"""The scoped HTTP seams: a GET-only Actions reader, a separately scoped board writer, the job-log reader.
 
-Nothing in this module opens a socket. Both clients talk to an injected *transport* whose shape
-matches `local_observe.http.JsonClient.request`, so the unit tier runs the real construction path
-(the service builder in `pipeline.py` builds these exact objects) against a recording fake, and the
-live acceptance run swaps in `HttpJsonTransport` with no other change.
+Nothing in this module opens a socket *at import time or by accident*: `ActionsSource` and `BoardClient`
+talk to an injected *transport* whose shape matches `local_observe.http.JsonClient.request`, so the unit
+tier runs the real construction path (the service builder in `pipeline.py` builds these exact objects)
+against a recording fake, and the live acceptance run swaps in `HttpJsonTransport` with no other change.
+`JobLogClient` is the one object here that holds its own connection -- the Actions log endpoint answers
+`text/plain`, which no JSON transport can carry -- and it takes an `opener` for exactly the same reason:
+injected in the tests, no connection exists anywhere in the unit tier.
 
 Why two clients and not one client with a wider allowlist: the Actions read is the credential this
 pipeline uses every few seconds, and it is the one a bug or an attacker reaches first. If that
@@ -42,10 +45,11 @@ from local_observe.log import get_logger
 
 log = get_logger(__name__)
 
-__all__ = ['ActionsSource', 'BoardClient', 'CiFailureError', 'HttpJsonTransport', 'JsonTransport',
-           'LIMIT_PARAMETER', 'LogRead', 'MAX_ISSUE_BODY_CHARS', 'MAX_JOBS_PAGES', 'MAX_JOBS_PER_RUN',
-           'MAX_LOG_CHARS', 'MAX_PAGES', 'MAX_TITLE_CHARS', 'MalformedSource', 'PER_PAGE_MAX',
-           'PaginationBudget', 'ScopeRefused', 'SourceUnavailable', 'repository_identity']
+__all__ = ['ActionsSource', 'BoardClient', 'CiFailureError', 'HttpJsonTransport', 'JobLogClient',
+           'JsonTransport', 'LIMIT_PARAMETER', 'LogRead', 'MAX_ISSUE_BODY_CHARS', 'MAX_JOBS_PAGES',
+           'MAX_JOBS_PER_RUN', 'MAX_LOG_CHARS', 'MAX_LOG_RESPONSE_BYTES', 'MAX_PAGES', 'MAX_TITLE_CHARS',
+           'MalformedSource', 'NO_RESPONSE_STATUS', 'PER_PAGE_MAX', 'PaginationBudget', 'ScopeRefused',
+           'SourceUnavailable', 'repository_identity']
 
 #: Page-walk bounds. `MAX_PAGES` x `PER_PAGE_MAX` = 1,000 rows per walk: two orders of magnitude above
 #: what one poll of one repository legitimately needs, and low enough that a source paging forever is
@@ -78,6 +82,18 @@ MAX_ISSUE_BODY_CHARS = 65536
 #: How much of a job log this package will hold. The tail is what carries the failing assertion, so
 #: the *end* is kept; anything beyond is a coverage note and a coarser card identity.
 MAX_LOG_CHARS = 4096
+
+#: How many bytes of one job log `JobLogClient` retains while it reads. It is a *retention* window, not
+#: a read ceiling: the reader walks the whole response and keeps the last `max_bytes` of it, so the
+#: tail -- the part the card hashes -- survives however long the log is, and a log longer than
+#: `MAX_LOG_CHARS` still arrives oversized and is reported `job-log-truncated` rather than presented as
+#: the whole build. The default is `http.JsonClient`'s own response ceiling for the same endpoint.
+MAX_LOG_RESPONSE_BYTES = 4 * 1024 * 1024
+
+#: The one synthetic status this package answers with, and the only one: `JobLogClient` returns it when
+#: the request produced no response at all, which is a different sentence from the status an endpoint
+#: answered. `ActionsSource.job_log` reads it as `job-log-unreachable`.
+NO_RESPONSE_STATUS = 0
 
 #: `owner` and `name` each: a leading alphanumeric, then alphanumerics, dot, dash or underscore, up to
 #: 64. A segment that is only dots is refused (that is `.`/`..`), and the client joins exactly these
@@ -133,6 +149,11 @@ class JsonTransport:
     `params` become the query string here rather than at the call site, so no caller can splice text
     into a URL by hand. Only `int` and short closed-class strings are admitted -- page numbers, page
     sizes and state words -- because those are the only query values either client ever needs.
+
+    A `TransportError` from the client is translated into `SourceUnavailable` and nothing else is: the
+    classes this package raises stay this package's vocabulary, and the two scopes keep their own
+    refusal paths. This is the one seam that knows a socket was involved, so it is the only honest place
+    to say "it did not complete".
     """
 
     _SCALAR = re.compile(r'^[A-Za-z0-9._,-]{1,32}$')
@@ -141,6 +162,12 @@ class JsonTransport:
         if not callable(getattr(client, 'request', None)):
             raise CiFailureError('Transport needs a JsonClient-shaped request method')
         self.client = client
+        # `http.TransportError` is what a `JsonClient` raises when the request did not complete. Captured
+        # here rather than imported at module scope for the reason every lazy import in this package has:
+        # the import graph at product start stays what it was, and an injected fake -- which has no such
+        # class -- is unaffected by the translation below.
+        from local_observe.http import TransportError
+        self._client_refused = TransportError
 
     def request(self, method: str, path: str, *, params: Mapping[str, Any] | None = None,
                 payload: Mapping[str, Any] | None = None) -> tuple[int, Any]:
@@ -154,7 +181,16 @@ class JsonTransport:
                 raise CiFailureError(f'Query parameter {name} carries an unapproved character')
             query.append(f'{name}={value}')
         full = path + ('?' + '&'.join(query) if query else '')
-        return self.client.request(method, full, payload=payload)
+        try:
+            return self.client.request(method, full, payload=payload)
+        except self._client_refused as exc:
+            # One class, one meaning: a request that did not complete is this package's
+            # `SourceUnavailable` -- coverage, cursor and pending work untouched -- and the readers only
+            # know how to act on *that*. Translating here is the whole point: a `ValueError` travelling
+            # any further reaches the CLI, which promised the operator an "unavailable" exit and no
+            # traceback for a network that is merely down. The message is dropped on purpose (a lower
+            # layer's text can name the endpoint); method, path and the class are the useful part.
+            raise SourceUnavailable(f'{method} {path} failed: {type(exc).__name__}') from None
 
 
 #: The same class under the name a reader of `pipeline.build_service` looks for: it constructs the
@@ -273,7 +309,7 @@ class ActionsSource:
                 params: Mapping[str, Any] | None = None) -> tuple[int, Any]:
         """One guarded GET, exposed so a caller (or an acceptance check) can prove the scope.
 
-        This is the seam the review asked to be tested: the object that serves `/actions/runs` must
+        This is the seam an acceptance check reads: the object that serves `/actions/runs` must
         refuse `POST /repos/{repo}/issues` as read-only, and refuse it without the transport ever being
         called. Anything other than `GET`, or any path outside the four allowlisted shapes, is
         `ScopeRefused` -- not a fallback, not a warning line in a log.
@@ -367,7 +403,10 @@ class ActionsSource:
         The reader is injected because the endpoint answers `text/plain` where every other call here
         answers JSON: a deployment that has not wired one gets `coverage='job-logs-not-wired'` and a
         coarser card identity, which is the honest reading of "I do not know what the failing step
-        said".
+        said". `JobLogClient` is the reader a real deployment uses, and `cli.py` wires it by default
+        (only `--read-only-logs` leaves it absent). `job_id` is always an id this client read from the
+        jobs endpoint -- never a number taken out of a container name, which is a runner's task id and
+        names a different object entirely.
         """
         path = (f'{self._root}/runs/{_positive_id(run_id, "run_id")}/jobs/'
                 f'{_positive_id(job_id, "job_id")}/logs')
@@ -375,6 +414,11 @@ class ActionsSource:
         if self.log_reader is None:
             return LogRead(None, 'job-logs-not-wired')
         status, text = self.log_reader(path)
+        if int(status) == NO_RESPONSE_STATUS:
+            # A different sentence from `job-log-status-N`: the endpoint never answered. Both are
+            # coverage, and the difference is what an operator reads when the forge is up and the log
+            # artefact is gone, versus when the forge is not reachable at all.
+            return LogRead(None, 'job-log-unreachable')
         if not 200 <= int(status) < 300:
             return LogRead(None, f'job-log-status-{int(status)}')
         if not isinstance(text, str) or not text.strip():
@@ -392,6 +436,99 @@ class ActionsSource:
         """
         self.runs(page=1, per_page=1)
         return True
+
+
+class JobLogClient:
+    """The default job-log reader: one bounded GET of an allowlisted log path, answered as text.
+
+    `ActionsSource` asks for a *reader* rather than a transport because this endpoint answers
+    `text/plain` where every other Actions call answers JSON -- `http.JsonClient` would read the log as
+    a JSON parse failure and call the endpoint unavailable. The rules are still that client's: an HTTPS
+    base carrying no embedded credential (plain `http` only when the caller said development-only), a
+    bounded token, no redirect ever (a redirect can carry the bearer to another host), no proxy, and one
+    retained window of bytes.
+
+    It returns `(status, text)` and raises nothing for a remote failure: `ActionsSource.job_log` turns
+    any answer into an excerpt or a coverage sentence, and a log this process could not read is a gap in
+    *this pipeline's* knowledge, not a reason to lose a tick. `NO_RESPONSE_STATUS` is the answer for "no
+    response at all". A `ScopeRefused` for a path outside the log shapes is a caller bug and stays loud.
+
+    `opener` is the offline seam (`platform/deadman.py` uses the same one); nothing else here holds a
+    socket, and the unit tier injects a fake and proves no connection is made.
+    """
+
+    #: The one path shape this reader may ask for -- the fourth Actions allowlist entry, restated here
+    #: because a reader handed a by-string path from a caller must not be able to fetch `/issues`.
+    _ALLOWED = re.compile(r'^/repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/actions/runs'
+                          r'/[0-9]{1,20}/jobs/[0-9]{1,20}/logs$')
+
+    def __init__(self, base: str, token: str, *, allow_http: bool = False, timeout: int = 10,
+                 max_bytes: int = MAX_LOG_RESPONSE_BYTES, opener: Any | None = None) -> None:
+        # Imported here rather than at module scope for the reason `pipeline._transport` gives: this
+        # package's import graph must not grow `http` (and with it `ssl`) at service start.
+        from local_observe.http import NoRedirect
+        import urllib.parse
+        import urllib.request
+
+        parsed = urllib.parse.urlsplit(base)
+        if (parsed.scheme not in (('https', 'http') if allow_http else ('https',))
+                or not parsed.hostname or parsed.username or parsed.password or parsed.query
+                or parsed.fragment):
+            raise CiFailureError('Job-log base must be HTTPS with no embedded credentials')
+        if not isinstance(token, str) or not 24 <= len(token) <= 4096 \
+                or '\r' in token or '\n' in token:
+            raise CiFailureError('Job-log reader needs a token of 24..4096 characters with no line '
+                                 'ending')
+        if isinstance(timeout, bool) or not 1 <= int(timeout) <= 60:
+            raise CiFailureError('Job-log timeout is out of range')
+        if isinstance(max_bytes, bool) or not MAX_LOG_CHARS * 2 <= int(max_bytes) \
+                <= 4 * 1024 * 1024:
+            raise CiFailureError('Job-log retention window is out of range')
+        self.base = base.rstrip('/')
+        self.token = token
+        self.timeout = int(timeout)
+        self.max_bytes = int(max_bytes)
+        self.opener = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect())
+
+    def __call__(self, path: str) -> tuple[int, str | None]:
+        """One bounded GET of one allowlisted log path.
+
+        Returns `(status, text)`: `text` is `None` unless the answer was 2xx and non-empty, and an
+        oversized log is returned as the *tail* of what it read -- the retention window, never the head.
+        The token is never logged, on any path, including the failure paths.
+        """
+        import urllib.error
+        import urllib.request
+
+        if not isinstance(path, str) or not self._ALLOWED.match(path):
+            raise ScopeRefused('Job-log path is outside the reader scope')
+        request = urllib.request.Request(self.base + path, method='GET',
+                                         headers={'Accept': 'text/plain, application/json',
+                                                  'Authorization': 'token ' + self.token})
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                status = int(response.status)
+                kept = bytearray()
+                while True:
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    kept.extend(chunk)
+                    if len(kept) > self.max_bytes:
+                        del kept[:len(kept) - self.max_bytes]
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            log.debug('Job log endpoint returned an error status', extra={'path': path,
+                                                                          'status_code': exc.code})
+            return int(exc.code), None
+        except (OSError, ValueError) as exc:
+            log.warning('Job log is unreadable', extra={'path': path,
+                                                        'error_class': type(exc).__name__})
+            return NO_RESPONSE_STATUS, None
+        if not 200 <= status < 300:
+            return status, None
+        return status, kept.decode('utf-8', errors='replace') or None
 
 
 class BoardClient:
